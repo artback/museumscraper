@@ -81,7 +81,7 @@ func (s *S3Service) StoreMuseumsFromChannel(ctx context.Context, bucketName stri
 // storeSingleMuseum is a helper function to store a single Museum object.
 // It will not overwrite a file if it already exists.
 func (s *S3Service) storeSingleMuseum(ctx context.Context, bucketName string, museum models.Museum) error {
-	objectKey := fmt.Sprintf("museums/%s/%s.json", sanitizeKey(museum.Country), sanitizeKey(museum.Name))
+	objectKey := fmt.Sprintf("raw_data/%s/%s.json", sanitizeKey(museum.Country), sanitizeKey(museum.Name))
 
 	// Check if the object already exists.
 	_, err := s.client.StatObject(ctx, bucketName, objectKey, minio.StatObjectOptions{})
@@ -121,7 +121,7 @@ func (s *S3Service) storeSingleMuseum(ctx context.Context, bucketName string, mu
 
 // GetMuseum retrieves a JSON object from S3 and unmarshals it into a Museum struct.
 func (s *S3Service) GetMuseum(ctx context.Context, bucketName string, country, name string) (*models.Museum, error) {
-	objectKey := fmt.Sprintf("museums/%s/%s.json", sanitizeKey(country), sanitizeKey(name))
+	objectKey := fmt.Sprintf("raw_data/%s/%s.json", sanitizeKey(country), sanitizeKey(name))
 
 	object, err := s.client.GetObject(ctx, bucketName, objectKey, minio.GetObjectOptions{})
 	if err != nil {
