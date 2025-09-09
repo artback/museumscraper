@@ -2,9 +2,10 @@
 
 This project crawls Wikipedia starting from the category "Category:Lists_of_museums_by_country", recursively visiting its subcategories and list pages to extract museum names. It streams each discovered museum into an S3-compatible object store (MinIO by default) as individual JSON files, organized by country.
 
+
 - Source: Wikipedia API (public, unauthenticated)
 - Storage: S3-compatible (tested with MinIO)
-- Language: Go 1.25
+- Language: Go 1.24
 
 ## What it does
 - Traverses Wikipedia category members recursively (categories and pages).
@@ -130,6 +131,7 @@ Note: Some tests may rely on embedded or large strings and may not exercise exte
 ## Notes
 - The country extraction is heuristic and based on page titles; results can contain anomalies. You can improve `geo.ExtractCountry` for better accuracy.
 - Object keys are sanitized by lowercasing and replacing spaces with dashes; special characters are preserved and may affect downstream tooling.
+
 
 ## License
 All rights reserved or as specified by the repository owner. Update this section if you choose a specific open-source license.
