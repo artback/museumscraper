@@ -12,7 +12,7 @@ This project crawls Wikipedia starting from the category "Category:Lists_of_muse
 - Parses simple wikitext list items (e.g., bullet points) and extracts wiki links as museum names.
 - Filters out blacklisted prefixes like "Tourism", "Culture", "History", "UNESCO" to avoid non-museum links.
 - Attempts to infer the country from page titles (e.g., "List of museums in France" → France).
-- Streams results and writes each museum as JSON to S3/MinIO under: `museums/{country}/{museum-name}.json`.
+- Streams results and writes each museum as JSON to S3/MinIO under: `raw_data/{country}/{museum-name}.json`.
 - Avoids re-writing an object if it already exists.
 
 ## Example output object (JSON)
@@ -22,10 +22,10 @@ This project crawls Wikipedia starting from the category "Category:Lists_of_muse
   "Name": "Musée d'Orsay"
 }
 ```
-Stored at a key like: `museums/france/musée-d'orsay.json` (lowercased with spaces replaced by dashes).
+Stored at a key like: `raw_data/france/musée-d'orsay.json` (lowercased with spaces replaced by dashes).
 
 ## Repository layout
-- `main.go` — Application entrypoint. Loads `.env`, kicks off Wikipedia processing and storage.
+- `cmd/parser/main.go` — Application entrypoint. Loads `.env`, kicks off Wikipedia processing and storage.
 - `wikipedia/` — Wikipedia API client, models, extractor, and processing logic.
 - `storage/` — S3/MinIO client and storage helpers.
 - `geo/` — Country extraction helpers.
@@ -70,14 +70,14 @@ Note: The app will create the bucket if it doesn’t exist.
 3) Run the scraper
 
 ```
-go run .
+go run ./cmd/parser
 ```
 
 You’ll see progress logs printed to the console. The process will traverse subcategories and list pages, extracting museums and writing objects into your MinIO bucket. You can browse objects in the MinIO console at http://localhost:9001.
 
 ## Configuration
 - Wikipedia user-agent: set in `wikipedia/api.go` (default `Golang_Spider_Bot/3.0`). If you fork for production use, please set a descriptive user-agent.
-- Museum extraction blacklist: configured in `main.go` when creating `NewMuseumExtractor([]string{"Tourism", "Culture", "History", "UNESCO"})`.
+- Museum extraction blacklist: configured in `cmd/parser/main.go` when creating `NewMuseumExtractor([]string{"Tourism", "Culture", "History", "UNESCO"})`.
 - MinIO/S3 endpoint and credentials: read from environment variables loaded by `.env` via `github.com/joho/godotenv`.
 
 Environment variables summary:
@@ -104,7 +104,7 @@ go build ./...
 - Run with live logs:
 
 ```
-go run .
+go run ./cmd/parser
 ```
 
 - Linting/formatting:
