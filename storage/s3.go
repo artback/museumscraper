@@ -18,6 +18,7 @@ import (
 // S3Service is a client for S3-compatible storage.
 type S3Service struct {
 	client *minio.Client
+	count  int
 }
 
 // NewS3Service initializes and returns a new S3 storage service.
@@ -41,7 +42,7 @@ func NewS3Service() (*S3Service, error) {
 	}
 
 	log.Println("Successfully connected to MinIO endpoint:", minioEndpoint)
-	return &S3Service{client: minioClient}, nil
+	return &S3Service{client: minioClient, count: 0}, nil
 }
 
 func (s *S3Service) CreateBucket(ctx context.Context, bucketName string, location string) (bool, error) {
@@ -68,6 +69,7 @@ func (s *S3Service) StoreMuseumsFromChannel(ctx context.Context, bucketName stri
 		go func(m models.Museum) {
 			defer wg.Done()
 			err := s.storeSingleMuseum(ctx, bucketName, m)
+			s.count++
 			if err != nil {
 				log.Printf("Error storing museum '%s': %v", m.Name, err)
 			}
@@ -75,7 +77,7 @@ func (s *S3Service) StoreMuseumsFromChannel(ctx context.Context, bucketName stri
 	}
 
 	wg.Wait()
-	log.Println("Finished storing all museums from the channel.")
+	log.Printf("Finished storing all museums from the channel. Count %d \n", s.count)
 }
 
 // storeSingleMuseum is a helper function to store a single Museum object.
@@ -119,28 +121,27 @@ func (s *S3Service) storeSingleMuseum(ctx context.Context, bucketName string, mu
 	return nil
 }
 
-// GetMuseum retrieves a JSON object from S3 and unmarshals it into a Museum struct.
-func (s *S3Service) GetMuseum(ctx context.Context, bucketName string, country, name string) (*models.Museum, error) {
-	objectKey := fmt.Sprintf("raw_data/%s/%s.json", sanitizeKey(country), sanitizeKey(name))
-
+func (s *S3Service) GetMuseumObject(ctx context.Context, bucketName string, objectKey string) (*models.Museum, error) {
 	object, err := s.client.GetObject(ctx, bucketName, objectKey, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get object from S3: %v", err)
 	}
 	defer object.Close()
 
-	buf := new(bytes.Buffer)
-	if _, err := buf.ReadFrom(object); err != nil {
-		return nil, fmt.Errorf("failed to read object data: %v", err)
-	}
-
+	// Use json.NewDecoder to stream the JSON directly from the reader.
 	var museum models.Museum
-	if err := json.Unmarshal(buf.Bytes(), &museum); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal JSON: %v", err)
+	if err := json.NewDecoder(object).Decode(&museum); err != nil {
+		return nil, fmt.Errorf("failed to decode JSON from stream: %v", err)
 	}
 
 	log.Printf("Successfully retrieved museum '%s' from bucket '%s' with key '%s'", museum.Name, bucketName, objectKey)
 	return &museum, nil
+}
+
+// GetMuseum retrieves a JSON object from S3 and unmarshals it into a Museum struct.
+func (s *S3Service) GetMuseum(ctx context.Context, bucketName string, country, name string) (*models.Museum, error) {
+	objectKey := fmt.Sprintf("raw_data/%s/%s.json", sanitizeKey(country), sanitizeKey(name))
+	return s.GetMuseumObject(ctx, bucketName, objectKey)
 }
 
 // sanitizeKey replaces non-alphanumeric characters with hyphens to create a valid object key.
