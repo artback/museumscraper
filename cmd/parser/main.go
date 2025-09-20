@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"github.com/joho/godotenv"
 	"log"
+	wikipedia2 "museum/pkg/wikipedia"
 	"museum/storage"
-	"museum/wikipedia"
 	"os"
 	"time"
 )
@@ -20,11 +20,11 @@ func main() {
 	ctx := context.Background()
 	start := time.Now() // record start time
 	fmt.Println("Starting to parse 'Category:Lists_of_museums_by_country' and its subcategories...")
-	client := wikipedia.NewWikipediaClient()
-	service := wikipedia.NewCategoryService(client)
-	extractor := wikipedia.NewMuseumExtractor([]string{"Tourism", "Culture", "History", "UNESCO"})
+	client := wikipedia2.NewWikipediaClient()
+	service := wikipedia2.NewCategoryService(client)
+	extractor := wikipedia2.NewMuseumExtractor([]string{"Tourism", "Culture", "History", "UNESCO"})
 
-	processor := wikipedia.NewCategoryProcessor(service, extractor)
+	processor := wikipedia2.NewCategoryProcessor(service, extractor)
 
 	s3Service, err := storage.NewS3Service()
 	if err != nil {
