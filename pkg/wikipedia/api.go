@@ -7,19 +7,19 @@ import (
 	"strings"
 )
 
-type WikipediaClient struct {
+type Client struct {
 	httpClient *http.Client
 	userAgent  string
 }
 
-func NewWikipediaClient() *WikipediaClient {
-	return &WikipediaClient{
+func NewClient() *Client {
+	return &Client{
 		httpClient: http.DefaultClient,
 		userAgent:  "Golang_Spider_Bot/3.0",
 	}
 }
 
-func (c *WikipediaClient) FetchCategoryMembers(categoryTitle string, cmContinue string) (*APIResponse, error) {
+func (c *Client) FetchCategoryMembers(categoryTitle string, cmContinue string) (*APIResponse, error) {
 	categoryTitle = strings.ReplaceAll(categoryTitle, " ", "_")
 	apiURL := fmt.Sprintf(
 		"https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=%s&format=json&cmlimit=500",
@@ -45,7 +45,7 @@ func (c *WikipediaClient) FetchCategoryMembers(categoryTitle string, cmContinue 
 	return &apiResp, nil
 }
 
-func (c *WikipediaClient) FetchPageContent(pageTitle string) (*PageAPIResponse, error) {
+func (c *Client) FetchPageContent(pageTitle string) (*PageAPIResponse, error) {
 	pageTitle = strings.ReplaceAll(pageTitle, " ", "_")
 	apiURL := fmt.Sprintf("https://en.wikipedia.org/w/api.php?action=query&prop=revisions&rvprop=content&titles=%s&format=json", pageTitle)
 

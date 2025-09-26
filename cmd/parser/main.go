@@ -20,7 +20,7 @@ func main() {
 	ctx := context.Background()
 	start := time.Now() // record start time
 	fmt.Println("Starting to parse 'Category:Lists_of_museums_by_country' and its subcategories...")
-	client := wikipedia2.NewWikipediaClient()
+	client := wikipedia2.NewClient()
 	service := wikipedia2.NewCategoryService(client)
 	extractor := wikipedia2.NewMuseumExtractor([]string{"Tourism", "Culture", "History", "UNESCO"})
 

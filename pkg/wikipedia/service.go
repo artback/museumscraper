@@ -3,10 +3,10 @@ package wikipedia
 import "fmt"
 
 type CategoryService struct {
-	client *WikipediaClient
+	client *Client
 }
 
-func NewCategoryService(client *WikipediaClient) *CategoryService {
+func NewCategoryService(client *Client) *CategoryService {
 	return &CategoryService{client: client}
 }
 
