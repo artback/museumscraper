@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"github.com/joho/godotenv"
 	"log"
+	"museum/internal/storage"
 	wikipedia2 "museum/pkg/wikipedia"
-	"museum/storage"
 	"os"
 	"time"
 )
