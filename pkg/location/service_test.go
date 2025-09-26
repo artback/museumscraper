@@ -42,11 +42,11 @@ func TestGeocode_RealAPI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Geocode(%q) returned error: %v", tt.query, err)
 			}
-			if got.City != tt.wantCity {
-				t.Errorf("City = %s, want %s", got.City, tt.wantCity)
+			if got.Address.City != tt.wantCity {
+				t.Errorf("City = %s, want %s", got.Address.City, tt.wantCity)
 			}
-			if got.Country != tt.wantCountry {
-				t.Errorf("Country = %s, want %s", got.Country, tt.wantCountry)
+			if got.Address.Country != tt.wantCountry {
+				t.Errorf("Country = %s, want %s", got.Address.Country, tt.wantCountry)
 			}
 			if got.Type != tt.wantType {
 				t.Errorf("Type = %s, want %s", got.Type, tt.wantType)

@@ -7,20 +7,8 @@ import (
 	"net/url"
 )
 
-// Location holds enriched info about a place
-type Location struct {
-	Name      string
-	Latitude  float64
-	Longitude float64
-	City      string
-	Country   string
-	Road      string
-	Type      string
-	OsmId     string
-}
-
-// NominatimResponse is shaped for the API response
-type NominatimResponse []struct {
+// NominatimLocation holds enriched info about a place
+type NominatimLocation struct {
 	PlaceID     int64   `json:"place_id"`
 	Licence     string  `json:"licence"`
 	OsmType     string  `json:"osm_type"`
@@ -52,8 +40,11 @@ type NominatimResponse []struct {
 	BoundingBox []string `json:"boundingbox"`
 }
 
+// NominatimResponse is shaped for the API response
+type NominatimResponse []NominatimLocation
+
 // Geocode looks up a museum/location name and returns coordinates and details
-func Geocode(query string) (NominatimResponse, error) {
+func Geocode(query string) (*NominatimLocation, error) {
 	base := "https://nominatim.openstreetmap.org/search"
 
 	// Use url.Values to construct query parameters
@@ -80,7 +71,6 @@ func Geocode(query string) (NominatimResponse, error) {
 	if len(results) == 0 {
 		return nil, fmt.Errorf("no results for %s", query)
 	}
-	return results, nil
 
 	first := results[0]
 	var lat, lon float64
@@ -94,13 +84,5 @@ func Geocode(query string) (NominatimResponse, error) {
 	if city == "" {
 		city = first.Address.Village
 	}
-
-	return &Location{
-		Name:      query,
-		Type:      first.Type,
-		Latitude:  lat,
-		Longitude: lon,
-		City:      city,
-		Country:   first.Address.Country,
-	}, nil
+	return &results[0], nil
 }
