@@ -29,6 +29,16 @@ type KafkaConsumer struct {
 	messageChan chan kafka.Message
 }
 
+func (kc *KafkaConsumer) Messages() <-chan kafka.Message {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (kc *KafkaConsumer) CommitOffset(ctx context.Context, msg kafka.Message) error {
+	//TODO implement me
+	panic("implement me")
+}
+
 // NewKafkaConsumer creates a new instance of KafkaConsumer.
 func NewKafkaConsumer(topic, groupID, broker string) (*KafkaConsumer, error) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
@@ -69,8 +79,7 @@ func (kc *KafkaConsumer) StartConsuming(ctx context.Context) {
 				return
 			default:
 				// Read a single message.
-				reader := kc.reader.(*kafka.Reader)
-				msg, err := reader.ReadMessage(ctx)
+				msg, err := kc.reader.ReadMessage(ctx)
 				if err != nil {
 					log.Printf("Error reading message: %v", err)
 					// Handle the specific error of a closed reader.
