@@ -3,7 +3,6 @@ module museum
 go 1.24.0
 
 require (
-	github.com/confluentinc/confluent-kafka-go/v2 v2.11.1
 	github.com/joho/godotenv v1.5.1
 	github.com/minio/minio-go/v7 v7.0.95
 	github.com/segmentio/kafka-go v0.4.49
