@@ -2,13 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/joho/godotenv"
-	"github.com/minio/minio-go/v7/pkg/notification"
 	"log"
 	"museum/internal/service"
 	"museum/internal/storage"
+	"museum/models"
 	"museum/pkg/graceful"
 	"museum/pkg/kafkaclient"
 	"os"
@@ -51,9 +50,11 @@ func main() {
 	}
 
 	consumer.StartConsuming(ctx)
-	iterator := service.NewMuseumIterator(ctx, consumer, s3Service)
-	for obj := range iterator.Objects() {
-
+	iterator := service.NewIterator(consumer, func(ctx context.Context, bucket, key string) (*models.Museum, error) {
+		return s3Service.GetMuseumObject(ctx, bucket, key)
+	})
+	for obj := range iterator.Objects(ctx) {
+		fmt.Println(obj.Data.Name)
 	}
 
 	consumer.Stop()
