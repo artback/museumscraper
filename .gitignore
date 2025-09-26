@@ -1,2 +1,7 @@
-./.idea
-*/.DS_Store
+*
+!.gitignore
+!*.go
+!README.md
+!go.mod
+!go.sum
+!*.json
