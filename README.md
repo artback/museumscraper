@@ -10,7 +10,7 @@ This project crawls Wikipedia starting from the category "Category:Lists_of_muse
 ## What it does
 - Traverses Wikipedia category members recursively (categories and pages).
 - Parses simple wikitext list items (e.g., bullet points) and extracts wiki links as museum names.
-- Filters out blacklisted prefixes like "Tourism", "Culture", "History", "UNESCO" to avoid non-museum links.
+- Filters out blocklisted prefixes like "Tourism", "Culture", "History", "UNESCO" to avoid non-museum links.
 - Attempts to infer the country from page titles (e.g., "List of museums in France" → France).
 - Streams results and writes each museum as JSON to S3/MinIO under: `raw_data/{country}/{museum-name}.json`.
 - Skips writing if an object with the same key already exists.
