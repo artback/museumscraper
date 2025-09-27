@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"github.com/joho/godotenv"
 	"log"
+	"museum/internal/keys"
+	"museum/internal/models"
 	"museum/internal/service"
 	"museum/internal/storage"
-	"museum/models"
 	"museum/pkg/graceful"
 	"museum/pkg/kafkaclient"
 	"os"
@@ -44,14 +45,14 @@ func main() {
 		log.Fatalf("Failed to create kafka consumer %v", err)
 	}
 
-	s3Service, err := storage.NewS3Service()
+	s3Service, err := storage.NewS3Service(keys.Museum)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	consumer.StartConsuming(ctx)
 	iterator := service.NewIterator(consumer, func(ctx context.Context, bucket, key string) (*models.Museum, error) {
-		return s3Service.GetMuseumObject(ctx, bucket, key)
+		return s3Service.GetObject(ctx, bucket, key)
 	})
 	for obj := range iterator.Objects(ctx) {
 		fmt.Println(obj.Data.Name)
