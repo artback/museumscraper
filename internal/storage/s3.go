@@ -6,46 +6,42 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"museum/models"
 	"os"
-	"strings"
 	"sync"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// S3Service is a client for S3-compatible storage.
-type S3Service struct {
-	client *minio.Client
-	count  int
+type S3Service[T any] struct {
+	client  *minio.Client
+	keyFunc func(value T) string
+	count   int
 }
 
-// NewS3Service initializes and returns a new S3 storage service.
-// It connects to the MinIO server using credentials from environment variables.
-func NewS3Service() (*S3Service, error) {
+func NewS3Service[T any](keyFunc func(value T) string) (*S3Service[T], error) {
 	minioEndpoint := os.Getenv("MINIO_ENDPOINT")
 	minioAccessKey := os.Getenv("MINIO_ACCESS_KEY")
 	minioSecretKey := os.Getenv("MINIO_SECRET_KEY")
 	useSSL := os.Getenv("MINIO_USE_SSL") == "true"
 
 	if minioEndpoint == "" || minioAccessKey == "" || minioSecretKey == "" {
-		return nil, fmt.Errorf("missing one or more required environment variables: MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY")
+		return nil, fmt.Errorf("missing one or more required environment variables")
 	}
 
-	minioClient, err := minio.New(minioEndpoint, &minio.Options{
+	client, err := minio.New(minioEndpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(minioAccessKey, minioSecretKey, ""),
 		Secure: useSSL,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create MinIO client: %v", err)
+		return nil, fmt.Errorf("failed to create MinIO client: %w", err)
 	}
 
-	log.Println("Successfully connected to MinIO endpoint:", minioEndpoint)
-	return &S3Service{client: minioClient, count: 0}, nil
+	log.Println("Connected to MinIO:", minioEndpoint)
+	return &S3Service[T]{client: client, keyFunc: keyFunc}, nil
 }
 
-func (s *S3Service) CreateBucket(ctx context.Context, bucketName string, location string) (bool, error) {
+func (s *S3Service[T]) CreateBucket(ctx context.Context, bucketName string, location string) (bool, error) {
 	exists, err := s.client.BucketExists(ctx, bucketName)
 	if err != nil {
 		return false, fmt.Errorf("error checking bucket existence: %v", err)
@@ -59,94 +55,68 @@ func (s *S3Service) CreateBucket(ctx context.Context, bucketName string, locatio
 	return true, nil
 }
 
-// StoreMuseumsFromChannel reads Museum objects from a channel and stores each one
-// in the specified S3 bucket. It is a more scalable approach for handling a stream of data.
-func (s *S3Service) StoreMuseumsFromChannel(ctx context.Context, bucketName string, museums <-chan models.Museum) {
-	var wg sync.WaitGroup
+func (s *S3Service[T]) StoreObject(ctx context.Context, bucketName string, value T) error {
+	key := s.keyFunc(value)
 
-	for museum := range museums {
-		wg.Add(1)
-		go func(m models.Museum) {
-			defer wg.Done()
-			err := s.storeSingleMuseum(ctx, bucketName, m)
-			s.count++
-			if err != nil {
-				log.Printf("Error storing museum '%s': %v", m.Name, err)
-			}
-		}(museum)
-	}
-
-	wg.Wait()
-	log.Printf("Finished storing all museums from the channel. Count %d \n", s.count)
-}
-
-// storeSingleMuseum is a helper function to store a single Museum object.
-// It will not overwrite a file if it already exists.
-func (s *S3Service) storeSingleMuseum(ctx context.Context, bucketName string, museum models.Museum) error {
-	objectKey := fmt.Sprintf("raw_data/%s/%s.json", sanitizeKey(museum.Country), sanitizeKey(museum.Name))
-
-	// Check if the object already exists.
-	_, err := s.client.StatObject(ctx, bucketName, objectKey, minio.StatObjectOptions{})
+	_, err := s.client.StatObject(ctx, bucketName, key, minio.StatObjectOptions{})
 	if err == nil {
-		// The object was found, which means it already exists. We can ignore the write.
-		log.Printf("Museum file for '%s' already exists in bucket '%s'. Ignoring write operation.", museum.Name, bucketName)
+		log.Printf("Object '%s' already exists in bucket '%s'. Skipping.", key, bucketName)
 		return nil
 	}
-
-	// The object was not found, which is the expected behavior for a new object.
-	// Check if the error is specifically a "NoSuchKey" error. If not, it's a different issue.
 	if minio.ToErrorResponse(err).Code != "NoSuchKey" {
-		return fmt.Errorf("failed to check for existing object: %v", err)
+		return fmt.Errorf("failed to stat object: %w", err)
 	}
 
-	// If we get here, the object does not exist, so we can proceed with the put.
-	data, err := json.Marshal(museum)
+	data, err := json.Marshal(value)
 	if err != nil {
-		return fmt.Errorf("failed to marshal museum to JSON: %v", err)
+		return fmt.Errorf("failed to marshal: %w", err)
 	}
 
 	_, err = s.client.PutObject(
 		ctx,
 		bucketName,
-		objectKey,
+		key,
 		bytes.NewReader(data),
 		int64(len(data)),
 		minio.PutObjectOptions{ContentType: "application/json"},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to store object in S3: %v", err)
+		return fmt.Errorf("failed to store object: %w", err)
 	}
 
-	log.Printf("Successfully stored new museum '%s' in bucket '%s' with key '%s'", museum.Name, bucketName, objectKey)
+	log.Printf("Stored object with key '%s' in bucket '%s'", key, bucketName)
 	return nil
 }
 
-func (s *S3Service) GetMuseumObject(ctx context.Context, bucketName string, objectKey string) (*models.Museum, error) {
-	object, err := s.client.GetObject(ctx, bucketName, objectKey, minio.GetObjectOptions{})
+func (s *S3Service[T]) StoreFromChannel(ctx context.Context, bucketName string, values <-chan T) {
+	var wg sync.WaitGroup
+
+	for v := range values {
+		wg.Add(1)
+		go func(val T) {
+			defer wg.Done()
+			if err := s.StoreObject(ctx, bucketName, val); err != nil {
+				log.Printf("Error storing object: %v", err)
+			} else {
+				s.count++
+			}
+		}(v)
+	}
+
+	wg.Wait()
+	log.Printf("Stored %d objects in bucket '%s'", s.count, bucketName)
+}
+
+func (s *S3Service[T]) GetObject(ctx context.Context, bucketName, key string) (*T, error) {
+	obj, err := s.client.GetObject(ctx, bucketName, key, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get object from S3: %v", err)
+		return nil, fmt.Errorf("failed to get object: %w", err)
 	}
-	defer object.Close()
+	defer obj.Close()
 
-	// Use json.NewDecoder to stream the JSON directly from the reader.
-	var museum models.Museum
-	if err := json.NewDecoder(object).Decode(&museum); err != nil {
-		return nil, fmt.Errorf("failed to decode JSON from stream: %v", err)
+	var value T
+	if err := json.NewDecoder(obj).Decode(&value); err != nil {
+		return nil, fmt.Errorf("failed to decode object: %w", err)
 	}
-
-	log.Printf("Successfully retrieved museum '%s' from bucket '%s' with key '%s'", museum.Name, bucketName, objectKey)
-	return &museum, nil
-}
-
-// GetMuseum retrieves a JSON object from S3 and unmarshals it into a Museum struct.
-func (s *S3Service) GetMuseum(ctx context.Context, bucketName string, country, name string) (*models.Museum, error) {
-	objectKey := fmt.Sprintf("raw_data/%s/%s.json", sanitizeKey(country), sanitizeKey(name))
-	return s.GetMuseumObject(ctx, bucketName, objectKey)
-}
-
-// sanitizeKey replaces non-alphanumeric characters with hyphens to create a valid object key.
-func sanitizeKey(s string) string {
-	s = strings.ReplaceAll(s, " ", "-")
-	s = strings.ToLower(s)
-	return s
+	return &value, nil
 }
