@@ -8,11 +8,11 @@ import (
 var matchSymbol = regexp.MustCompile(":(.*?):")
 
 type MuseumExtractor struct {
-	blackListed []string
+	blocklisted []string
 }
 
-func NewMuseumExtractor(blackListed []string) *MuseumExtractor {
-	return &MuseumExtractor{blackListed: blackListed}
+func NewMuseumExtractor(blocklisted []string) *MuseumExtractor {
+	return &MuseumExtractor{blocklisted: blocklisted}
 }
 
 var linkRe = regexp.MustCompile(`\[\[(.+?)]\]`)
@@ -43,7 +43,7 @@ func (m *MuseumExtractor) ExtractMuseums(content string) []string {
 }
 
 func (m *MuseumExtractor) include(s string) bool {
-	for _, bl := range m.blackListed {
+	for _, bl := range m.blocklisted {
 		if strings.HasPrefix(s, bl) {
 			return false
 		}
