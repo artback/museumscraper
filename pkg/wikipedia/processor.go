@@ -3,7 +3,7 @@ package wikipedia
 import (
 	"fmt"
 	"log"
-	"museum/models"
+	"museum/internal/models"
 	"museum/pkg/geo"
 	"strings"
 )

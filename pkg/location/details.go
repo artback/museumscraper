@@ -8,7 +8,7 @@ import (
 	"net/url"
 )
 
-type PlaceDetailsResponse struct {
+type NominatimDetailsResponse struct {
 	PlaceID             int64             `json:"place_id"`
 	ParentPlaceID       int64             `json:"parent_place_id"`
 	OsmType             string            `json:"osm_type"`
@@ -37,7 +37,7 @@ type PlaceDetailsResponse struct {
 }
 
 // PlaceDetails fetches full details about a place from Nominatim.
-func PlaceDetails(osmType string, osmID int) (*PlaceDetailsResponse, error) {
+func PlaceDetails(osmType string, osmID int) (*NominatimDetailsResponse, error) {
 	baseURL := "https://nominatim.openstreetmap.org/details"
 
 	params := url.Values{}
@@ -71,7 +71,7 @@ func PlaceDetails(osmType string, osmID int) (*PlaceDetailsResponse, error) {
 		return nil, err
 	}
 
-	var details PlaceDetailsResponse
+	var details NominatimDetailsResponse
 	if err := json.Unmarshal(body, &details); err != nil {
 		return nil, err
 	}

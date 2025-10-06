@@ -1,6 +1,8 @@
 package main
 
-import "museum/models"
+import (
+	"museum/internal/models"
+)
 
 type PipelineItem struct {
 	Object  *models.MuseumObject

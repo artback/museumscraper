@@ -30,13 +30,13 @@ type KafkaConsumer struct {
 }
 
 func (kc *KafkaConsumer) Messages() <-chan kafka.Message {
-	//TODO implement me
-	panic("implement me")
+	return kc.messageChan
+
 }
 
 func (kc *KafkaConsumer) CommitOffset(ctx context.Context, msg kafka.Message) error {
-	//TODO implement me
-	panic("implement me")
+	log.Printf("Committing offset for topic=%s, partition=%d, offset=%d", msg.Topic, msg.Partition, msg.Offset)
+	return kc.reader.CommitMessages(ctx, msg)
 }
 
 // NewKafkaConsumer creates a new instance of KafkaConsumer.
