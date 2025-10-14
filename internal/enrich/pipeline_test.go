@@ -95,10 +95,10 @@ func TestPipeline_Process(t *testing.T) {
 			close(in)
 
 			p := NewPipeline(tt.stages...)
-			out := <-p.Process(ctx, in)
+			p.Process(ctx, in)
 
-			if !reflect.DeepEqual(out.Results, tt.expected) {
-				t.Errorf("got %+v, expected %+v", out.Results, tt.expected)
+			if !reflect.DeepEqual(tt.input.Results, tt.expected) {
+				t.Errorf("got %+v, expected %+v", tt.input.Results, tt.expected)
 			}
 		})
 	}

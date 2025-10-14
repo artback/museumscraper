@@ -9,7 +9,7 @@ import (
 
 // Step represents a single enrichment operation that mutates the given item.
 // Implementations should be safe to run concurrently with other steps in the
-// same stage operating on the same item. If a step fails it should return an
+// same stage operating on the same item. If a step fails, it should return an
 // error; the pipeline will log the error and continue.
 // The context can be used to observe cancellation or timeouts.
 //

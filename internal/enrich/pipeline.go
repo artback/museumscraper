@@ -30,32 +30,22 @@ func NewPipeline[T any](stages ...Stage[T]) *Pipeline[T] {
 //     continue processing.
 //   - The provided context can be observed by steps for cancellation; the
 //     pipeline itself keeps running until the input channel is closed.
-func (p *Pipeline[T]) Process(ctx context.Context, in <-chan *T) <-chan *T {
-	out := make(chan *T)
-
-	go func() {
-		defer close(out)
-
-		for item := range in {
-			// Execute each stage sequentially. Within a stage, run each step in its
-			// own goroutine and wait for all to complete before advancing.
-			for _, stage := range p.stages {
-				var wg sync.WaitGroup
-				for _, step := range stage.steps {
-					wg.Add(1)
-					go func(step Step[T]) {
-						defer wg.Done()
-						if err := step(ctx, item); err != nil {
-							log.Printf("Step failed: %v", err)
-						}
-					}(step)
-				}
-				wg.Wait() // stage barrier: ensure all steps finished before next stage
+func (p *Pipeline[T]) Process(ctx context.Context, in <-chan *T) {
+	for item := range in {
+		// Execute each stage sequentially. Within a stage, run each step in its
+		// own goroutine and wait for all to complete before advancing.
+		for _, stage := range p.stages {
+			var wg sync.WaitGroup
+			for _, step := range stage.steps {
+				wg.Add(1)
+				go func(step Step[T]) {
+					defer wg.Done()
+					if err := step(ctx, item); err != nil {
+						log.Printf("Step failed: %v", err)
+					}
+				}(step)
 			}
-			// Emit the item after all stages have completed.
-			out <- item
+			wg.Wait() // stage barrier: ensure all steps finished before the next stage
 		}
-	}()
-
-	return out
+	}
 }

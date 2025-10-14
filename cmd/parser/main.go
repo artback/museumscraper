@@ -9,16 +9,9 @@ import (
 	"museum/internal/storage"
 	"museum/pkg/wikipedia"
 	"os"
-	"strings"
 	"time"
 )
 
-// sanitizeKey replaces non-alphanumeric characters with hyphens to create a valid object key.
-func sanitizeKey(s string) string {
-	s = strings.ReplaceAll(s, " ", "-")
-	s = strings.ToLower(s)
-	return s
-}
 func main() {
 	err := godotenv.Load()
 	if err != nil {
