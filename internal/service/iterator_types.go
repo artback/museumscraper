@@ -43,5 +43,5 @@ type FetchedObject[T any] struct {
 	// Data is the decoded object data, loaded from the object store.
 	Data T
 	// Event is the original MinIO/S3 notification event that triggered the fetch.
-	Event notification.Event
+	Event notification.Info
 }

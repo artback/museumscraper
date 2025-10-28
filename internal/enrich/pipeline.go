@@ -33,7 +33,7 @@ func NewPipeline[T any](stages ...Stage[T]) *Pipeline[T] {
 func (p *Pipeline[T]) Process(ctx context.Context, in <-chan *T) {
 	for item := range in {
 		// Execute each stage sequentially. Within a stage, run each step in its
-		// own goroutine and wait for all to complete before advancing.
+		// own goroutine
 		for _, stage := range p.stages {
 			var wg sync.WaitGroup
 			for _, step := range stage.steps {

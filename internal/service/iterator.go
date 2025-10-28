@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"github.com/minio/minio-go/v7/pkg/notification"
 	"log"
+	"net/url"
 )
 
 // Iterator consumes messages from a MessageIterator, interprets each message
@@ -50,13 +51,18 @@ func (it *Iterator[T]) Objects(ctx context.Context) <-chan *FetchedObject[T] {
 		defer close(out)
 
 		for msg := range it.msgIterator.Messages() {
-			var event notification.Event
+			var event notification.Info
 			if err := json.Unmarshal(msg.Value, &event); err != nil {
 				log.Printf("Error unmarshalling JSON: %v", err)
 				continue
 			}
-
-			data, err := it.loader(ctx, event.S3.Bucket.Name, event.S3.Object.Key)
+			s3 := event.Records[0].S3
+			objectKey, err := url.QueryUnescape(s3.Object.Key)
+			if err != nil {
+				// Handle potential error, though unlikely for this simple case
+				log.Fatalf("Error decoding string: %v", err)
+			}
+			data, err := it.loader(ctx, s3.Bucket.Name, objectKey)
 			if err != nil {
 				log.Printf("Error loading object: %v", err)
 				continue
