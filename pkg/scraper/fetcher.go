@@ -2,12 +2,18 @@ package scraper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+)
+
+var (
+	errNoURL  = errors.New("no website URL provided")
+	errNoData = errors.New("no structured data found")
 )
 
 const (
