@@ -1,6 +1,7 @@
 package location
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,7 +38,11 @@ type NominatimDetailsResponse struct {
 }
 
 // PlaceDetails fetches full details about a place from Nominatim.
-func PlaceDetails(osmType string, osmID int) (*NominatimDetailsResponse, error) {
+// It accepts osmID as int64 to match the NominatimLocation.OsmID type.
+// It respects Nominatim's rate limit and uses a shared HTTP client.
+func PlaceDetails(ctx context.Context, osmType string, osmID int64) (*NominatimDetailsResponse, error) {
+	<-rateLimit() // enforce 1 req/sec
+
 	baseURL := "https://nominatim.openstreetmap.org/details"
 
 	params := url.Values{}
@@ -50,13 +55,13 @@ func PlaceDetails(osmType string, osmID int) (*NominatimDetailsResponse, error) 
 
 	reqURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
 
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("User-Agent", "golang-nominatim-client/1.0")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := Client().Do(req)
 	if err != nil {
 		return nil, err
 	}

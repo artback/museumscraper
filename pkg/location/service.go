@@ -1,6 +1,7 @@
 package location
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -43,11 +44,14 @@ type NominatimLocation struct {
 // NominatimResponse is shaped for the API response
 type NominatimResponse []NominatimLocation
 
-// Geocode looks up a museum/location name and returns coordinates and details
-func Geocode(query string) (*NominatimLocation, error) {
+// Geocode looks up a museum/location name and returns coordinates and details.
+// It respects Nominatim's rate limit (1 req/sec) and uses a shared HTTP client
+// with configured timeouts.
+func Geocode(ctx context.Context, query string) (*NominatimLocation, error) {
+	<-rateLimit() // enforce 1 req/sec
+
 	base := "https://nominatim.openstreetmap.org/search"
 
-	// Use url.Values to construct query parameters
 	params := url.Values{}
 	params.Set("q", query)
 	params.Set("format", "json")
@@ -57,11 +61,21 @@ func Geocode(query string) (*NominatimLocation, error) {
 
 	u := fmt.Sprintf("%s?%s", base, params.Encode())
 
-	resp, err := http.Get(u)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("User-Agent", "golang-nominatim-client/1.0")
+
+	resp, err := Client().Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("nominatim search: unexpected status %s", resp.Status)
+	}
 
 	var results NominatimResponse
 	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
@@ -72,17 +86,5 @@ func Geocode(query string) (*NominatimLocation, error) {
 		return nil, fmt.Errorf("no results for %s", query)
 	}
 
-	first := results[0]
-	var lat, lon float64
-	fmt.Sscanf(first.Lat, "%f", &lat)
-	fmt.Sscanf(first.Lon, "%f", &lon)
-
-	city := first.Address.City
-	if city == "" {
-		city = first.Address.Town
-	}
-	if city == "" {
-		city = first.Address.Village
-	}
 	return &results[0], nil
 }

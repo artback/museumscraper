@@ -22,8 +22,6 @@ func main() {
 
 	env.LoadEnv()
 
-	// 2. Initialize the Kafka reader with your broker and topic details from environment variables.
-	// All three of these environment variables are now mandatory.
 	kafkaBroker := env.MustGetEnv("KAFKA_BROKER_LOCAL")
 	kafkaTopic := env.MustGetEnv("KAFKA_TOPIC")
 	kafkaGroupID := env.MustGetEnv("KAFKA_GROUP_ID")
@@ -46,10 +44,15 @@ func main() {
 		return s3Service.GetObject(ctx, bucket, key)
 	})
 
+	// Use multiple workers to process items concurrently through the pipeline.
+	// The rate limiter in the location package ensures Nominatim's 1 req/sec
+	// limit is respected regardless of worker count. Multiple workers help
+	// overlap I/O waits (S3 reads, Kafka commits) with API calls.
 	pipeline := enrich.NewPipeline(
 		enrich.NewStage(StepLocation),
 		enrich.NewStage(StepLocationDetails),
-	)
+	).WithWorkers(4)
+
 	it := initializePipelineItems(iterator.Objects(ctx))
 	pipeline.Process(ctx, it)
 
@@ -71,19 +74,16 @@ func NewPipelineItem[T any](obj T) *PipelineItem[T] {
 // mergeIntoResults flattens a source struct into a map and merges its keys
 // into the target map. It uses JSON marshalling as an intermediary step.
 func mergeIntoResults(target map[string]any, source any) error {
-	// Marshal the source struct (e.g., location data) into JSON bytes.
 	jsonData, err := json.Marshal(source)
 	if err != nil {
 		return fmt.Errorf("failed to marshal source data: %w", err)
 	}
 
-	// Unmarshal the JSON into a temporary map.
 	var sourceMap map[string]any
 	if err := json.Unmarshal(jsonData, &sourceMap); err != nil {
 		return fmt.Errorf("failed to unmarshal source data into map: %w", err)
 	}
 
-	// Copy all key-value pairs from the temporary map to the target results.
 	for key, value := range sourceMap {
 		target[key] = value
 	}
@@ -91,29 +91,41 @@ func mergeIntoResults(target map[string]any, source any) error {
 	return nil
 }
 
-func StepLocation(_ context.Context, item *PipelineItem[*models.Museum]) error {
+func StepLocation(ctx context.Context, item *PipelineItem[*models.Museum]) error {
 	locationTerm := fmt.Sprintf("%s %s", item.Object.Name, item.Object.Country)
-	loc, err := location.Geocode(locationTerm)
+	loc, err := location.Geocode(ctx, locationTerm)
 	if err != nil {
 		return err
 	}
 	return mergeIntoResults(item.Results, loc)
 }
 
-func StepLocationDetails(_ context.Context, item *PipelineItem[*models.Museum]) error {
-	fmt.Println(item.Results)
+func StepLocationDetails(ctx context.Context, item *PipelineItem[*models.Museum]) error {
 	if item.Results["osmType"] == nil || item.Results["osmID"] == nil {
 		return nil
 	}
-	osmType := item.Results["osmType"].(string)
-	osmID := item.Results["osmID"].(int)
-	details, err := location.PlaceDetails(osmType, osmID)
-	fmt.Println(details)
+	osmType, ok := item.Results["osmType"].(string)
+	if !ok {
+		return fmt.Errorf("osmType is not a string: %v", item.Results["osmType"])
+	}
+	// JSON unmarshals numbers as float64; safely convert to int64.
+	var osmID int64
+	switch v := item.Results["osmID"].(type) {
+	case float64:
+		osmID = int64(v)
+	case int64:
+		osmID = v
+	case int:
+		osmID = int64(v)
+	default:
+		return fmt.Errorf("osmID has unexpected type %T: %v", v, v)
+	}
+
+	details, err := location.PlaceDetails(ctx, osmType, osmID)
 	if err != nil {
 		return err
 	}
-	err = mergeIntoResults(item.Results, details)
-	return err
+	return mergeIntoResults(item.Results, details)
 }
 
 func initializePipelineItems(in <-chan *service.FetchedObject[*models.Museum]) <-chan *PipelineItem[*models.Museum] {

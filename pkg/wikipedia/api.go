@@ -3,8 +3,10 @@ package wikipedia
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type Client struct {
@@ -14,8 +16,20 @@ type Client struct {
 
 func NewClient() *Client {
 	return &Client{
-		httpClient: http.DefaultClient,
-		userAgent:  "Golang_Spider_Bot/3.0",
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        50,
+				MaxIdleConnsPerHost: 20,
+				MaxConnsPerHost:     20,
+				IdleConnTimeout:     90 * time.Second,
+				DialContext: (&net.Dialer{
+					Timeout:   10 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+			},
+		},
+		userAgent: "Golang_Spider_Bot/3.0",
 	}
 }
 
