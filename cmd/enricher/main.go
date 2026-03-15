@@ -14,7 +14,9 @@ import (
 	"museum/pkg/graceful"
 	"museum/pkg/kafkaclient"
 	"museum/pkg/location"
+	"museum/pkg/scraper"
 	"museum/pkg/wikidata"
+	"time"
 )
 
 func main() {
@@ -53,6 +55,10 @@ func main() {
 	// Wikidata client for exhibition and collection data (free, no API key).
 	wikidataClient := wikidata.NewClient()
 
+	// Museum website scraper for exhibitions, prices, and schedules.
+	museumScraper := scraper.NewMuseumScraper(2 * time.Second)
+	defer museumScraper.Close()
+
 	consumer.StartConsuming(ctx)
 	iterator := service.NewIterator(consumer, func(ctx context.Context, bucket, key string) (*models.Museum, error) {
 		return s3Service.GetObject(ctx, bucket, key)
@@ -61,11 +67,13 @@ func main() {
 	// Pipeline stages:
 	// 1. Geocode the museum name → get coordinates, OSM class/type
 	// 2. Filter non-museums + fetch place details from Nominatim
-	// 3. Enrich with Wikidata (exhibitions, collections, website, etc.)
+	// 3. Extract details from extratags + Wikidata enrichment (parallel)
+	// 4. Scrape museum website for exhibitions, prices, schedules
 	pipeline := enrich.NewPipeline(
 		enrich.NewStage(stepLocation(geocoder)),
 		enrich.NewStage(stepFilterMuseum(), stepLocationDetails(detailer)),
 		enrich.NewStage(stepExtractDetails(), stepWikidataEnrich(wikidataClient)),
+		enrich.NewStage(stepScrapeWebsite(museumScraper)),
 	)
 	it := initializePipelineItems(iterator.Objects(ctx))
 	pipeline.Process(ctx, it)
@@ -226,6 +234,60 @@ func stepWikidataEnrich(client *wikidata.Client) enrich.Step[PipelineItem[*model
 
 		return mergeIntoResults(item.Results, info)
 	}
+}
+
+// stepScrapeWebsite fetches the museum's website and extracts exhibitions,
+// pricing, opening hours, and other data using JSON-LD, meta tags, and
+// text pattern matching.
+func stepScrapeWebsite(s *scraper.MuseumScraper) enrich.Step[PipelineItem[*models.Museum]] {
+	return func(ctx context.Context, item *PipelineItem[*models.Museum]) error {
+		if item.Skip {
+			return nil
+		}
+
+		// Resolve the website URL from multiple sources (in priority order)
+		websiteURL := resolveWebsiteURL(item.Results)
+		if websiteURL == "" {
+			log.Printf("No website URL found for %q, skipping web scrape", item.Object.Name)
+			return nil
+		}
+
+		webData, err := s.ScrapeMuseum(ctx, websiteURL)
+		if err != nil {
+			// Web scraping is best-effort; log and continue
+			log.Printf("Web scrape failed for %q (%s): %v", item.Object.Name, websiteURL, err)
+			return nil
+		}
+
+		return mergeIntoResults(item.Results, webData)
+	}
+}
+
+// resolveWebsiteURL finds the best website URL from the accumulated results.
+// It checks multiple sources: extratags, Wikidata, and the geo result.
+func resolveWebsiteURL(results map[string]any) string {
+	// Check museum_details first (from Nominatim extratags)
+	if details, ok := results["museum_details"]; ok {
+		if md, ok := details.(*wikidata.MuseumDetails); ok && md.Website != "" {
+			return md.Website
+		}
+	}
+
+	// Check Wikidata website
+	if website, ok := results["website"].(string); ok && website != "" {
+		return website
+	}
+
+	// Check extratags directly
+	if extratags, ok := results["_extratags"].(map[string]string); ok {
+		for _, key := range []string{"website", "url", "contact:website"} {
+			if v := extratags[key]; v != "" {
+				return v
+			}
+		}
+	}
+
+	return ""
 }
 
 func initializePipelineItems(in <-chan *service.FetchedObject[*models.Museum]) <-chan *PipelineItem[*models.Museum] {
