@@ -1,13 +1,6 @@
 package location
 
-import (
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/url"
-)
-
-// NominatimLocation holds enriched info about a place
+// NominatimLocation holds enriched info about a place from the Nominatim API.
 type NominatimLocation struct {
 	PlaceID     int64   `json:"place_id"`
 	Licence     string  `json:"licence"`
@@ -40,49 +33,5 @@ type NominatimLocation struct {
 	BoundingBox []string `json:"boundingbox"`
 }
 
-// NominatimResponse is shaped for the API response
+// NominatimResponse is the API response shape for Nominatim search.
 type NominatimResponse []NominatimLocation
-
-// Geocode looks up a museum/location name and returns coordinates and details
-func Geocode(query string) (*NominatimLocation, error) {
-	base := "https://nominatim.openstreetmap.org/search"
-
-	// Use url.Values to construct query parameters
-	params := url.Values{}
-	params.Set("q", query)
-	params.Set("format", "json")
-	params.Set("addressdetails", "1")
-	params.Set("limit", "1")
-	params.Set("accept-language", "en")
-
-	u := fmt.Sprintf("%s?%s", base, params.Encode())
-
-	resp, err := http.Get(u)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var results NominatimResponse
-	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
-		return nil, err
-	}
-
-	if len(results) == 0 {
-		return nil, fmt.Errorf("no results for %s", query)
-	}
-
-	first := results[0]
-	var lat, lon float64
-	fmt.Sscanf(first.Lat, "%f", &lat)
-	fmt.Sscanf(first.Lon, "%f", &lon)
-
-	city := first.Address.City
-	if city == "" {
-		city = first.Address.Town
-	}
-	if city == "" {
-		city = first.Address.Village
-	}
-	return &results[0], nil
-}

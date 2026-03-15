@@ -22,8 +22,6 @@ func main() {
 
 	env.LoadEnv()
 
-	// 2. Initialize the Kafka reader with your broker and topic details from environment variables.
-	// All three of these environment variables are now mandatory.
 	kafkaBroker := env.MustGetEnv("KAFKA_BROKER_LOCAL")
 	kafkaTopic := env.MustGetEnv("KAFKA_TOPIC")
 	kafkaGroupID := env.MustGetEnv("KAFKA_GROUP_ID")
@@ -41,14 +39,25 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Create a reliable geocoder: Nominatim (rate-limited, detailed) with
+	// Photon fallback (higher throughput, same OSM data). Both are free
+	// and require no API keys.
+	geocoder, cleanupGeocoder := location.NewDefaultGeocoder()
+	defer cleanupGeocoder()
+
+	// Create a Nominatim detailer for place details (only Nominatim
+	// provides the /details endpoint).
+	detailer := location.NewNominatimGeocoder()
+	defer detailer.Close()
+
 	consumer.StartConsuming(ctx)
 	iterator := service.NewIterator(consumer, func(ctx context.Context, bucket, key string) (*models.Museum, error) {
 		return s3Service.GetObject(ctx, bucket, key)
 	})
 
 	pipeline := enrich.NewPipeline(
-		enrich.NewStage(StepLocation),
-		enrich.NewStage(StepLocationDetails),
+		enrich.NewStage(stepLocation(geocoder)),
+		enrich.NewStage(stepLocationDetails(detailer)),
 	)
 	it := initializePipelineItems(iterator.Objects(ctx))
 	pipeline.Process(ctx, it)
@@ -71,19 +80,16 @@ func NewPipelineItem[T any](obj T) *PipelineItem[T] {
 // mergeIntoResults flattens a source struct into a map and merges its keys
 // into the target map. It uses JSON marshalling as an intermediary step.
 func mergeIntoResults(target map[string]any, source any) error {
-	// Marshal the source struct (e.g., location data) into JSON bytes.
 	jsonData, err := json.Marshal(source)
 	if err != nil {
 		return fmt.Errorf("failed to marshal source data: %w", err)
 	}
 
-	// Unmarshal the JSON into a temporary map.
 	var sourceMap map[string]any
 	if err := json.Unmarshal(jsonData, &sourceMap); err != nil {
 		return fmt.Errorf("failed to unmarshal source data into map: %w", err)
 	}
 
-	// Copy all key-value pairs from the temporary map to the target results.
 	for key, value := range sourceMap {
 		target[key] = value
 	}
@@ -91,29 +97,51 @@ func mergeIntoResults(target map[string]any, source any) error {
 	return nil
 }
 
-func StepLocation(_ context.Context, item *PipelineItem[*models.Museum]) error {
-	locationTerm := fmt.Sprintf("%s %s", item.Object.Name, item.Object.Country)
-	loc, err := location.Geocode(locationTerm)
-	if err != nil {
-		return err
+// stepLocation returns an enrichment step that geocodes the museum using the
+// provided Geocoder implementation.
+func stepLocation(geocoder location.Geocoder) enrich.Step[PipelineItem[*models.Museum]] {
+	return func(ctx context.Context, item *PipelineItem[*models.Museum]) error {
+		locationTerm := fmt.Sprintf("%s %s", item.Object.Name, item.Object.Country)
+		result, err := geocoder.Geocode(ctx, locationTerm)
+		if err != nil {
+			return err
+		}
+		return mergeIntoResults(item.Results, result)
 	}
-	return mergeIntoResults(item.Results, loc)
 }
 
-func StepLocationDetails(_ context.Context, item *PipelineItem[*models.Museum]) error {
-	fmt.Println(item.Results)
-	if item.Results["osmType"] == nil || item.Results["osmID"] == nil {
-		return nil
+// stepLocationDetails returns an enrichment step that fetches place details
+// using the provided PlaceDetailer.
+func stepLocationDetails(detailer location.PlaceDetailer) enrich.Step[PipelineItem[*models.Museum]] {
+	return func(ctx context.Context, item *PipelineItem[*models.Museum]) error {
+		if item.Results["osm_type"] == nil || item.Results["osm_id"] == nil {
+			return nil
+		}
+
+		osmType, ok := item.Results["osm_type"].(string)
+		if !ok {
+			return fmt.Errorf("osm_type is not a string: %v", item.Results["osm_type"])
+		}
+
+		// JSON unmarshals numbers as float64
+		var osmID int64
+		switch v := item.Results["osm_id"].(type) {
+		case float64:
+			osmID = int64(v)
+		case int64:
+			osmID = v
+		case int:
+			osmID = int64(v)
+		default:
+			return fmt.Errorf("osm_id has unexpected type %T: %v", v, v)
+		}
+
+		details, err := detailer.PlaceDetails(ctx, osmType, osmID)
+		if err != nil {
+			return err
+		}
+		return mergeIntoResults(item.Results, details)
 	}
-	osmType := item.Results["osmType"].(string)
-	osmID := item.Results["osmID"].(int)
-	details, err := location.PlaceDetails(osmType, osmID)
-	fmt.Println(details)
-	if err != nil {
-		return err
-	}
-	err = mergeIntoResults(item.Results, details)
-	return err
 }
 
 func initializePipelineItems(in <-chan *service.FetchedObject[*models.Museum]) <-chan *PipelineItem[*models.Museum] {
