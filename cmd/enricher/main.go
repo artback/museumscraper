@@ -14,6 +14,7 @@ import (
 	"museum/pkg/graceful"
 	"museum/pkg/kafkaclient"
 	"museum/pkg/location"
+	"museum/pkg/wikidata"
 )
 
 func main() {
@@ -45,19 +46,26 @@ func main() {
 	geocoder, cleanupGeocoder := location.NewDefaultGeocoder()
 	defer cleanupGeocoder()
 
-	// Create a Nominatim detailer for place details (only Nominatim
-	// provides the /details endpoint).
+	// Nominatim detailer for place details (/details endpoint).
 	detailer := location.NewNominatimGeocoder()
 	defer detailer.Close()
+
+	// Wikidata client for exhibition and collection data (free, no API key).
+	wikidataClient := wikidata.NewClient()
 
 	consumer.StartConsuming(ctx)
 	iterator := service.NewIterator(consumer, func(ctx context.Context, bucket, key string) (*models.Museum, error) {
 		return s3Service.GetObject(ctx, bucket, key)
 	})
 
+	// Pipeline stages:
+	// 1. Geocode the museum name → get coordinates, OSM class/type
+	// 2. Filter non-museums + fetch place details from Nominatim
+	// 3. Enrich with Wikidata (exhibitions, collections, website, etc.)
 	pipeline := enrich.NewPipeline(
 		enrich.NewStage(stepLocation(geocoder)),
-		enrich.NewStage(stepLocationDetails(detailer)),
+		enrich.NewStage(stepFilterMuseum(), stepLocationDetails(detailer)),
+		enrich.NewStage(stepExtractDetails(), stepWikidataEnrich(wikidataClient)),
 	)
 	it := initializePipelineItems(iterator.Objects(ctx))
 	pipeline.Process(ctx, it)
@@ -65,9 +73,12 @@ func main() {
 	log.Println("Main method finished, application exiting.")
 }
 
+// PipelineItem carries a museum through the enrichment pipeline.
+// Skip indicates the item was filtered out (e.g. not a museum).
 type PipelineItem[T any] struct {
 	Object  T
 	Results map[string]any
+	Skip    bool
 }
 
 func NewPipelineItem[T any](obj T) *PipelineItem[T] {
@@ -77,8 +88,6 @@ func NewPipelineItem[T any](obj T) *PipelineItem[T] {
 	}
 }
 
-// mergeIntoResults flattens a source struct into a map and merges its keys
-// into the target map. It uses JSON marshalling as an intermediary step.
 func mergeIntoResults(target map[string]any, source any) error {
 	jsonData, err := json.Marshal(source)
 	if err != nil {
@@ -97,8 +106,7 @@ func mergeIntoResults(target map[string]any, source any) error {
 	return nil
 }
 
-// stepLocation returns an enrichment step that geocodes the museum using the
-// provided Geocoder implementation.
+// stepLocation geocodes the museum name to get coordinates and OSM metadata.
 func stepLocation(geocoder location.Geocoder) enrich.Step[PipelineItem[*models.Museum]] {
 	return func(ctx context.Context, item *PipelineItem[*models.Museum]) error {
 		locationTerm := fmt.Sprintf("%s %s", item.Object.Name, item.Object.Country)
@@ -106,14 +114,44 @@ func stepLocation(geocoder location.Geocoder) enrich.Step[PipelineItem[*models.M
 		if err != nil {
 			return err
 		}
+		// Store the GeoResult directly for use in filter step
+		item.Results["_geo_result"] = result
 		return mergeIntoResults(item.Results, result)
 	}
 }
 
-// stepLocationDetails returns an enrichment step that fetches place details
-// using the provided PlaceDetailer.
+// stepFilterMuseum checks if the geocoded result is actually a museum.
+// If not, it sets Skip=true so subsequent steps can short-circuit.
+func stepFilterMuseum() enrich.Step[PipelineItem[*models.Museum]] {
+	return func(_ context.Context, item *PipelineItem[*models.Museum]) error {
+		if item.Skip {
+			return nil
+		}
+
+		geo, ok := item.Results["_geo_result"].(*location.GeoResult)
+		if !ok {
+			// No geo result — can't verify, skip this item
+			item.Skip = true
+			log.Printf("Skipping %q: no geocoding result available", item.Object.Name)
+			return nil
+		}
+
+		if !geo.IsMuseum() {
+			item.Skip = true
+			log.Printf("Filtered out %q: OSM class=%s type=%s (not a museum)", item.Object.Name, geo.Class, geo.Type)
+			return nil
+		}
+
+		return nil
+	}
+}
+
+// stepLocationDetails fetches extended place details from Nominatim.
 func stepLocationDetails(detailer location.PlaceDetailer) enrich.Step[PipelineItem[*models.Museum]] {
 	return func(ctx context.Context, item *PipelineItem[*models.Museum]) error {
+		if item.Skip {
+			return nil
+		}
 		if item.Results["osm_type"] == nil || item.Results["osm_id"] == nil {
 			return nil
 		}
@@ -123,7 +161,6 @@ func stepLocationDetails(detailer location.PlaceDetailer) enrich.Step[PipelineIt
 			return fmt.Errorf("osm_type is not a string: %v", item.Results["osm_type"])
 		}
 
-		// JSON unmarshals numbers as float64
 		var osmID int64
 		switch v := item.Results["osm_id"].(type) {
 		case float64:
@@ -140,7 +177,54 @@ func stepLocationDetails(detailer location.PlaceDetailer) enrich.Step[PipelineIt
 		if err != nil {
 			return err
 		}
+		item.Results["_extratags"] = details.ExtraTags
 		return mergeIntoResults(item.Results, details)
+	}
+}
+
+// stepExtractDetails extracts operational museum details (opening hours,
+// admission, website, phone) from Nominatim's extratags.
+func stepExtractDetails() enrich.Step[PipelineItem[*models.Museum]] {
+	return func(_ context.Context, item *PipelineItem[*models.Museum]) error {
+		if item.Skip {
+			return nil
+		}
+
+		extratags, ok := item.Results["_extratags"].(map[string]string)
+		if !ok {
+			return nil
+		}
+
+		details := wikidata.ExtractMuseumDetails(extratags)
+		if details != nil {
+			item.Results["museum_details"] = details
+			log.Printf("Extracted details for %q: hours=%q, admission=%q",
+				item.Object.Name, details.OpeningHours, details.Admission)
+		}
+		return nil
+	}
+}
+
+// stepWikidataEnrich queries Wikidata for exhibition schedules, collections,
+// and additional metadata. Uses the free SPARQL endpoint (no API key).
+func stepWikidataEnrich(client *wikidata.Client) enrich.Step[PipelineItem[*models.Museum]] {
+	return func(ctx context.Context, item *PipelineItem[*models.Museum]) error {
+		if item.Skip {
+			return nil
+		}
+
+		info, err := client.FetchMuseumInfo(ctx, item.Object.Name, item.Object.Country)
+		if err != nil {
+			// Wikidata enrichment is best-effort; log and continue
+			log.Printf("Wikidata enrichment failed for %q: %v", item.Object.Name, err)
+			return nil
+		}
+
+		if len(info.Exhibitions) > 0 {
+			log.Printf("Found %d exhibitions for %q", len(info.Exhibitions), item.Object.Name)
+		}
+
+		return mergeIntoResults(item.Results, info)
 	}
 }
 
