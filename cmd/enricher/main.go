@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
+	"os"
+	"strconv"
+
+	"museum/internal/database"
 	"museum/internal/enrich"
 	"museum/internal/env"
 	"museum/internal/keys"
 	"museum/internal/models"
+	"museum/internal/repository"
 	"museum/internal/service"
 	"museum/internal/storage"
 	"museum/pkg/graceful"
@@ -16,27 +20,54 @@ import (
 	"museum/pkg/location"
 )
 
+const batchSize = 50
+
 func main() {
 	ctx, cancel := graceful.Context(context.Background())
 	defer cancel()
 
 	env.LoadEnv()
 
+	// --- Kafka setup ---
 	kafkaBroker := env.MustGetEnv("KAFKA_BROKER_LOCAL")
 	kafkaTopic := env.MustGetEnv("KAFKA_TOPIC")
 	kafkaGroupID := env.MustGetEnv("KAFKA_GROUP_ID")
 
-	log.Printf("Connecting to Kafka broker: %s on topic: %s with group ID: %s", kafkaBroker, kafkaTopic, kafkaGroupID)
+	slog.Info("connecting to Kafka", "broker", kafkaBroker, "topic", kafkaTopic, "group", kafkaGroupID)
 
 	consumer, err := kafkaclient.NewKafkaConsumer(kafkaTopic, kafkaGroupID, kafkaBroker)
-	defer consumer.Stop()
 	if err != nil {
-		log.Fatalf("Failed to create kafka consumer %v", err)
+		slog.Error("failed to create kafka consumer", "error", err)
+		return
+	}
+	defer consumer.Stop()
+
+	// --- PostgreSQL setup ---
+	dbCfg := database.ConfigFromEnv()
+	pool, err := database.NewPool(ctx, dbCfg)
+	if err != nil {
+		slog.Error("failed to connect to PostgreSQL", "error", err)
+		return
+	}
+	defer pool.Close()
+
+	migrationsDir, ok := os.DirFS(".").(database.MigrationsFS)
+	if !ok {
+		slog.Error("os.DirFS does not satisfy MigrationsFS interface")
+		return
+	}
+	if err := database.RunMigrations(ctx, pool, migrationsDir, "up"); err != nil {
+		slog.Error("failed to run migrations", "error", err)
+		return
 	}
 
+	repo := repository.NewMuseumRepository(pool)
+
+	// --- S3 / iterator setup ---
 	s3Service, err := storage.NewS3Service(keys.Museum)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("failed to create S3 service", "error", err)
+		return
 	}
 
 	consumer.StartConsuming(ctx)
@@ -44,92 +75,157 @@ func main() {
 		return s3Service.GetObject(ctx, bucket, key)
 	})
 
-	// Use multiple workers to process items concurrently through the pipeline.
-	// The rate limiter in the location package ensures Nominatim's 1 req/sec
-	// limit is respected regardless of worker count. Multiple workers help
-	// overlap I/O waits (S3 reads, Kafka commits) with API calls.
+	// --- Pipeline ---
 	pipeline := enrich.NewPipeline(
 		enrich.NewStage(StepLocation),
 		enrich.NewStage(StepLocationDetails),
 	).WithWorkers(4)
 
-	it := initializePipelineItems(iterator.Objects(ctx))
-	pipeline.Process(ctx, it)
+	in := initializePipelineItems(iterator.Objects(ctx))
+	out := pipeline.Process(ctx, in)
 
-	log.Println("Main method finished, application exiting.")
-}
+	// --- Consume enriched items and batch-upsert into PostgreSQL ---
+	buffer := make([]repository.Museum, 0, batchSize)
 
-type PipelineItem[T any] struct {
-	Object  T
-	Results map[string]any
-}
-
-func NewPipelineItem[T any](obj T) *PipelineItem[T] {
-	return &PipelineItem[T]{
-		Object:  obj,
-		Results: make(map[string]any),
+	flush := func() {
+		if len(buffer) == 0 {
+			return
+		}
+		if _, err := repo.UpsertMuseumBatch(ctx, buffer); err != nil {
+			slog.Error("failed to upsert museum batch", "error", err, "count", len(buffer))
+		} else {
+			slog.Info("upserted museum batch", "count", len(buffer))
+		}
+		buffer = buffer[:0]
 	}
+
+	for item := range out {
+		buffer = append(buffer, toRepoMuseum(item.Object))
+		if len(buffer) >= batchSize {
+			flush()
+		}
+	}
+	// Flush remaining items on shutdown.
+	flush()
+
+	slog.Info("enricher finished, application exiting")
 }
 
-// mergeIntoResults flattens a source struct into a map and merges its keys
-// into the target map. It uses JSON marshalling as an intermediary step.
-func mergeIntoResults(target map[string]any, source any) error {
-	jsonData, err := json.Marshal(source)
+// toRepoMuseum converts a models.Museum to a repository.Museum for storage.
+func toRepoMuseum(m *models.Museum) repository.Museum {
+	rm := repository.Museum{
+		Name:    m.Name,
+		Country: m.Country,
+	}
+	if m.City != "" {
+		rm.City = &m.City
+	}
+	if m.State != "" {
+		rm.State = &m.State
+	}
+	if m.Address != "" {
+		rm.Address = &m.Address
+	}
+	if m.Lat != 0 {
+		rm.Lat = &m.Lat
+	}
+	if m.Lon != 0 {
+		rm.Lon = &m.Lon
+	}
+	if m.OsmID != 0 {
+		rm.OsmID = &m.OsmID
+	}
+	if m.OsmType != "" {
+		rm.OsmType = &m.OsmType
+	}
+	if m.Category != "" {
+		rm.Category = &m.Category
+	}
+	if m.MuseumType != "" {
+		rm.MuseumType = &m.MuseumType
+	}
+	if m.WikipediaURL != "" {
+		rm.WikipediaURL = &m.WikipediaURL
+	}
+	if m.Website != "" {
+		rm.Website = &m.Website
+	}
+	if len(m.RawTags) > 0 {
+		rm.RawTags = m.RawTags
+	}
+	return rm
+}
+
+// PipelineItem wraps a museum object flowing through the enrichment pipeline.
+type PipelineItem struct {
+	Object *models.Museum
+}
+
+// NewPipelineItem creates a new PipelineItem wrapping the given museum.
+func NewPipelineItem(obj *models.Museum) *PipelineItem {
+	return &PipelineItem{Object: obj}
+}
+
+// StepLocation enriches a museum with geocoding data from Nominatim.
+func StepLocation(ctx context.Context, item *PipelineItem) error {
+	m := item.Object
+	locationTerm := fmt.Sprintf("%s %s", m.Name, m.Country)
+	loc, err := location.Geocode(ctx, locationTerm)
 	if err != nil {
-		return fmt.Errorf("failed to marshal source data: %w", err)
+		return err
 	}
 
-	var sourceMap map[string]any
-	if err := json.Unmarshal(jsonData, &sourceMap); err != nil {
-		return fmt.Errorf("failed to unmarshal source data into map: %w", err)
+	if lat, err := strconv.ParseFloat(loc.Lat, 64); err == nil {
+		m.Lat = lat
+	}
+	if lon, err := strconv.ParseFloat(loc.Lon, 64); err == nil {
+		m.Lon = lon
+	}
+	m.OsmID = loc.OsmID
+	m.OsmType = loc.OsmType
+
+	// Resolve city from the address hierarchy: city > town > village.
+	city := loc.Address.City
+	if city == "" {
+		city = loc.Address.Town
+	}
+	if city == "" {
+		city = loc.Address.Village
+	}
+	m.City = city
+	m.Address = loc.DisplayName
+
+	return nil
+}
+
+// StepLocationDetails enriches a museum with detailed place data from Nominatim.
+func StepLocationDetails(ctx context.Context, item *PipelineItem) error {
+	m := item.Object
+	if m.OsmType == "" || m.OsmID == 0 {
+		return nil
 	}
 
-	for key, value := range sourceMap {
-		target[key] = value
+	details, err := location.PlaceDetails(ctx, m.OsmType, m.OsmID)
+	if err != nil {
+		return err
+	}
+
+	m.Category = details.Category
+	m.MuseumType = details.Type
+	m.WikipediaURL = details.CalculatedWikipedia
+
+	if details.ExtraTags != nil {
+		if website, ok := details.ExtraTags["website"]; ok {
+			m.Website = website
+		}
+		m.RawTags = details.ExtraTags
 	}
 
 	return nil
 }
 
-func StepLocation(ctx context.Context, item *PipelineItem[*models.Museum]) error {
-	locationTerm := fmt.Sprintf("%s %s", item.Object.Name, item.Object.Country)
-	loc, err := location.Geocode(ctx, locationTerm)
-	if err != nil {
-		return err
-	}
-	return mergeIntoResults(item.Results, loc)
-}
-
-func StepLocationDetails(ctx context.Context, item *PipelineItem[*models.Museum]) error {
-	if item.Results["osmType"] == nil || item.Results["osmID"] == nil {
-		return nil
-	}
-	osmType, ok := item.Results["osmType"].(string)
-	if !ok {
-		return fmt.Errorf("osmType is not a string: %v", item.Results["osmType"])
-	}
-	// JSON unmarshals numbers as float64; safely convert to int64.
-	var osmID int64
-	switch v := item.Results["osmID"].(type) {
-	case float64:
-		osmID = int64(v)
-	case int64:
-		osmID = v
-	case int:
-		osmID = int64(v)
-	default:
-		return fmt.Errorf("osmID has unexpected type %T: %v", v, v)
-	}
-
-	details, err := location.PlaceDetails(ctx, osmType, osmID)
-	if err != nil {
-		return err
-	}
-	return mergeIntoResults(item.Results, details)
-}
-
-func initializePipelineItems(in <-chan *service.FetchedObject[*models.Museum]) <-chan *PipelineItem[*models.Museum] {
-	out := make(chan *PipelineItem[*models.Museum])
+func initializePipelineItems(in <-chan *service.FetchedObject[*models.Museum]) <-chan *PipelineItem {
+	out := make(chan *PipelineItem)
 
 	go func() {
 		defer close(out)

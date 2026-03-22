@@ -95,7 +95,11 @@ func TestPipeline_Process(t *testing.T) {
 			close(in)
 
 			p := NewPipeline(tt.stages...)
-			p.Process(ctx, in)
+			out := p.Process(ctx, in)
+
+			// Drain the output channel.
+			for range out {
+			}
 
 			if !reflect.DeepEqual(tt.input.Results, tt.expected) {
 				t.Errorf("got %+v, expected %+v", tt.input.Results, tt.expected)

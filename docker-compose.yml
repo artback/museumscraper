@@ -16,12 +16,19 @@ services:
       - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
       - ALLOW_PLAINTEXT_LISTENER=yes
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   kafka-init:
     image: bitnami/kafka:3.9
     container_name: kafka-init
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     command: [ "/bin/bash", "-c", "/create_topic.sh"]
     volumes:
       - type: bind
@@ -39,23 +46,8 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: ${KAFKA_BROKER}
     depends_on:
-      - kafka
-
-  minio-init:
-    image: minio/mc:latest
-    container_name: minio-init
-    depends_on:
-      - minio
-      - kafka-init
-      - kafka
-    entrypoint: "/bin/sh -c "
-    command:
-      - "./"
-    env_file: .env
-    volumes:
-      - type: bind
-        source: ./create_event.sh
-        target: /create_event.sh
+      kafka:
+        condition: service_healthy
 
   minio:
     image: quay.io/minio/minio:latest
@@ -71,10 +63,52 @@ services:
       MINIO_NOTIFY_KAFKA_BROKERS_1: ${KAFKA_BROKER}
       MINIO_NOTIFY_KAFKA_TOPIC_1: ${KAFKA_TOPIC}
     command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     depends_on:
-      - kafka
-      - kafka-init
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    entrypoint: "/bin/sh -c "
+    command:
+      - "./"
+    env_file: .env
+    volumes:
+      - type: bind
+        source: ./create_event.sh
+        target: /create_event.sh
+
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: museum-postgres
+    environment:
+      POSTGRES_USER: museum
+      POSTGRES_PASSWORD: museum
+      POSTGRES_DB: museumdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U museum -d museumdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
 volumes:
   minio_data:
   kafka_data:
+  postgres_data:

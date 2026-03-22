@@ -2,7 +2,7 @@ package enrich
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 )
 
@@ -35,12 +35,15 @@ func (p *Pipeline[T]) WithWorkers(n int) *Pipeline[T] {
 	return p
 }
 
-// Process consumes items from the input channel and runs all stages on each
-// item. Workers process items concurrently (up to p.workers), but for each
-// item, stages are applied sequentially. Steps within a stage run in parallel.
+// Process consumes items from the input channel, runs all stages on each item,
+// and sends successfully processed items to the returned output channel.
+// Workers process items concurrently (up to p.workers), but for each item,
+// stages are applied sequentially. Steps within a stage run in parallel.
 //
-// Process blocks until the input channel is closed and all workers finish.
-func (p *Pipeline[T]) Process(ctx context.Context, in <-chan *T) {
+// The output channel is closed when all workers finish (i.e., the input channel
+// is closed and all items have been processed).
+func (p *Pipeline[T]) Process(ctx context.Context, in <-chan *T) <-chan *T {
+	out := make(chan *T, p.workers)
 	var wg sync.WaitGroup
 	for range p.workers {
 		wg.Add(1)
@@ -48,10 +51,19 @@ func (p *Pipeline[T]) Process(ctx context.Context, in <-chan *T) {
 			defer wg.Done()
 			for item := range in {
 				p.processItem(ctx, item)
+				select {
+				case out <- item:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out
 }
 
 // processItem runs all stages sequentially for a single item. Within a stage,
@@ -64,7 +76,7 @@ func (p *Pipeline[T]) processItem(ctx context.Context, item *T) {
 			go func(step Step[T]) {
 				defer wg.Done()
 				if err := step(ctx, item); err != nil {
-					log.Printf("Step failed: %v", err)
+					slog.Error("step failed", "error", err)
 				}
 			}(step)
 		}
