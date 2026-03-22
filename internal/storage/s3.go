@@ -8,15 +8,18 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+const defaultMaxConcurrentWrites = 10
+
 type S3Service[T any] struct {
 	client  *minio.Client
 	keyFunc func(value T) string
-	count   int
+	count   atomic.Int64
 }
 
 func NewS3Service[T any](keyFunc func(value T) string) (*S3Service[T], error) {
@@ -88,23 +91,28 @@ func (s *S3Service[T]) StoreObject(ctx context.Context, bucketName string, value
 	return nil
 }
 
+// StoreFromChannel consumes values from the channel and stores them in S3
+// using a bounded worker pool to avoid unbounded goroutine growth.
 func (s *S3Service[T]) StoreFromChannel(ctx context.Context, bucketName string, values <-chan T) {
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, defaultMaxConcurrentWrites)
 
 	for v := range values {
+		sem <- struct{}{} // acquire slot
 		wg.Add(1)
 		go func(val T) {
 			defer wg.Done()
+			defer func() { <-sem }() // release slot
 			if err := s.StoreObject(ctx, bucketName, val); err != nil {
 				log.Printf("Error storing object: %v", err)
 			} else {
-				s.count++
+				s.count.Add(1)
 			}
 		}(v)
 	}
 
 	wg.Wait()
-	log.Printf("Stored %d objects in bucket '%s'", s.count, bucketName)
+	log.Printf("Stored %d objects in bucket '%s'", s.count.Load(), bucketName)
 }
 
 func (s *S3Service[T]) GetObject(ctx context.Context, bucketName, key string) (*T, error) {
