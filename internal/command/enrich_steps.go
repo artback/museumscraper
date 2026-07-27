@@ -33,6 +33,12 @@ func StepLocation(ctx context.Context, item *museumItem) error {
 	if locality := loc.Locality(); locality != "" {
 		item.Set("locality", locality)
 	}
+	// The postal address is the part of the geocoder's answer worth keeping in
+	// a shape a consumer can read, so it goes onto the museum rather than only
+	// into the untyped result map.
+	if !loc.Address.IsZero() && item.Object != nil {
+		item.Object.Address = loc.Address
+	}
 	if website := loc.Website(); website != "" {
 		item.Set("website", website)
 	}

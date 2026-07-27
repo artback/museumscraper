@@ -88,6 +88,14 @@ CREATE INDEX IF NOT EXISTS museums_search_trgm_idx ON museums USING gin (search_
 -- the Louvre-Lens when a query names neither more specifically.
 ALTER TABLE museums ADD COLUMN IF NOT EXISTS sitelinks integer NOT NULL DEFAULT 0;
 
+-- The postal address the enrichment stage resolved, kept as columns rather
+-- than as a blob: a street and a postcode are what a visitor-facing caller
+-- actually needs, and burying them in JSON makes them unqueryable.
+ALTER TABLE museums ADD COLUMN IF NOT EXISTS street   text NOT NULL DEFAULT '';
+ALTER TABLE museums ADD COLUMN IF NOT EXISTS postcode text NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS museums_postcode_idx ON museums (postcode) WHERE postcode <> '';
+
 CREATE INDEX IF NOT EXISTS museums_country_idx ON museums (country);
 
 CREATE TABLE IF NOT EXISTS exhibitions (

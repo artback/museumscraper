@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+
+	"museum/internal/models"
 )
 
 // NominatimLocation holds enriched info about a place.
@@ -27,23 +29,10 @@ type NominatimLocation struct {
 	AddressType string  `json:"addresstype"`
 	Name        string  `json:"name"`
 	DisplayName string  `json:"display_name"`
-	Address     struct {
-		Tourism      string `json:"tourism"`
-		Road         string `json:"road"`
-		HouseNumber  string `json:"house_number"`
-		CityBlock    string `json:"city_block"`
-		Suburb       string `json:"suburb"`
-		CityDistrict string `json:"city_district"`
-		City         string `json:"city"`
-		Town         string `json:"town"`
-		Village      string `json:"village"`
-		ISO3166Lvl6  string `json:"ISO3166-2-lvl6"`
-		Region       string `json:"region"`
-		State        string `json:"state"`
-		Postcode     string `json:"postcode"`
-		Country      string `json:"country"`
-		CountryCode  string `json:"country_code"`
-	} `json:"address"`
+	// Address decodes straight into the shared type, so the postal address
+	// survives as structured data instead of being flattened into a map that
+	// every consumer has to guess its way around.
+	Address     models.Address    `json:"address"`
 	ExtraTags   map[string]string `json:"extratags"`
 	BoundingBox []string          `json:"boundingbox"`
 }
@@ -52,14 +41,7 @@ type NominatimLocation struct {
 type NominatimResponse []NominatimLocation
 
 // Locality returns the most specific settlement name Nominatim supplied.
-func (l NominatimLocation) Locality() string {
-	for _, candidate := range []string{l.Address.City, l.Address.Town, l.Address.Village, l.Address.Suburb} {
-		if candidate != "" {
-			return candidate
-		}
-	}
-	return ""
-}
+func (l NominatimLocation) Locality() string { return l.Address.Locality() }
 
 // Website returns the place's official website, when OSM records one.
 func (l NominatimLocation) Website() string {

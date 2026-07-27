@@ -175,7 +175,7 @@ museum crawl -sources wikidata,category,lists,osm    # maximum coverage
 
 Sources run concurrently into a shared merger, then everything is written at once.
 
-> **Run the sources together in one invocation.** Merging happens *within* a run. Two runs of different sources produce two independent record sets, and the second skips keys that already exist — so the same museum can end up stored twice under different names (`raw_data/france/army-museum-paris.json` from the list crawl and `raw_data/france/musée-de-larmée.json` from Wikidata).
+> **Run the sources together in one invocation.** Merging happens *within* a run. Two runs of different sources produce two independent record sets, and the second skips keys that already exist — so the same museum can end up stored twice under different names (`raw_data/france/army-museum-paris.json` from the list crawl and `raw_data/france/musee-de-l-armee.json` from Wikidata).
 
 Interrupting with Ctrl-C stops collecting but still stores what the sources returned: the persistence phase runs on its own context so a cancelled crawl does not discard an hour of work.
 
@@ -391,13 +391,19 @@ Later sources fill gaps without overwriting established facts, with one exceptio
 | Prefix | Written by | Contents |
 | --- | --- | --- |
 | `raw_data/{country}/{name}.json` | `crawl` | One object per museum, as the sources described it |
-| `enriched_data/{country}/{name}.json` | `enrich` | The same museum plus the flattened geocoder response |
+| `enriched_data/{country}/{name}.json` | `enrich` | The same museum plus the resolved postal address and geocoder response |
+
+Keys are folded to lowercase ASCII — accents dropped, `ø`/`ł`/`ß` transliterated,
+punctuation turned into dashes — so `Musée de l'Armée` is stored at
+`raw_data/france/musee-de-l-armee.json`. A name written entirely in a script
+ASCII cannot carry falls back to a short digest (`x-3f2a...`) rather than
+colliding with every other such name.
 
 **Postgres** holds what answers queries:
 
 | Table | Loaded by | Indexes |
 | --- | --- | --- |
-| `museums` | `crawl`, `reindex` | GIST on `location`, GIN trigram on the name and on name+aliases+town, prefix index for typeahead |
+| `museums` | `crawl`, `reindex` | GIST on `location`, GIN trigram on the name and on name+aliases+town, prefix index for typeahead, partial index on `postcode` |
 | `exhibitions` | `refresh` | GIST on `location`, closing date |
 
 A museum is identified by its Wikidata id where it has one, and otherwise by its name and country — the same rule the in-process merger uses, so the two cannot disagree about what counts as the same museum. Loads upsert on that identity, so a re-crawl updates rows in place rather than accumulating copies.
@@ -428,6 +434,26 @@ Radius queries run through PostGIS: `ST_DWithin` against a GIST index on a `geog
   "source_page": "List of museums in Albania",
   "verified": true,
   "sources": ["wikidata", "wikipedia-list"]
+}
+```
+
+`enrich` adds the postal address the geocoder resolved, kept as structured
+fields rather than one display string so a caller can use the parts it needs:
+
+```json
+{
+  "name": "Musée d'Orsay",
+  "country": "France",
+  "latitude": 48.8599,
+  "longitude": 2.3266,
+  "address": {
+    "house_number": "1",
+    "road": "Rue de la Légion d'Honneur",
+    "city": "Paris",
+    "postcode": "75007",
+    "country": "France",
+    "country_code": "fr"
+  }
 }
 ```
 

@@ -99,11 +99,11 @@ func (s *Store) SaveMuseums(ctx context.Context, museums []models.Museum) (int64
 	const stmt = `
 INSERT INTO museums (
     wikidata_id, name, normalized, search_text, locality_normalized, country, locality, description,
-    website, wikipedia_url, page_id, source_page, aliases, sources, verified, sitelinks, location, updated_at
+    website, wikipedia_url, page_id, source_page, aliases, sources, verified, sitelinks, street, postcode, location, updated_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-    CASE WHEN $17::double precision IS NULL THEN NULL
-         ELSE ST_SetSRID(ST_MakePoint($18::double precision, $17::double precision), 4326)::geography END,
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+    CASE WHEN $19::double precision IS NULL THEN NULL
+         ELSE ST_SetSRID(ST_MakePoint($20::double precision, $19::double precision), 4326)::geography END,
     now()
 )
 ON CONFLICT (identity) DO UPDATE SET
@@ -123,6 +123,8 @@ ON CONFLICT (identity) DO UPDATE SET
     sources       = EXCLUDED.sources,
     verified      = museums.verified OR EXCLUDED.verified,
     sitelinks     = greatest(EXCLUDED.sitelinks, museums.sitelinks),
+    street        = coalesce(nullif(EXCLUDED.street, ''), museums.street),
+    postcode      = coalesce(nullif(EXCLUDED.postcode, ''), museums.postcode),
     -- A position already known is not replaced by a null one: enrichment can
     -- add coordinates, and a later crawl without them must not remove them.
     location      = coalesce(EXCLUDED.location, museums.location),
@@ -145,7 +147,7 @@ ON CONFLICT (identity) DO UPDATE SET
 			nullIfEmpty(m.Country),
 			m.Locality, m.Description, m.Website, m.WikipediaURL, m.PageID,
 			m.SourcePage, textArray(m.AlsoKnownAs), textArray(m.Sources), m.Verified,
-			m.Sitelinks, lat, lon)
+			m.Sitelinks, m.Address.Street(), m.Address.Postcode, lat, lon)
 	}
 	if batch.Len() == 0 {
 		return 0, nil
@@ -212,7 +214,7 @@ func (s *Store) Nearby(ctx context.Context, lat, lon, radiusKm float64, limit in
 	const stmt = `
 SELECT name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
-       aliases, sources, verified,
+       aliases, sources, verified, street, postcode,
        ST_Y(location::geometry), ST_X(location::geometry),
        ST_Distance(location, $1::geography) / 1000.0 AS distance_km
 FROM museums
@@ -261,7 +263,7 @@ func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, err
 WITH q AS (SELECT $1::text AS term)
 SELECT name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
-       aliases, sources, verified,
+       aliases, sources, verified, street, postcode,
        ST_Y(location::geometry), ST_X(location::geometry),
        (
          CASE WHEN normalized = q.term THEN 3.0
@@ -312,15 +314,17 @@ func scanHits(rows pgx.Rows, withDistance bool) ([]Hit, error) {
 			lat, lon *float64
 			last     float64
 		)
+		var street, postcode string
 		if err := rows.Scan(
 			&hit.Museum.Name, &hit.Museum.Country, &hit.Museum.Locality,
 			&hit.Museum.Description, &hit.Museum.Website, &hit.Museum.WikipediaURL,
 			&hit.Museum.WikidataID, &hit.Museum.AlsoKnownAs, &hit.Museum.Sources,
-			&hit.Museum.Verified, &lat, &lon, &last,
+			&hit.Museum.Verified, &street, &postcode, &lat, &lon, &last,
 		); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
 
+		hit.Museum.Address.Road, hit.Museum.Address.Postcode = street, postcode
 		if lat != nil && lon != nil {
 			hit.Museum.Latitude, hit.Museum.Longitude = *lat, *lon
 		}
@@ -505,7 +509,7 @@ func (s *Store) EachMuseum(ctx context.Context, fn func(models.Museum)) error {
 	const stmt = `
 SELECT name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
-       aliases, sources, verified,
+       aliases, sources, verified, street, postcode,
        ST_Y(location::geometry), ST_X(location::geometry), 0::double precision
 FROM museums`
 

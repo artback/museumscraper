@@ -17,6 +17,10 @@ type Museum struct {
 	// Website is the museum's own site, where a source records one.
 	Website string `json:"website,omitempty"`
 
+	// Address is the postal address the enrichment stage resolved, where it
+	// found one.
+	Address Address `json:"address,omitzero"`
+
 	// Sitelinks counts the Wikipedia language editions with an article about
 	// this museum. It is the closest thing the sources offer to prominence:
 	// the Louvre has 167, the Detroit Institute of Arts 29, a village museum
