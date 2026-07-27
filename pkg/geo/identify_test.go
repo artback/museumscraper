@@ -62,3 +62,49 @@ func TestExtractCountry(t *testing.T) {
 		})
 	}
 }
+
+func TestCanonical_CollapsesAliases(t *testing.T) {
+	cases := map[string]string{
+		// Two spellings of one country must resolve to one name, or every
+		// consumer sees two countries: records never merge across them, and an
+		// audit reports the difference in wording as a contradiction.
+		"Czechia":         "Czech Republic",
+		"Czech Republic":  "Czech Republic",
+		"Cabo Verde":      "Cape Verde",
+		"Cape Verde":      "Cape Verde",
+		"Côte d'Ivoire":   "Ivory Coast",
+		"Ivory Coast":     "Ivory Coast",
+		"Holland":         "Netherlands",
+		"the Netherlands": "Netherlands",
+		"USA":             "United States",
+		"Great Britain":   "United Kingdom",
+		"Burma":           "Myanmar",
+		"Timor-Leste":     "East Timor",
+	}
+
+	for in, want := range cases {
+		got, ok := Canonical(in)
+		if !ok {
+			t.Errorf("Canonical(%q) did not resolve", in)
+			continue
+		}
+		if got != want {
+			t.Errorf("Canonical(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCanonical_AliasesHaveISOCodes(t *testing.T) {
+	// Canonical now rewrites some names, so every result it can produce must
+	// still resolve to a country code or the OpenStreetMap source loses them.
+	for alias := range countryAliases {
+		canonical, ok := Canonical(alias)
+		if !ok {
+			t.Errorf("alias %q does not resolve", alias)
+			continue
+		}
+		if _, ok := ISOCode(canonical); !ok {
+			t.Errorf("alias %q resolves to %q, which has no ISO code", alias, canonical)
+		}
+	}
+}

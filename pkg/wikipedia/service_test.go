@@ -1,6 +1,7 @@
 package wikipedia
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -78,7 +79,7 @@ func TestCategoryService_GetAllCategoryMembers_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := svc.GetAllCategoryMembers(tt.input)
+			got, err := svc.GetAllCategoryMembers(context.Background(), tt.input)
 			if err != nil {
 				t.Fatalf("GetAllCategoryMembers error: %v", err)
 			}
@@ -134,7 +135,7 @@ func TestCategoryService_GetPageContent_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := svc.GetPageContent(tt.title)
+			got, err := svc.GetPageContent(context.Background(), tt.title)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error presence mismatch: err=%v wantErr=%v", err, tt.wantErr)
 			}
@@ -166,7 +167,7 @@ func TestClient_URLBuilding_SpacesReplaced(t *testing.T) {
 	client := newTestClient(server.URL)
 
 	// Category members: should include cmtitle with underscore
-	_, _ = client.FetchCategoryMembers("My Category Title", "")
+	_, _ = client.FetchCategoryMembers(context.Background(), "My Category Title", "")
 	if !strings.Contains(gotPath, fmt.Sprintf("%s", url.QueryEscape("My_Category_Title"))) {
 		t.Errorf("expected underscores in cmtitle, got query: %s", gotPath)
 	}

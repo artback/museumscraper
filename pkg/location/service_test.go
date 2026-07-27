@@ -1,11 +1,16 @@
 package location_test
 
 import (
+	"context"
 	"museum/pkg/location"
 	"testing"
 )
 
 func TestGeocode_RealAPI(t *testing.T) {
+	if testing.Short() {
+		t.Skip("hits the live Nominatim API")
+	}
+
 	tests := []struct {
 		name        string
 		query       string
@@ -38,7 +43,7 @@ func TestGeocode_RealAPI(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := location.Geocode(tt.query)
+			got, err := location.Geocode(context.Background(), tt.query)
 			if err != nil {
 				t.Fatalf("Geocode(%q) returned error: %v", tt.query, err)
 			}

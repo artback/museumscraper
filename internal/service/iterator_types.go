@@ -44,4 +44,9 @@ type FetchedObject[T any] struct {
 	Data T
 	// Event is the original MinIO/S3 notification event that triggered the fetch.
 	Event notification.Info
+	// Ack must be called once the consumer has finished with the object. The
+	// Kafka offset is committed only after every object from a message has been
+	// acknowledged, so an interrupted run redelivers unfinished work instead of
+	// dropping it. It is safe to call more than once.
+	Ack func()
 }

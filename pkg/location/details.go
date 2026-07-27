@@ -1,13 +1,13 @@
 package location
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
+	"strconv"
 )
 
+// NominatimDetailsResponse is the full detail record for a place.
 type NominatimDetailsResponse struct {
 	PlaceID             int64             `json:"place_id"`
 	ParentPlaceID       int64             `json:"parent_place_id"`
@@ -36,45 +36,46 @@ type NominatimDetailsResponse struct {
 	Icon string `json:"icon"`
 }
 
-// PlaceDetails fetches full details about a place from Nominatim.
-func PlaceDetails(osmType string, osmID int) (*NominatimDetailsResponse, error) {
-	baseURL := "https://nominatim.openstreetmap.org/details"
+// PlaceDetails fetches the full record for an OSM object.
+//
+// osmType is the single-letter form Nominatim expects ("N", "W" or "R"); the
+// long form returned by a search ("node", "way", "relation") is accepted too
+// and converted.
+func PlaceDetails(ctx context.Context, osmType string, osmID int64) (*NominatimDetailsResponse, error) {
+	shortType, err := osmTypeCode(osmType)
+	if err != nil {
+		return nil, err
+	}
 
 	params := url.Values{}
-	params.Set("osmtype", osmType)
-	params.Set("osmid", fmt.Sprintf("%d", osmID))
+	params.Set("osmtype", shortType)
+	params.Set("osmid", strconv.FormatInt(osmID, 10))
 	params.Set("addressdetails", "1")
 	params.Set("hierarchy", "0")
 	params.Set("group_hierarchy", "1")
+	params.Set("extratags", "1")
 	params.Set("format", "json")
 
-	reqURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
-
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "golang-nominatim-client/1.0")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status: %s", resp.Status)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
 	var details NominatimDetailsResponse
-	if err := json.Unmarshal(body, &details); err != nil {
-		return nil, err
+	if err := get(ctx, "/details", params, &details); err != nil {
+		return nil, fmt.Errorf("place details %s%d: %w", shortType, osmID, err)
 	}
-
 	return &details, nil
+}
+
+// osmTypeCode normalises an OSM element type to the single letter the details
+// endpoint requires.
+func osmTypeCode(osmType string) (string, error) {
+	switch osmType {
+	case "N", "W", "R":
+		return osmType, nil
+	case "node":
+		return "N", nil
+	case "way":
+		return "W", nil
+	case "relation":
+		return "R", nil
+	default:
+		return "", fmt.Errorf("unknown osm type %q", osmType)
+	}
 }

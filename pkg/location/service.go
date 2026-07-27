@@ -1,13 +1,18 @@
+// Package location geocodes place names against Nominatim (OpenStreetMap).
+//
+// Nominatim's usage policy requires a descriptive User-Agent identifying the
+// application and allows at most one request per second. Both are enforced
+// here: requests without a real User-Agent are rejected by the service, which
+// is why every lookup goes through the shared client in client.go.
 package location
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"net/http"
 	"net/url"
 )
 
-// NominatimLocation holds enriched info about a place
+// NominatimLocation holds enriched info about a place.
 type NominatimLocation struct {
 	PlaceID     int64   `json:"place_id"`
 	Licence     string  `json:"licence"`
@@ -25,6 +30,7 @@ type NominatimLocation struct {
 	Address     struct {
 		Tourism      string `json:"tourism"`
 		Road         string `json:"road"`
+		HouseNumber  string `json:"house_number"`
 		CityBlock    string `json:"city_block"`
 		Suburb       string `json:"suburb"`
 		CityDistrict string `json:"city_district"`
@@ -33,56 +39,55 @@ type NominatimLocation struct {
 		Village      string `json:"village"`
 		ISO3166Lvl6  string `json:"ISO3166-2-lvl6"`
 		Region       string `json:"region"`
+		State        string `json:"state"`
 		Postcode     string `json:"postcode"`
 		Country      string `json:"country"`
 		CountryCode  string `json:"country_code"`
 	} `json:"address"`
-	BoundingBox []string `json:"boundingbox"`
+	ExtraTags   map[string]string `json:"extratags"`
+	BoundingBox []string          `json:"boundingbox"`
 }
 
-// NominatimResponse is shaped for the API response
+// NominatimResponse is the shape of a Nominatim search response.
 type NominatimResponse []NominatimLocation
 
-// Geocode looks up a museum/location name and returns coordinates and details
-func Geocode(query string) (*NominatimLocation, error) {
-	base := "https://nominatim.openstreetmap.org/search"
+// Locality returns the most specific settlement name Nominatim supplied.
+func (l NominatimLocation) Locality() string {
+	for _, candidate := range []string{l.Address.City, l.Address.Town, l.Address.Village, l.Address.Suburb} {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
 
-	// Use url.Values to construct query parameters
+// Website returns the place's official website, when OSM records one.
+func (l NominatimLocation) Website() string {
+	for _, key := range []string{"website", "contact:website", "url"} {
+		if v := l.ExtraTags[key]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// Geocode looks up a place name and returns the best matching result.
+// It returns ErrNoResults when Nominatim knows nothing about the query.
+func Geocode(ctx context.Context, query string) (*NominatimLocation, error) {
 	params := url.Values{}
 	params.Set("q", query)
 	params.Set("format", "json")
 	params.Set("addressdetails", "1")
+	params.Set("extratags", "1")
 	params.Set("limit", "1")
 	params.Set("accept-language", "en")
 
-	u := fmt.Sprintf("%s?%s", base, params.Encode())
-
-	resp, err := http.Get(u)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
 	var results NominatimResponse
-	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
-		return nil, err
+	if err := get(ctx, "/search", params, &results); err != nil {
+		return nil, fmt.Errorf("geocode %q: %w", query, err)
 	}
-
 	if len(results) == 0 {
-		return nil, fmt.Errorf("no results for %s", query)
-	}
-
-	first := results[0]
-	var lat, lon float64
-	fmt.Sscanf(first.Lat, "%f", &lat)
-	fmt.Sscanf(first.Lon, "%f", &lon)
-
-	city := first.Address.City
-	if city == "" {
-		city = first.Address.Town
-	}
-	if city == "" {
-		city = first.Address.Village
+		return nil, fmt.Errorf("geocode %q: %w", query, ErrNoResults)
 	}
 	return &results[0], nil
 }
