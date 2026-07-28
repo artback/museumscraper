@@ -108,11 +108,12 @@ func (s *Store) SaveMuseums(ctx context.Context, museums []models.Museum) (int64
 	const stmt = `
 INSERT INTO museums (
     wikidata_id, name, normalized, search_text, locality_normalized, country, locality, description,
-    website, wikipedia_url, page_id, source_page, aliases, sources, verified, sitelinks, street, postcode, location, updated_at
+    website, wikipedia_url, page_id, source_page, aliases, aliases_normalized, sources, verified,
+    sitelinks, street, postcode, location, updated_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-    CASE WHEN $19::double precision IS NULL THEN NULL
-         ELSE ST_SetSRID(ST_MakePoint($20::double precision, $19::double precision), 4326)::geography END,
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+    CASE WHEN $20::double precision IS NULL THEN NULL
+         ELSE ST_SetSRID(ST_MakePoint($21::double precision, $20::double precision), 4326)::geography END,
     now()
 )
 ON CONFLICT (identity) DO UPDATE SET
@@ -129,6 +130,7 @@ ON CONFLICT (identity) DO UPDATE SET
     page_id       = coalesce(nullif(EXCLUDED.page_id, 0), museums.page_id),
     source_page   = coalesce(nullif(EXCLUDED.source_page, ''), museums.source_page),
     aliases       = EXCLUDED.aliases,
+    aliases_normalized = EXCLUDED.aliases_normalized,
     sources       = EXCLUDED.sources,
     verified      = museums.verified OR EXCLUDED.verified,
     sitelinks     = greatest(EXCLUDED.sitelinks, museums.sitelinks),
@@ -155,7 +157,8 @@ ON CONFLICT (identity) DO UPDATE SET
 			m.WikidataID, name, search.Normalize(name), searchText(m), search.Normalize(m.Locality),
 			nullIfEmpty(m.Country),
 			m.Locality, m.Description, m.Website, m.WikipediaURL, m.PageID,
-			m.SourcePage, textArray(m.AlsoKnownAs), textArray(m.Sources), m.Verified,
+			m.SourcePage, textArray(m.AlsoKnownAs), normalizedAliases(m.AlsoKnownAs),
+			textArray(m.Sources), m.Verified,
 			m.Sitelinks, m.Address.Street(), m.Address.Postcode, lat, lon)
 	}
 	if batch.Len() == 0 {
@@ -318,6 +321,26 @@ func searchText(m models.Museum) string {
 	return search.Normalize(strings.Join(parts, " "))
 }
 
+// normalizedAliases reduces each alternative name to its comparable form, for
+// exact matching. Empty and duplicate results are dropped: an alias that
+// normalises to the same string twice would only pad the index.
+func normalizedAliases(aliases []string) []string {
+	normalized := make([]string, 0, len(aliases))
+	seen := make(map[string]struct{}, len(aliases))
+	for _, alias := range aliases {
+		reduced := search.Normalize(alias)
+		if reduced == "" {
+			continue
+		}
+		if _, dup := seen[reduced]; dup {
+			continue
+		}
+		seen[reduced] = struct{}{}
+		normalized = append(normalized, reduced)
+	}
+	return normalized
+}
+
 // textArray makes a slice safe to send to a NOT NULL array column. A nil Go
 // slice encodes as SQL NULL, not as an empty array, so a museum with no aliases
 // would be rejected by the constraint rather than stored with none.
@@ -425,6 +448,11 @@ SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(descripti
        count(*) OVER () AS total,
        (
          CASE WHEN normalized = q.term THEN 3.0
+              -- An exact alias match is nearly as strong as an exact name
+              -- match, and stronger than a prefix on the name: someone typing
+              -- "moma" means the museum that calls itself MoMA, not the first
+              -- museum whose name happens to begin with those letters.
+              WHEN aliases_normalized @> ARRAY[q.term] THEN 2.5
               WHEN normalized LIKE q.term || '%' THEN 1.5
               WHEN position(q.term in normalized) > 0 THEN 0.75
               ELSE 0 END
@@ -473,6 +501,7 @@ WHERE normalized % q.term
    OR q.term <% normalized
    OR normalized LIKE q.term || '%'
    OR search_text % q.term
+   OR aliases_normalized @> ARRAY[q.term]
 ORDER BY score DESC, length(normalized), name, id
 LIMIT $2 OFFSET $3`
 

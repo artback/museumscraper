@@ -564,3 +564,33 @@ func TestExhibitionCoverage(t *testing.T) {
 		t.Errorf("last scraped = %v, want nil for an area never refreshed", coverage.LastScraped)
 	}
 }
+
+// An acronym is an exact match or nothing. search_text holds the aliases, but
+// only for fuzzy matching, and whole-string similarity cannot find "moma"
+// inside "museum of modern art moma museum of modern art new york" — so the
+// Museum of Modern Art was not even a candidate, while MOMA Tainan and MOMA
+// Machynlleth were.
+func TestSearch_ExactAliasBeatsNamePrefix(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Museum of Modern Art", Country: "United States", WikidataID: "Q188740",
+			AlsoKnownAs: []string{"MoMA", "The Museum of Modern Art, New York"}, Sitelinks: 67},
+		{Name: "MOMA Tainan", Country: "Taiwan", WikidataID: "Q2", Sitelinks: 1},
+		{Name: "MOMA Machynlleth", Country: "United Kingdom", WikidataID: "Q3", Sitelinks: 1},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	page, err := store.Search(ctx, "moma", 3, 0)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(page.Hits) == 0 {
+		t.Fatal("no hits")
+	}
+	if page.Hits[0].Museum.Name != "Museum of Modern Art" {
+		t.Errorf("top hit = %q, want the museum that calls itself MoMA", page.Hits[0].Museum.Name)
+	}
+}

@@ -368,8 +368,8 @@ prominence from the museum's Wikidata sitelink count — how many Wikipedia
 language editions cover it, which is the closest thing the sources offer to
 "how well known is this".
 
-The weights are not arbitrary. Measured on 27 realistic queries against the
-live catalogue, the earlier formula scored 19/27; the current one scores 27/27.
+The weights are not arbitrary. Measured on 29 realistic queries against the
+live catalogue, the earliest formula scored 19/29; the current one scores 28/29.
 Two mistakes accounted for most of the gap. Taking the *greater* of the two
 similarity measures let the lenient one overrule the strict one, so
 `kunstmuseum zurich` matched "museum zurich" inside "National Museum Zurich"
@@ -378,6 +378,21 @@ weight 1.0, which both fired on letters inside unrelated words — 338 towns are
 three characters, and "Sé" matched every query containing "mu-**se**-um" — and
 outweighed the name entirely, so `metropolitan museum new york` returned the
 New York State Museum.
+
+The one remaining failure is a data problem rather than a scoring one, and is
+worth knowing about because it affects more than search: `kunstmuseum zurich`
+returns National Museum Zurich rather than the Kunsthaus, because Wikidata
+records the Kunsthaus in "District 1" while the National Museum is recorded in
+"Zurich" — so only the latter earns the town bonus. Localities arrive at
+whatever granularity the source used ("4th arrondissement of Paris", "Gothenburg
+Municipality"), and the crawler does not follow the administrative chain up to
+the city. Fetching P131's parents would fix this class of problem properly.
+
+Acronyms are matched exactly against the alternative names rather than
+fuzzily: `search_text` holds the aliases, but whole-string similarity cannot
+find "moma" inside a sixty-character concatenation, so the Museum of Modern Art
+was not even a candidate for the query `moma` while MOMA Tainan and MOMA
+Machynlleth were.
 
 An honest limit that remains: aliases are collected in English only. Five
 languages cost 60% more response bytes and twelve made the query service time

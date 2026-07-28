@@ -171,3 +171,16 @@ CREATE INDEX IF NOT EXISTS museums_locality_trgm_idx
 -- expression index keeps that lookup off a sequential scan.
 CREATE INDEX IF NOT EXISTS museums_locality_head_trgm_idx
     ON museums USING gin ((split_part(locality_normalized, ' ', 1)) gin_trgm_ops);
+
+-- The alternative names, each normalised, as an array.
+--
+-- search_text already holds the aliases, but only for fuzzy matching, and the
+-- whole-string similarity operator cannot find a short alias inside it: "moma"
+-- against "museum of modern art moma museum of modern art new york" scores far
+-- below any threshold, so the Museum of Modern Art was not even a candidate for
+-- the query "moma" while MOMA Tainan and MOMA Machynlleth were. An acronym is
+-- an exact match or nothing, which is what this column is for.
+ALTER TABLE museums ADD COLUMN IF NOT EXISTS aliases_normalized text[] NOT NULL DEFAULT '{}';
+
+CREATE INDEX IF NOT EXISTS museums_aliases_normalized_idx
+    ON museums USING gin (aliases_normalized);
