@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -235,8 +236,22 @@ func (s *Service) streamPaged(ctx context.Context, selector, countryName string,
 			return emitted, ctx.Err()
 		}
 
+		// Aliases are English-only, and deliberately so. skos:altLabel is
+		// multi-valued, so each language added multiplies the rows a page
+		// returns: English costs nothing measurable, five languages cost 60%
+		// more bytes, and twelve made the service time out at 504 — which
+		// during a crawl loses a whole page of a country. English is also where
+		// the acronyms live ("MoMA", "the Met"), and an acronym is the case
+		// nothing else in the pipeline can recover: "moma" matched a gallery in
+		// Wales while the Museum of Modern Art was unreachable, because no
+		// spelling of the query resembles the stored name.
+		//
+		// The gap this leaves is a museum whose English label is a translation
+		// and whose native name is only an alias. The label service's fallback
+		// chain covers most of those already by naming the museum natively when
+		// no English label exists.
 		sparql := fmt.Sprintf(`
-SELECT ?item ?itemLabel ?desc ?coord ?website ?article ?localityLabel ?countryLabel ?sitelinks WHERE {
+SELECT ?item ?itemLabel ?desc ?coord ?website ?article ?localityLabel ?countryLabel ?sitelinks ?alt WHERE {
   { SELECT DISTINCT ?item WHERE { %s } ORDER BY ?item LIMIT %d OFFSET %d }
   OPTIONAL { ?item wdt:P625 ?coord }
   OPTIONAL { ?item wdt:P856 ?website }
@@ -245,6 +260,7 @@ SELECT ?item ?itemLabel ?desc ?coord ?website ?article ?localityLabel ?countryLa
   OPTIONAL { ?article schema:about ?item ; schema:isPartOf <https://en.wikipedia.org/> }
   OPTIONAL { ?item schema:description ?desc FILTER(LANG(?desc) = "en") }
   OPTIONAL { ?item wikibase:sitelinks ?sitelinks }
+  OPTIONAL { ?item skos:altLabel ?alt FILTER(LANG(?alt) = "en") }
   SERVICE wikibase:label { bd:serviceParam wikibase:language "%s". }
 }`, selector, pageSize, offset, labelLanguages)
 
@@ -316,8 +332,17 @@ func museumsFromRows(rows []binding, fallbackCountry string) (museums []models.M
 				museum.Latitude, museum.Longitude = lat, lon
 			}
 		}
+		// Aliases accumulate: altLabel is multi-valued, so a museum's alternative
+		// names arrive spread across several rows rather than in one.
+		if alt := strings.TrimSpace(row["alt"]); alt != "" &&
+			alt != museum.Name && !slices.Contains(museum.AlsoKnownAs, alt) {
+			museum.AlsoKnownAs = append(museum.AlsoKnownAs, alt)
+		}
 		if museum.Sitelinks == 0 {
-			if n, err := strconv.Atoi(row["sitelinks"]); err == nil {
+			// Clamped: the search score takes ln(1 + sitelinks), which errors at
+			// zero, so a negative value from a malformed response would break
+			// every search that scored against that row.
+			if n, err := strconv.Atoi(row["sitelinks"]); err == nil && n > 0 {
 				museum.Sitelinks = n
 			}
 		}

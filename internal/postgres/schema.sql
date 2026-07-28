@@ -88,6 +88,17 @@ CREATE INDEX IF NOT EXISTS museums_search_trgm_idx ON museums USING gin (search_
 -- the Louvre-Lens when a query names neither more specifically.
 ALTER TABLE museums ADD COLUMN IF NOT EXISTS sitelinks integer NOT NULL DEFAULT 0;
 
+-- The search score takes ln(1 + sitelinks), and ln(0) is an error rather than
+-- an infinity in Postgres. A single negative value would therefore fail every
+-- search whose candidate set happened to include that row — not just that row.
+-- Cheap to forbid outright.
+DO $$
+BEGIN
+    ALTER TABLE museums ADD CONSTRAINT museums_sitelinks_non_negative CHECK (sitelinks >= 0);
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END $$;
+
 -- The postal address the enrichment stage resolved, kept as columns rather
 -- than as a blob: a street and a postcode are what a visitor-facing caller
 -- actually needs, and burying them in JSON makes them unqueryable.

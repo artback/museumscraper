@@ -114,6 +114,19 @@ func loadIntoDatabase(ctx context.Context, museums []models.Museum) {
 		written += n
 	}
 	log.Printf("Loaded %d museums into the database", written)
+
+	// A crawl is where duplicates are created, so it is where they are cleaned
+	// up. Records arriving with a Wikidata id for a museum already stored under
+	// its name are promoted in place by the upsert; the ones whose id was
+	// already claimed are folded together here.
+	removed, err := db.MergeDuplicates(ctx)
+	if err != nil {
+		log.Printf("Duplicate merge failed: %v (records are intact; rerun \"museum reindex\")", err)
+		return
+	}
+	if removed > 0 {
+		log.Printf("Merged %d duplicate records", removed)
+	}
 }
 
 // collectSources runs every enabled source concurrently and feeds the merger.

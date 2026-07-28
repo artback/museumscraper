@@ -283,3 +283,163 @@ func TestExhibitions(t *testing.T) {
 		t.Errorf("got %d with upcoming, want 3", len(withUpcoming))
 	}
 }
+
+// The bug this guards: a museum first stored without a Wikidata id, then seen
+// again with one. Its identity changes when the id arrives, so the upsert found
+// no conflict and inserted a second copy. One Wikidata crawl made 632 of these.
+func TestSaveMuseums_MergesWhenAMuseumGainsAWikidataID(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	// A list crawl finds the museum but no identifier for it.
+	fromList := models.Museum{Name: "Galata Museo del Mare", Country: "Italy",
+		Website: "https://galatamuseodelmare.it", Sources: []string{"wikipedia-list"}}
+	// Wikidata later supplies the same museum, with an id and coordinates.
+	fromWikidata := models.Museum{Name: "Galata Museo del Mare", Country: "Italy",
+		WikidataID: "Q1916826", Latitude: 44.4118, Longitude: 8.9223,
+		Sitelinks: 7, Sources: []string{"wikidata"}}
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{fromList}); err != nil {
+		t.Fatalf("save list record: %v", err)
+	}
+	if _, err := store.SaveMuseums(ctx, []models.Museum{fromWikidata}); err != nil {
+		t.Fatalf("save wikidata record: %v", err)
+	}
+
+	counts, err := store.Counts(ctx)
+	if err != nil {
+		t.Fatalf("counts: %v", err)
+	}
+	if counts.Museums != 1 {
+		t.Fatalf("museums = %d, want 1 — the record was duplicated rather than merged", counts.Museums)
+	}
+
+	hits, err := store.Search(ctx, "galata museo del mare", 5)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("search returned %d hits, want 1", len(hits))
+	}
+
+	// Both sources' facts must survive the merge.
+	got := hits[0].Museum
+	if got.WikidataID != "Q1916826" {
+		t.Errorf("wikidata id = %q, want Q1916826", got.WikidataID)
+	}
+	if got.Website != "https://galatamuseodelmare.it" {
+		t.Errorf("website from the list crawl was lost: %q", got.Website)
+	}
+	if !got.HasCoordinates() {
+		t.Error("coordinates from Wikidata were lost")
+	}
+}
+
+// MergeDuplicates repairs the pairs already in the table, which the promotion
+// cannot: there the Wikidata id is taken, so promoting would collide.
+func TestMergeDuplicates(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Galata Museo del Mare", Country: "Italy", WikidataID: "Q1916826", Latitude: 44.4118, Longitude: 8.9223},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Reproduce the stored damage: a name-keyed twin of a row whose id is taken.
+	if _, err := store.pool.Exec(ctx, `
+INSERT INTO museums (name, normalized, search_text, locality_normalized, country, website, aliases, sources, verified, sitelinks)
+VALUES ('Galata Museo del Mare', 'galata museo del mare', 'galata museo del mare', '', 'Italy',
+        'https://galatamuseodelmare.it', '{}', '{wikipedia-list}', true, 0)`); err != nil {
+		t.Fatalf("seed duplicate: %v", err)
+	}
+
+	removed, err := store.MergeDuplicates(ctx)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	hits, err := store.Search(ctx, "galata museo del mare", 5)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("search returned %d hits, want 1", len(hits))
+	}
+	got := hits[0].Museum
+	if got.WikidataID != "Q1916826" {
+		t.Errorf("the row carrying the Wikidata id should have been kept, got %q", got.WikidataID)
+	}
+	if got.Website != "https://galatamuseodelmare.it" {
+		t.Errorf("the discarded row's website was not carried over: %q", got.Website)
+	}
+	if !got.Verified {
+		t.Error("verified should survive the merge")
+	}
+
+	// Running again must be a no-op.
+	if again, err := store.MergeDuplicates(ctx); err != nil || again != 0 {
+		t.Errorf("second merge removed %d (err %v), want 0 — not idempotent", again, err)
+	}
+}
+
+// Ranking regression: a generic word shared with the query must not beat the
+// distinctive one. word_similarity finds "museum zurich" inside "National
+// Museum Zurich" and scored it above "Kunsthaus Zürich", which whole-name
+// similarity ranks higher. Blending the two measures is what fixes it.
+func TestSearch_DistinctiveNameBeatsGenericWord(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Kunsthaus Zürich", Country: "Switzerland", Locality: "Zurich",
+			WikidataID: "Q685038", Sitelinks: 27},
+		{Name: "National Museum Zurich", Country: "Switzerland", Locality: "Zurich",
+			WikidataID: "Q671384", Sitelinks: 26},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	hits, err := store.Search(ctx, "kunstmuseum zurich", 2)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("no hits")
+	}
+	if hits[0].Museum.Name != "Kunsthaus Zürich" {
+		t.Errorf("top hit = %q, want %q", hits[0].Museum.Name, "Kunsthaus Zürich")
+	}
+}
+
+// The locality bonus is matched on word boundaries. A plain substring test
+// fired on three-letter towns inside unrelated words — "Sé" (Funchal) matched
+// every query containing "mu-se-um" — promoting an unrelated museum a full
+// point above equally-named rivals.
+func TestSearch_LocalityBonusRespectsWordBoundaries(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Sacred Art Museum", Country: "Spain", Locality: "La Rioja", WikidataID: "Q1"},
+		{Name: "Sacred Art Museum of Funchal", Country: "Portugal", Locality: "Sé", WikidataID: "Q2"},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	hits, err := store.Search(ctx, "sacred art museum", 2)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("no hits")
+	}
+	if hits[0].Museum.Name != "Sacred Art Museum" {
+		t.Errorf("top hit = %q, want the exact match; %q was promoted by its town matching inside \"museum\"",
+			hits[0].Museum.Name, hits[0].Museum.Name)
+	}
+}

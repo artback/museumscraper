@@ -83,6 +83,14 @@ func runReindex(ctx context.Context, args []string) error {
 		written += n
 	}
 
+	removed, err := db.MergeDuplicates(ctx)
+	if err != nil {
+		return err
+	}
+	if removed > 0 {
+		log.Printf("Merged %d duplicate records", removed)
+	}
+
 	counts, err := db.Counts(ctx)
 	if err != nil {
 		return err
