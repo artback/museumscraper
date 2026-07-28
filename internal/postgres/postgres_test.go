@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -592,5 +593,51 @@ func TestSearch_ExactAliasBeatsNamePrefix(t *testing.T) {
 	}
 	if page.Hits[0].Museum.Name != "Museum of Modern Art" {
 		t.Errorf("top hit = %q, want the museum that calls itself MoMA", page.Hits[0].Museum.Name)
+	}
+}
+
+// Two sources know a museum by different names. Neither may erase the other's:
+// OpenStreetMap carries the local name and Wikidata the English one, and the
+// catalogue is only searchable in both languages if it keeps both.
+func TestSaveMuseums_UnionsAliasesAcrossSources(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	fromWikidata := models.Museum{Name: "The Maritime Museum and Aquarium", Country: "Sweden",
+		WikidataID: "Q10545689", AlsoKnownAs: []string{"Maritime Museum"}, Sources: []string{"wikidata"}}
+	fromOSM := models.Museum{Name: "The Maritime Museum and Aquarium", Country: "Sweden",
+		WikidataID: "Q10545689", AlsoKnownAs: []string{"Sjöfartsmuseet Akvariet"}, Sources: []string{"osm"}}
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{fromWikidata}); err != nil {
+		t.Fatalf("save wikidata: %v", err)
+	}
+	if _, err := store.SaveMuseums(ctx, []models.Museum{fromOSM}); err != nil {
+		t.Fatalf("save osm: %v", err)
+	}
+
+	page, err := store.Search(ctx, "maritime museum aquarium", 1, 0)
+	if err != nil || len(page.Hits) == 0 {
+		t.Fatalf("search: %v (%d hits)", err, len(page.Hits))
+	}
+	got := page.Hits[0].Museum
+
+	for _, want := range []string{"Maritime Museum", "Sjöfartsmuseet Akvariet"} {
+		if !slices.Contains(got.AlsoKnownAs, want) {
+			t.Errorf("alias %q was lost; have %v", want, got.AlsoKnownAs)
+		}
+	}
+	for _, want := range []string{"wikidata", "osm"} {
+		if !slices.Contains(got.Sources, want) {
+			t.Errorf("source %q was lost; have %v", want, got.Sources)
+		}
+	}
+
+	// And the local name must actually be searchable, which is the point.
+	swedish, err := store.Search(ctx, "sjöfartsmuseet akvariet", 1, 0)
+	if err != nil {
+		t.Fatalf("swedish search: %v", err)
+	}
+	if len(swedish.Hits) == 0 || swedish.Hits[0].Museum.WikidataID != "Q10545689" {
+		t.Error("the museum is not findable by the name OpenStreetMap knows it by")
 	}
 }

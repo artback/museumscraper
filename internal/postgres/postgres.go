@@ -120,7 +120,13 @@ ON CONFLICT (identity) DO UPDATE SET
     wikidata_id   = coalesce(nullif(EXCLUDED.wikidata_id, ''), museums.wikidata_id),
     name          = EXCLUDED.name,
     normalized    = EXCLUDED.normalized,
-    search_text   = EXCLUDED.search_text,
+    -- Rebuilt from the union so an alias contributed by an earlier crawl stays
+    -- searchable. Lowercasing is a weaker normaliser than the Go one, but it
+    -- only ever adds terms — the incoming record's own names are already
+    -- normalised properly in EXCLUDED.search_text.
+    search_text   = EXCLUDED.search_text || ' ' ||
+                    (SELECT coalesce(string_agg(DISTINCT lower(a), ' '), '')
+                     FROM unnest(museums.aliases || EXCLUDED.aliases) a WHERE a <> ''),
     locality_normalized = EXCLUDED.locality_normalized,
     country       = coalesce(EXCLUDED.country, museums.country),
     locality      = coalesce(nullif(EXCLUDED.locality, ''), museums.locality),
@@ -129,9 +135,18 @@ ON CONFLICT (identity) DO UPDATE SET
     wikipedia_url = coalesce(nullif(EXCLUDED.wikipedia_url, ''), museums.wikipedia_url),
     page_id       = coalesce(nullif(EXCLUDED.page_id, 0), museums.page_id),
     source_page   = coalesce(nullif(EXCLUDED.source_page, ''), museums.source_page),
-    aliases       = EXCLUDED.aliases,
-    aliases_normalized = EXCLUDED.aliases_normalized,
-    sources       = EXCLUDED.sources,
+    -- Aliases and sources are unioned, never replaced. A source that knows
+    -- fewer names for a museum must not erase the ones another source found:
+    -- OpenStreetMap carries the local name ("Sjöfartsmuseet Akvariet") and
+    -- Wikidata the English one and its acronyms, and a catalogue is only
+    -- searchable in both languages if it keeps both. Replacing meant whichever
+    -- crawl ran last silently won.
+    aliases       = (SELECT coalesce(array_agg(DISTINCT a), '{}')
+                     FROM unnest(museums.aliases || EXCLUDED.aliases) a WHERE a <> ''),
+    aliases_normalized = (SELECT coalesce(array_agg(DISTINCT a), '{}')
+                     FROM unnest(museums.aliases_normalized || EXCLUDED.aliases_normalized) a WHERE a <> ''),
+    sources       = (SELECT coalesce(array_agg(DISTINCT s), '{}')
+                     FROM unnest(museums.sources || EXCLUDED.sources) s WHERE s <> ''),
     verified      = museums.verified OR EXCLUDED.verified,
     sitelinks     = greatest(EXCLUDED.sitelinks, museums.sitelinks),
     street        = coalesce(nullif(EXCLUDED.street, ''), museums.street),
