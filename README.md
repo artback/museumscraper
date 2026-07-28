@@ -1,6 +1,6 @@
 # Museum Catalogue
 
-A catalogue of the world's museums — around **81,000** of them — assembled from four public sources, geocoded, indexed for location queries, and served over HTTP together with the exhibitions currently on show.
+A catalogue of the world's museums — around **180,000** of them — assembled from four public sources, geocoded, indexed for location queries, and served over HTTP together with the exhibitions currently on show.
 
 ```
 GET /v1/museums?place=Kyoto                              →  ~4 ms
@@ -175,6 +175,14 @@ museum crawl -sources wikidata,category,lists,osm    # maximum coverage
 ```
 
 Sources run concurrently into a shared merger, then everything is written at once.
+
+> **The `lists` source is currently ineffective.** All four sources run
+> concurrently, and `wikidata`, `category` and `lists` all draw on the Wikipedia
+> and Wikidata APIs at once. In the last full crawl `lists` was rate-limited to
+> 14 candidates — "Lists of museums in the United States" and "Lists of museums
+> in England by county" were both skipped after four 429s. Running the
+> Wikipedia-backed sources sequentially, or sharing one rate limiter between
+> them, would fix it. `category` and `osm` were unaffected.
 
 > **Run the sources together in one invocation.** Merging happens *within* a run. Two runs of different sources produce two independent record sets, and the second skips keys that already exist — so the same museum can end up stored twice under different names (`raw_data/france/army-museum-paris.json` from the list crawl and `raw_data/france/musee-de-l-armee.json` from Wikidata).
 
