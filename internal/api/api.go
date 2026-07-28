@@ -65,10 +65,37 @@ func NewServer(catalogue Catalogue) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+
+	// Liveness and readiness answer different questions, and conflating them
+	// makes a database outage look like a broken process: an orchestrator
+	// restarts pods that were working fine, turning an incident into a restart
+	// storm. /livez says the process is running; /readyz says it can serve.
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
+	})
+	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /v1/museums", s.handleMuseums)
 	mux.HandleFunc("GET /v1/exhibitions", s.handleExhibitions)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
-	return logRequests(mux)
+
+	// The mux answers an unknown path with plain text and a wrong method with
+	// an empty body, so a client that decodes JSON on every non-2xx response
+	// fails on exactly the two statuses it is most likely to meet. Routing
+	// through one handler keeps the error shape uniform.
+	mux.HandleFunc("/", s.handleNotFound)
+
+	return withMiddleware(mux)
+}
+
+// handleNotFound answers anything the routes did not claim.
+func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+		writeError(w, http.StatusMethodNotAllowed,
+			fmt.Errorf("%s is not supported; this API is read-only", r.Method))
+		return
+	}
+	writeError(w, http.StatusNotFound, fmt.Errorf("no such endpoint: %s", r.URL.Path))
 }
 
 // query is the location and paging a request asked for.
@@ -223,15 +250,15 @@ type exhibitionHit struct {
 // distinguishable without a database client.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if err := s.catalogue.Ping(r.Context()); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable,
-			map[string]string{"status": "unavailable", "error": err.Error()})
+		log.Printf("api: health ping failed: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
 		return
 	}
 
 	counts, err := s.catalogue.Counts(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable,
-			map[string]string{"status": "unavailable", "error": err.Error()})
+		log.Printf("api: health counts failed: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
 		return
 	}
 
@@ -245,6 +272,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleReady reports whether the catalogue can be queried.
+//
+// It gets its own short deadline. A partition leaves established connections
+// black-holed rather than refused, so an unbounded ping does not fail — it
+// hangs, and a probe reading a timeout instead of a 503 cannot tell a wedged
+// process from an unreachable database.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
+	defer cancel()
+
+	if err := s.catalogue.Ping(ctx); err != nil {
+		log.Printf("api: not ready: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
 func (s *Server) handleMuseums(w http.ResponseWriter, r *http.Request) {
 	q, err := parseQuery(r)
 	if err != nil {
@@ -254,7 +299,7 @@ func (s *Server) handleMuseums(w http.ResponseWriter, r *http.Request) {
 
 	hits, err := s.catalogue.Nearby(r.Context(), q.lat, q.lon, q.radiusKm, q.limit)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeServerError(w, r, err)
 		return
 	}
 
@@ -291,7 +336,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	hits, err := s.catalogue.Search(r.Context(), query, limit)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeServerError(w, r, err)
 		return
 	}
 
@@ -321,7 +366,7 @@ func (s *Server) handleExhibitions(w http.ResponseWriter, r *http.Request) {
 
 	hits, err := s.catalogue.ExhibitionsNearby(r.Context(), q.lat, q.lon, q.radiusKm, includeUpcoming, q.limit)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeServerError(w, r, err)
 		return
 	}
 
@@ -361,8 +406,36 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	}
 }
 
+// writeError reports a fault in the request itself. The message describes what
+// the caller got wrong, so it is safe — and useful — to send back.
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// writeServerError reports a fault on our side, and deliberately says almost
+// nothing.
+//
+// The driver's text was being sent verbatim to unauthenticated callers, which
+// disclosed the database user, the database name, the internal hostname and the
+// resolver address. The password was redacted by pgx, but any future SQL error
+// would have exposed schema detail by the same route. The detail belongs in the
+// log, where an operator can reach it and a stranger cannot.
+//
+// A cancelled request is not a failure worth reporting: the client has already
+// gone, and counting it as a gateway error makes an ordinary disconnect look
+// like an outage. A deadline exceeded is a real failure, and reported as one.
+func writeServerError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, context.Canceled) && r.Context().Err() != nil:
+		log.Printf("api: %s %s abandoned by the client", r.Method, r.URL.Path)
+		return
+	case errors.Is(err, context.DeadlineExceeded):
+		log.Printf("api: %s %s exceeded the %s budget: %v", r.Method, r.URL.Path, requestTimeout, err)
+		writeError(w, http.StatusGatewayTimeout, errors.New("the query took too long"))
+	default:
+		log.Printf("api: %s %s failed: %v", r.Method, r.URL.Path, err)
+		writeError(w, http.StatusBadGateway, errors.New("the catalogue is unavailable"))
+	}
 }
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
@@ -379,10 +452,14 @@ func logRequests(next http.Handler) http.Handler {
 }
 
 func querySuffix(r *http.Request) string {
-	if r.URL.RawQuery == "" {
+	raw := r.URL.RawQuery
+	if raw == "" {
 		return ""
 	}
-	return "?" + r.URL.RawQuery
+	if len(raw) > maxLoggedQueryChars {
+		raw = raw[:maxLoggedQueryChars] + "...(truncated)"
+	}
+	return "?" + raw
 }
 
 type statusRecorder struct {

@@ -13,6 +13,11 @@ import (
 	"museum/pkg/graceful"
 )
 
+// drainTimeout is how long a stopping server waits for in-flight requests.
+// Longer than the API's own per-request budget, so a request that is still
+// within its deadline is allowed to finish rather than being cut off.
+const drainTimeout = 20 * time.Second
+
 // serveCommand runs the HTTP API.
 func serveCommand() Command {
 	return Command{
@@ -26,9 +31,10 @@ func serveCommand() Command {
 func runServe(ctx context.Context, args []string) error {
 	fs := newFlagSet("serve", "[-addr :8090]", os.Stderr)
 	var (
-		addr        = fs.String("addr", ":8090", "address to listen on")
-		readTimeout = fs.Duration("read-timeout", 10*time.Second, "per-request read timeout")
-		idleTimeout = fs.Duration("idle-timeout", 60*time.Second, "keep-alive idle timeout")
+		addr         = fs.String("addr", ":8090", "address to listen on")
+		readTimeout  = fs.Duration("read-timeout", 10*time.Second, "per-request read timeout")
+		writeTimeout = fs.Duration("write-timeout", 30*time.Second, "per-request write timeout")
+		idleTimeout  = fs.Duration("idle-timeout", 60*time.Second, "keep-alive idle timeout")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -49,6 +55,15 @@ func runServe(ctx context.Context, args []string) error {
 		ReadHeaderTimeout: *readTimeout,
 		ReadTimeout:       *readTimeout,
 		IdleTimeout:       *idleTimeout,
+		// The backstop for a response that outlives its handler's deadline.
+		// The handler timeout is the real bound; this one catches a client that
+		// reads its body a byte at a time. Comfortably longer than the handler
+		// budget so a slow-but-legitimate response is not cut off mid-encode.
+		WriteTimeout: *writeTimeout,
+		// Go's default is 1 MB of headers. Nothing this API accepts needs more
+		// than a few hundred bytes, and the smaller ceiling costs an attacker
+		// the cheapest way to make the server allocate.
+		MaxHeaderBytes: 64 << 10,
 	}
 
 	ctx, cancel := graceful.Context(ctx)
@@ -75,11 +90,23 @@ func runServe(ctx context.Context, args []string) error {
 	// Shutdown gets a fresh context: the signal that stopped the server also
 	// cancelled ctx, and reusing it would abort in-flight requests immediately
 	// rather than letting them finish.
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	//
+	// The budget must exceed the handler timeout, or the drain expires while
+	// requests are still legitimately running: Shutdown returns "context
+	// deadline exceeded", the command exits non-zero, and a clean SIGTERM looks
+	// to the orchestrator like a crash. Worse, returning here runs the deferred
+	// db.Close() and pulls the pool out from under the handlers still using it,
+	// so every draining request fails — the opposite of graceful.
+	shutdownCtx, cancelShutdown := context.WithTimeout(
+		context.WithoutCancel(ctx), drainTimeout)
 	defer cancelShutdown()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+		// Report it, but keep going: the deferred close still has to run, and
+		// the requests that did drain should not be undone by the ones that
+		// did not.
+		log.Printf("Shutdown timed out after %s, closing anyway: %v", drainTimeout, err)
+		return nil
 	}
 	log.Println("Server stopped")
 	return nil
