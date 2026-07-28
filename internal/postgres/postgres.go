@@ -14,7 +14,9 @@ package postgres
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +31,9 @@ import (
 
 //go:embed schema.sql
 var schema string
+
+// ErrNotFound reports a record that does not exist.
+var ErrNotFound = errors.New("not found")
 
 // Store is a connection pool with the catalogue's queries on it.
 type Store struct {
@@ -335,6 +340,11 @@ func nullIfEmpty(s string) *string {
 
 // Hit is a museum returned by a query, with why it matched.
 type Hit struct {
+	// ID is the row's stable identifier. Without one there is nothing to deep
+	// link to, nothing to page on, and nothing for a client to dedupe by:
+	// wikidata_id is absent for about 4% of the catalogue, so it cannot serve.
+	ID int64
+
 	Museum models.Museum
 	// DistanceKm is set by radius queries.
 	DistanceKm float64
@@ -342,29 +352,43 @@ type Hit struct {
 	Score float64
 }
 
+// Page is a slice of results together with the size of the whole set.
+//
+// Total is what makes truncation visible. Returning exactly `limit` rows with
+// no total is indistinguishable from a result set that happens to be that
+// size — London holds 614 museums within 50 km and the API returned 500 of
+// them with nothing to say so, leaving 114 unreachable by any request.
+type Page struct {
+	Hits  []Hit
+	Total int64
+}
+
 // Nearby returns the museums within radiusKm of a point, nearest first.
-func (s *Store) Nearby(ctx context.Context, lat, lon, radiusKm float64, limit int) ([]Hit, error) {
+func (s *Store) Nearby(ctx context.Context, lat, lon, radiusKm float64, limit, offset int) (Page, error) {
+	// count(*) OVER () reports the size of the whole matching set from the same
+	// scan that produces the page, so a total costs no second query.
 	const stmt = `
-SELECT name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
+SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
        aliases, sources, verified, street, postcode,
        ST_Y(location::geometry), ST_X(location::geometry),
+       count(*) OVER () AS total,
        ST_Distance(location, $1::geography) / 1000.0 AS distance_km
 FROM museums
 WHERE location IS NOT NULL
   AND ST_DWithin(location, $1::geography, $2)
-ORDER BY location <-> $1::geography
-LIMIT $3`
+ORDER BY location <-> $1::geography, id
+LIMIT $3 OFFSET $4`
 
 	point := fmt.Sprintf("SRID=4326;POINT(%v %v)", lon, lat)
 
-	rows, err := s.pool.Query(ctx, stmt, point, radiusKm*1000, limit)
+	rows, err := s.pool.Query(ctx, stmt, point, radiusKm*1000, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("nearby: %w", err)
+		return Page{}, fmt.Errorf("nearby: %w", err)
 	}
 	defer rows.Close()
 
-	return scanHits(rows, true)
+	return scanPage(rows, true)
 }
 
 // Search returns the museums whose name, aliases or locality match a query,
@@ -386,18 +410,19 @@ LIMIT $3`
 // clauses selected, but nothing may scan the table: an earlier version matched
 // query words with position(), which no index can serve, and the query went
 // from under two milliseconds to over five hundred.
-func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, error) {
+func (s *Store) Search(ctx context.Context, query string, limit, offset int) (Page, error) {
 	normalized := search.Normalize(query)
 	if normalized == "" {
-		return nil, nil
+		return Page{}, nil
 	}
 
 	const stmt = `
 WITH q AS (SELECT $1::text AS term)
-SELECT name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
+SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
        aliases, sources, verified, street, postcode,
        ST_Y(location::geometry), ST_X(location::geometry),
+       count(*) OVER () AS total,
        (
          CASE WHEN normalized = q.term THEN 3.0
               WHEN normalized LIKE q.term || '%' THEN 1.5
@@ -448,37 +473,73 @@ WHERE normalized % q.term
    OR q.term <% normalized
    OR normalized LIKE q.term || '%'
    OR search_text % q.term
-ORDER BY score DESC, length(normalized), name
-LIMIT $2`
+ORDER BY score DESC, length(normalized), name, id
+LIMIT $2 OFFSET $3`
 
-	rows, err := s.pool.Query(ctx, stmt, normalized, limit)
+	rows, err := s.pool.Query(ctx, stmt, normalized, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("search: %w", err)
+		return Page{}, fmt.Errorf("search: %w", err)
 	}
 	defer rows.Close()
 
-	return scanHits(rows, false)
+	return scanPage(rows, false)
+}
+
+// MuseumByID returns one museum, so a result can be linked to and fetched
+// again. It accepts the numeric id or a Wikidata "Q…" identifier.
+func (s *Store) MuseumByID(ctx context.Context, id string) (Hit, error) {
+	const stmt = `
+SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
+       coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
+       aliases, sources, verified, street, postcode,
+       ST_Y(location::geometry), ST_X(location::geometry),
+       1::bigint AS total, 0::double precision
+FROM museums
+WHERE ($1::bigint IS NOT NULL AND id = $1::bigint) OR wikidata_id = $2
+LIMIT 1`
+
+	var numeric *int64
+	if parsed, err := strconv.ParseInt(id, 10, 64); err == nil {
+		numeric = &parsed
+	}
+
+	rows, err := s.pool.Query(ctx, stmt, numeric, id)
+	if err != nil {
+		return Hit{}, fmt.Errorf("museum %q: %w", id, err)
+	}
+	defer rows.Close()
+
+	page, err := scanPage(rows, true)
+	if err != nil {
+		return Hit{}, err
+	}
+	if len(page.Hits) == 0 {
+		return Hit{}, fmt.Errorf("museum %q: %w", id, ErrNotFound)
+	}
+	return page.Hits[0], nil
 }
 
 // scanHits reads a result set into museums. withDistance says whether the final
 // column is a distance or a score.
-func scanHits(rows pgx.Rows, withDistance bool) ([]Hit, error) {
-	var hits []Hit
+func scanPage(rows pgx.Rows, withDistance bool) (Page, error) {
+	var page Page
 
 	for rows.Next() {
 		var (
 			hit      Hit
 			lat, lon *float64
+			total    int64
 			last     float64
 		)
 		var street, postcode string
 		if err := rows.Scan(
+			&hit.ID,
 			&hit.Museum.Name, &hit.Museum.Country, &hit.Museum.Locality,
 			&hit.Museum.Description, &hit.Museum.Website, &hit.Museum.WikipediaURL,
 			&hit.Museum.WikidataID, &hit.Museum.AlsoKnownAs, &hit.Museum.Sources,
-			&hit.Museum.Verified, &street, &postcode, &lat, &lon, &last,
+			&hit.Museum.Verified, &street, &postcode, &lat, &lon, &total, &last,
 		); err != nil {
-			return nil, fmt.Errorf("scan: %w", err)
+			return Page{}, fmt.Errorf("scan: %w", err)
 		}
 
 		hit.Museum.Address.Road, hit.Museum.Address.Postcode = street, postcode
@@ -490,9 +551,10 @@ func scanHits(rows pgx.Rows, withDistance bool) ([]Hit, error) {
 		} else {
 			hit.Score = last
 		}
-		hits = append(hits, hit)
+		page.Hits = append(page.Hits, hit)
+		page.Total = total
 	}
-	return hits, rows.Err()
+	return page, rows.Err()
 }
 
 // Counts summarises the catalogue.
@@ -662,12 +724,16 @@ LIMIT $4`
 }
 
 // EachMuseum streams the whole catalogue, for the audit.
+//
+// Genuinely streams: it calls fn as each row arrives. It used to gather every
+// row into a slice first, so "streaming" 85,000 museums allocated 250 MB and
+// the first callback fired only once the last row had been read.
 func (s *Store) EachMuseum(ctx context.Context, fn func(models.Museum)) error {
 	const stmt = `
 SELECT name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
        aliases, sources, verified, street, postcode,
-       ST_Y(location::geometry), ST_X(location::geometry), 0::double precision
+       ST_Y(location::geometry), ST_X(location::geometry)
 FROM museums`
 
 	rows, err := s.pool.Query(ctx, stmt)
@@ -676,12 +742,62 @@ FROM museums`
 	}
 	defer rows.Close()
 
-	hits, err := scanHits(rows, false)
-	if err != nil {
-		return err
+	for rows.Next() {
+		var (
+			museum           models.Museum
+			lat, lon         *float64
+			street, postcode string
+		)
+		if err := rows.Scan(
+			&museum.Name, &museum.Country, &museum.Locality, &museum.Description,
+			&museum.Website, &museum.WikipediaURL, &museum.WikidataID,
+			&museum.AlsoKnownAs, &museum.Sources, &museum.Verified,
+			&street, &postcode, &lat, &lon,
+		); err != nil {
+			return fmt.Errorf("scan catalogue: %w", err)
+		}
+		museum.Address.Road, museum.Address.Postcode = street, postcode
+		if lat != nil && lon != nil {
+			museum.Latitude, museum.Longitude = *lat, *lon
+		}
+		fn(museum)
 	}
-	for _, hit := range hits {
-		fn(hit.Museum)
+	return rows.Err()
+}
+
+// Coverage describes how well an area has been scraped for exhibitions.
+//
+// It exists because an empty result was ambiguous in the worst way: a request
+// for exhibitions in London returned count 0, which reads as "nothing is on"
+// when it actually meant "no museum here has ever been scraped". The catalogue
+// knew 431 museums in that circle and had listings for none of them, and
+// nothing in the response said so.
+type Coverage struct {
+	// MuseumsInArea is how many museums the catalogue knows there.
+	MuseumsInArea int64
+	// MuseumsWithSite is how many have a website that could be scraped.
+	MuseumsWithSite int64
+	// LastScraped is when the area was last refreshed, nil if it never was.
+	LastScraped *time.Time
+}
+
+// ExhibitionCoverage reports what is known about an area.
+func (s *Store) ExhibitionCoverage(ctx context.Context, lat, lon, radiusKm float64) (Coverage, error) {
+	const stmt = `
+SELECT count(*),
+       count(*) FILTER (WHERE website IS NOT NULL AND website <> ''),
+       (SELECT max(scraped_at) FROM exhibitions
+         WHERE location IS NOT NULL AND ST_DWithin(location, $1::geography, $2))
+FROM museums
+WHERE location IS NOT NULL AND ST_DWithin(location, $1::geography, $2)`
+
+	point := fmt.Sprintf("SRID=4326;POINT(%v %v)", lon, lat)
+
+	var coverage Coverage
+	if err := s.pool.QueryRow(ctx, stmt, point, radiusKm*1000).Scan(
+		&coverage.MuseumsInArea, &coverage.MuseumsWithSite, &coverage.LastScraped,
+	); err != nil {
+		return Coverage{}, fmt.Errorf("exhibition coverage: %w", err)
 	}
-	return nil
+	return coverage, nil
 }

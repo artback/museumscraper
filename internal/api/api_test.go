@@ -26,17 +26,36 @@ type fakeCatalogue struct {
 	// tests can check clamping actually reaches the query.
 	lastRadiusKm float64
 	lastLimit    int
+	lastOffset   int
 	lastUpcoming bool
+
+	coverage postgres.Coverage
 }
 
-func (f *fakeCatalogue) Nearby(_ context.Context, _, _, radiusKm float64, limit int) ([]postgres.Hit, error) {
-	f.lastRadiusKm, f.lastLimit = radiusKm, limit
-	return f.nearby, f.err
+func (f *fakeCatalogue) Nearby(_ context.Context, _, _, radiusKm float64, limit, offset int) (postgres.Page, error) {
+	f.lastRadiusKm, f.lastLimit, f.lastOffset = radiusKm, limit, offset
+	return postgres.Page{Hits: f.nearby, Total: int64(len(f.nearby))}, f.err
 }
 
-func (f *fakeCatalogue) Search(_ context.Context, _ string, limit int) ([]postgres.Hit, error) {
-	f.lastLimit = limit
-	return f.search, f.err
+func (f *fakeCatalogue) Search(_ context.Context, _ string, limit, offset int) (postgres.Page, error) {
+	f.lastLimit, f.lastOffset = limit, offset
+	return postgres.Page{Hits: f.search, Total: int64(len(f.search))}, f.err
+}
+
+func (f *fakeCatalogue) MuseumByID(_ context.Context, id string) (postgres.Hit, error) {
+	if f.err != nil {
+		return postgres.Hit{}, f.err
+	}
+	for _, hit := range f.nearby {
+		if hit.Museum.WikidataID == id {
+			return hit, nil
+		}
+	}
+	return postgres.Hit{}, postgres.ErrNotFound
+}
+
+func (f *fakeCatalogue) ExhibitionCoverage(context.Context, float64, float64, float64) (postgres.Coverage, error) {
+	return f.coverage, f.err
 }
 
 func (f *fakeCatalogue) ExhibitionsNearby(_ context.Context, _, _, radiusKm float64, upcoming bool, limit int) ([]postgres.ExhibitionHit, error) {

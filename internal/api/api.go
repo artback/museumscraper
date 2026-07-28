@@ -19,7 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"museum/internal/models"
 	"museum/internal/postgres"
 )
 
@@ -41,6 +40,12 @@ const (
 
 	// maxPlaceNameChars bounds a place name before it reaches the geocoder.
 	maxPlaceNameChars = 200
+
+	// maxOffset bounds how deep a caller may page. Offset paging makes the
+	// database skip every preceding row, so an unbounded offset is a cheap way
+	// to buy an expensive scan. Well past any real result set: nothing in this
+	// catalogue returns more than a few thousand rows for one area.
+	maxOffset = 10_000
 )
 
 // Catalogue is what the API needs from the database.
@@ -48,9 +53,11 @@ const (
 // It is an interface so the handlers can be tested without a database, and so
 // the storage layer can be replaced without touching them.
 type Catalogue interface {
-	Nearby(ctx context.Context, lat, lon, radiusKm float64, limit int) ([]postgres.Hit, error)
-	Search(ctx context.Context, query string, limit int) ([]postgres.Hit, error)
+	Nearby(ctx context.Context, lat, lon, radiusKm float64, limit, offset int) (postgres.Page, error)
+	Search(ctx context.Context, query string, limit, offset int) (postgres.Page, error)
+	MuseumByID(ctx context.Context, id string) (postgres.Hit, error)
 	ExhibitionsNearby(ctx context.Context, lat, lon, radiusKm float64, includeUpcoming bool, limit int) ([]postgres.ExhibitionHit, error)
+	ExhibitionCoverage(ctx context.Context, lat, lon, radiusKm float64) (postgres.Coverage, error)
 	Counts(ctx context.Context) (postgres.Counts, error)
 	Ping(ctx context.Context) error
 }
@@ -93,6 +100,7 @@ func (s *Server) Routes() http.Handler {
 	})
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /v1/museums", s.handleMuseums)
+	mux.HandleFunc("GET /v1/museums/{id}", s.handleMuseum)
 	mux.HandleFunc("GET /v1/exhibitions", s.handleExhibitions)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
 
@@ -121,6 +129,7 @@ type query struct {
 	lat, lon float64
 	radiusKm float64
 	limit    int
+	offset   int
 	// place is the name that produced the coordinates, echoed back so a caller
 	// can see which "Springfield" it was given.
 	place string
@@ -171,8 +180,26 @@ func (s *Server) parseQuery(r *http.Request) (query, error) {
 	if err != nil {
 		return query{}, err
 	}
+	offset, err := parseOffset(values.Get("offset"))
+	if err != nil {
+		return query{}, err
+	}
 
-	return query{lat: lat, lon: lon, radiusKm: radius, limit: limit}, nil
+	return query{lat: lat, lon: lon, radiusKm: radius, limit: limit, offset: offset}, nil
+}
+
+func parseOffset(raw string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed < 0 {
+		return 0, errors.New("offset must be a whole number of zero or more")
+	}
+	if parsed > maxOffset {
+		return 0, fmt.Errorf("offset must be %d or less", maxOffset)
+	}
+	return parsed, nil
 }
 
 // parsePlaceQuery resolves a named place into the same query the coordinate
@@ -211,9 +238,13 @@ func (s *Server) parsePlaceQuery(r *http.Request, name string, values url.Values
 	if err != nil {
 		return query{}, err
 	}
+	offset, err := parseOffset(values.Get("offset"))
+	if err != nil {
+		return query{}, err
+	}
 
-	return query{lat: found.Latitude, lon: found.Longitude,
-		radiusKm: radius, limit: limit, place: found.DisplayName}, nil
+	return query{lat: found.Latitude, lon: found.Longitude, radiusKm: radius,
+		limit: limit, offset: offset, place: found.DisplayName}, nil
 }
 
 func parseLimit(raw string) (int, error) {
@@ -245,6 +276,7 @@ type responseQuery struct {
 	Longitude float64 `json:"lon"`
 	RadiusKm  float64 `json:"radius_km"`
 	Limit     int     `json:"limit"`
+	Offset    int     `json:"offset,omitempty"`
 	// Place is the geocoder's full name for what a place= query resolved to,
 	// so a caller can see whether "Springfield" meant the one it had in mind.
 	Place string `json:"place,omitempty"`
@@ -252,16 +284,25 @@ type responseQuery struct {
 
 func echo(q query) responseQuery {
 	return responseQuery{Latitude: q.lat, Longitude: q.lon,
-		RadiusKm: q.radiusKm, Limit: q.limit, Place: q.place}
+		RadiusKm: q.radiusKm, Limit: q.limit, Offset: q.offset, Place: q.place}
 }
 
 type museumResponse struct {
-	Count   int           `json:"count"`
+	Count int `json:"count"`
+	// Total is how many museums matched, not how many were returned. Without
+	// it a full page is indistinguishable from a complete result set.
+	Total int64 `json:"total"`
+	// HasMore says whether another page exists, so a client does not have to
+	// do the arithmetic itself.
+	HasMore bool          `json:"has_more"`
 	Museums []museumHit   `json:"museums"`
 	Query   responseQuery `json:"query"`
 }
 
 type museumHit struct {
+	// ID is stable across requests and re-crawls: the thing to deep link to,
+	// dedupe by, and fetch again from /v1/museums/{id}.
+	ID           int64    `json:"id"`
 	Name         string   `json:"name"`
 	DistanceKm   float64  `json:"distance_km"`
 	Country      string   `json:"country,omitempty"`
@@ -277,11 +318,16 @@ type museumHit struct {
 
 type searchResponse struct {
 	Count   int         `json:"count"`
+	Total   int64       `json:"total"`
+	HasMore bool        `json:"has_more"`
+	Limit   int         `json:"limit"`
+	Offset  int         `json:"offset,omitempty"`
 	Query   string      `json:"query"`
 	Museums []searchHit `json:"museums"`
 }
 
 type searchHit struct {
+	ID         int64    `json:"id"`
 	Name       string   `json:"name"`
 	Country    string   `json:"country,omitempty"`
 	Locality   string   `json:"locality,omitempty"`
@@ -302,6 +348,20 @@ type exhibitionResponse struct {
 	Count       int             `json:"count"`
 	Exhibitions []exhibitionHit `json:"exhibitions"`
 	Query       responseQuery   `json:"query"`
+	// Coverage says what is known about the area, so an empty result can be
+	// read correctly. "Nothing is on" and "nobody has looked here yet" are very
+	// different answers and looked identical without it.
+	Coverage *coverageReport `json:"coverage,omitempty"`
+}
+
+// coverageReport explains an exhibition result.
+type coverageReport struct {
+	MuseumsInArea   int64      `json:"museums_in_area"`
+	MuseumsWithSite int64      `json:"museums_with_website"`
+	LastScraped     *time.Time `json:"last_scraped,omitempty"`
+	// Note is present only when the result needs explaining, and says what to
+	// do about it.
+	Note string `json:"note,omitempty"`
 }
 
 type exhibitionHit struct {
@@ -372,20 +432,38 @@ func (s *Server) handleMuseums(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hits, err := s.catalogue.Nearby(r.Context(), q.lat, q.lon, q.radiusKm, q.limit)
+	page, err := s.catalogue.Nearby(r.Context(), q.lat, q.lon, q.radiusKm, q.limit, q.offset)
 	if err != nil {
 		writeServerError(w, r, err)
 		return
 	}
 
-	museums := make([]museumHit, 0, len(hits))
-	for _, hit := range hits {
-		museums = append(museums, museumHitFrom(hit.Museum, round2(hit.DistanceKm)))
+	museums := make([]museumHit, 0, len(page.Hits))
+	for _, hit := range page.Hits {
+		museums = append(museums, museumHitFrom(hit, round2(hit.DistanceKm)))
 	}
 
 	writeJSON(w, http.StatusOK, museumResponse{
-		Count: len(museums), Museums: museums, Query: echo(q),
+		Count:   len(museums),
+		Total:   page.Total,
+		HasMore: int64(q.offset+len(museums)) < page.Total,
+		Museums: museums,
+		Query:   echo(q),
 	})
+}
+
+// handleMuseum returns one museum by id, so a result can be linked to.
+func (s *Server) handleMuseum(w http.ResponseWriter, r *http.Request) {
+	hit, err := s.catalogue.MuseumByID(r.Context(), r.PathValue("id"))
+	if errors.Is(err, postgres.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeServerError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, museumHitFrom(hit, 0))
 }
 
 // handleSearch answers name queries.
@@ -408,17 +486,23 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeQueryError(w, r, err)
 		return
 	}
+	offset, err := parseOffset(r.URL.Query().Get("offset"))
+	if err != nil {
+		writeQueryError(w, r, err)
+		return
+	}
 
-	hits, err := s.catalogue.Search(r.Context(), query, limit)
+	page, err := s.catalogue.Search(r.Context(), query, limit, offset)
 	if err != nil {
 		writeServerError(w, r, err)
 		return
 	}
 
-	museums := make([]searchHit, 0, len(hits))
-	for _, hit := range hits {
+	museums := make([]searchHit, 0, len(page.Hits))
+	for _, hit := range page.Hits {
 		m := hit.Museum
 		museums = append(museums, searchHit{
+			ID:   hit.ID,
 			Name: m.Name, Country: m.Country, Locality: m.Locality, Aliases: m.AlsoKnownAs,
 			Latitude: m.Latitude, Longitude: m.Longitude,
 			Website: m.Website, Wikipedia: m.WikipediaURL, WikidataID: m.WikidataID,
@@ -426,7 +510,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusOK, searchResponse{Count: len(museums), Query: query, Museums: museums})
+	writeJSON(w, http.StatusOK, searchResponse{
+		Count:   len(museums),
+		Total:   page.Total,
+		HasMore: int64(offset+len(museums)) < page.Total,
+		Limit:   limit,
+		Offset:  offset,
+		Query:   query,
+		Museums: museums,
+	})
 }
 
 func (s *Server) handleExhibitions(w http.ResponseWriter, r *http.Request) {
@@ -459,13 +551,49 @@ func (s *Server) handleExhibitions(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, exhibitionResponse{
 		Count: len(found), Exhibitions: found, Query: echo(q),
+		Coverage: s.coverageFor(r, q, len(found)),
 	})
 }
 
+// coverageFor explains a result, and is most useful when there is none.
+//
+// A failure to read coverage is not worth failing the request over: the
+// exhibitions themselves are already in hand, and the explanation is a
+// courtesy.
+func (s *Server) coverageFor(r *http.Request, q query, found int) *coverageReport {
+	coverage, err := s.catalogue.ExhibitionCoverage(r.Context(), q.lat, q.lon, q.radiusKm)
+	if err != nil {
+		log.Printf("api: coverage unavailable: %v", err)
+		return nil
+	}
+
+	report := &coverageReport{
+		MuseumsInArea:   coverage.MuseumsInArea,
+		MuseumsWithSite: coverage.MuseumsWithSite,
+		LastScraped:     coverage.LastScraped,
+	}
+
+	switch {
+	case found > 0:
+	case coverage.MuseumsInArea == 0:
+		report.Note = "no museums are known in this area; try a larger radius"
+	case coverage.LastScraped == nil && coverage.MuseumsWithSite > 0:
+		report.Note = fmt.Sprintf(
+			"no exhibitions have been collected here yet: %d museums have a website but none has been scraped. Run \"museum refresh\" for this area.",
+			coverage.MuseumsWithSite)
+	case coverage.MuseumsWithSite == 0:
+		report.Note = "no museum in this area has a website to read exhibitions from"
+	default:
+		report.Note = "this area has been scraped, but nothing is on show right now"
+	}
+	return report
+}
+
 // museumHitFrom converts a stored museum into the response shape.
-func museumHitFrom(m models.Museum, distanceKm float64) museumHit {
+func museumHitFrom(hit postgres.Hit, distanceKm float64) museumHit {
+	m := hit.Museum
 	return museumHit{
-		Name: m.Name, DistanceKm: distanceKm,
+		ID: hit.ID, Name: m.Name, DistanceKm: distanceKm,
 		Country: m.Country, Locality: m.Locality, Description: m.Description,
 		Latitude: m.Latitude, Longitude: m.Longitude,
 		Website: m.Website, WikipediaURL: m.WikipediaURL,

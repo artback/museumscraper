@@ -40,7 +40,8 @@ const (
 // another wrapper; CORS is next so preflight is answered without paying for a
 // timeout context; the timeout is innermost so it covers only the handler.
 func withMiddleware(next http.Handler) http.Handler {
-	return recoverPanics(withCORS(withTimeout(logRequests(next))))
+	limiter := newRateLimiter(requestsPerSecond, burstSize, clientTTL)
+	return recoverPanics(withCORS(withRateLimit(limiter, withTimeout(logRequests(next)))))
 }
 
 // withTimeout gives every request a deadline, and the handler a context that

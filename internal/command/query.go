@@ -66,10 +66,11 @@ func queryByName(ctx context.Context, db *postgres.Store, args []string) error {
 		return fmt.Errorf("query search needs something to search for")
 	}
 
-	hits, err := db.Search(ctx, query, *limit)
+	page, err := db.Search(ctx, query, *limit, 0)
 	if err != nil {
 		return err
 	}
+	hits := page.Hits
 	log.Printf("%q: %d matches", query, len(hits))
 
 	if *asJSON {
@@ -124,10 +125,11 @@ func queryByLocation(ctx context.Context, db *postgres.Store, subject string, ar
 	}
 
 	if subject == "museums" {
-		hits, err := db.Nearby(ctx, centreLat, centreLon, *radius, *limit)
+		page, err := db.Nearby(ctx, centreLat, centreLon, *radius, *limit, 0)
 		if err != nil {
 			return err
 		}
+		hits := page.Hits
 		log.Printf("%s: %.1f km radius, %d matches", label, *radius, len(hits))
 
 		if *asJSON {

@@ -2,9 +2,11 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -118,7 +120,8 @@ func TestSaveAndSearch_TypoTolerance(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.query, func(t *testing.T) {
-			hits, err := store.Search(ctx, tc.query, 5)
+			page, err := store.Search(ctx, tc.query, 5, 0)
+			hits := page.Hits
 			if err != nil {
 				t.Fatalf("search: %v", err)
 			}
@@ -144,7 +147,8 @@ func TestSearch_FindsRecordWithoutCoordinates(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	hits, err := store.Search(ctx, "cheminot", 5)
+	page, err := store.Search(ctx, "cheminot", 5, 0)
+	hits := page.Hits
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -169,7 +173,8 @@ func TestNearby(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	hits, err := store.Nearby(ctx, 48.8566, 2.3522, 2, 10)
+	page, err := store.Nearby(ctx, 48.8566, 2.3522, 2, 10, 0)
+	hits := page.Hits
 	if err != nil {
 		t.Fatalf("nearby: %v", err)
 	}
@@ -209,7 +214,8 @@ func TestSaveMuseums_UpsertsRatherThanDuplicating(t *testing.T) {
 		t.Fatalf("museums = %d, want 1", counts.Museums)
 	}
 
-	hits, _ := store.Search(ctx, "louvre", 1)
+	page, _ := store.Search(ctx, "louvre", 1, 0)
+	hits := page.Hits
 	if len(hits) != 1 {
 		t.Fatal("expected the merged record")
 	}
@@ -234,7 +240,8 @@ func TestSaveMuseums_KeepsKnownCoordinates(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	hits, _ := store.Nearby(ctx, 48.8566, 2.3522, 5, 5)
+	page, _ := store.Nearby(ctx, 48.8566, 2.3522, 5, 5, 0)
+	hits := page.Hits
 	if len(hits) != 1 {
 		t.Errorf("the museum lost its coordinates on the second write")
 	}
@@ -314,7 +321,8 @@ func TestSaveMuseums_MergesWhenAMuseumGainsAWikidataID(t *testing.T) {
 		t.Fatalf("museums = %d, want 1 — the record was duplicated rather than merged", counts.Museums)
 	}
 
-	hits, err := store.Search(ctx, "galata museo del mare", 5)
+	page, err := store.Search(ctx, "galata museo del mare", 5, 0)
+	hits := page.Hits
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -363,7 +371,8 @@ VALUES ('Galata Museo del Mare', 'galata museo del mare', 'galata museo del mare
 		t.Fatalf("removed = %d, want 1", removed)
 	}
 
-	hits, err := store.Search(ctx, "galata museo del mare", 5)
+	page, err := store.Search(ctx, "galata museo del mare", 5, 0)
+	hits := page.Hits
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -404,7 +413,8 @@ func TestSearch_DistinctiveNameBeatsGenericWord(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	hits, err := store.Search(ctx, "kunstmuseum zurich", 2)
+	page, err := store.Search(ctx, "kunstmuseum zurich", 2, 0)
+	hits := page.Hits
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -431,7 +441,8 @@ func TestSearch_LocalityBonusRespectsWordBoundaries(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	hits, err := store.Search(ctx, "sacred art museum", 2)
+	page, err := store.Search(ctx, "sacred art museum", 2, 0)
+	hits := page.Hits
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -441,5 +452,115 @@ func TestSearch_LocalityBonusRespectsWordBoundaries(t *testing.T) {
 	if hits[0].Museum.Name != "Sacred Art Museum" {
 		t.Errorf("top hit = %q, want the exact match; %q was promoted by its town matching inside \"museum\"",
 			hits[0].Museum.Name, hits[0].Museum.Name)
+	}
+}
+
+// Paging must reach every match. London holds more museums than one page can
+// carry, and without a total the caller cannot tell a full page from the end
+// of the results — 114 of 614 were unreachable by any request.
+func TestNearby_PagesThroughEveryMatch(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	const total = 25
+	museums := make([]models.Museum, 0, total)
+	for i := range total {
+		museums = append(museums, models.Museum{
+			Name: fmt.Sprintf("Museum %02d", i), Country: "France",
+			WikidataID: fmt.Sprintf("Q%d", 1000+i),
+			// Spread along a line so the ordering by distance is deterministic.
+			Latitude: 48.8566 + float64(i)*0.001, Longitude: 2.3522,
+		})
+	}
+	if _, err := store.SaveMuseums(ctx, museums); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	seen := make(map[int64]bool)
+	for offset := 0; offset < total; offset += 10 {
+		page, err := store.Nearby(ctx, 48.8566, 2.3522, 50, 10, offset)
+		if err != nil {
+			t.Fatalf("nearby at offset %d: %v", offset, err)
+		}
+		if page.Total != total {
+			t.Errorf("total at offset %d = %d, want %d", offset, page.Total, total)
+		}
+		for _, hit := range page.Hits {
+			if hit.ID == 0 {
+				t.Fatal("hit has no id, so nothing can page on it")
+			}
+			if seen[hit.ID] {
+				t.Errorf("museum %d returned on two pages", hit.ID)
+			}
+			seen[hit.ID] = true
+		}
+	}
+	if len(seen) != total {
+		t.Errorf("paged through %d museums, want %d", len(seen), total)
+	}
+}
+
+func TestMuseumByID(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Louvre Museum", Country: "France", WikidataID: "Q19675",
+			Latitude: 48.8606, Longitude: 2.3376},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Findable by the Wikidata id...
+	byWikidata, err := store.MuseumByID(ctx, "Q19675")
+	if err != nil {
+		t.Fatalf("by wikidata id: %v", err)
+	}
+	if byWikidata.Museum.Name != "Louvre Museum" {
+		t.Errorf("name = %q", byWikidata.Museum.Name)
+	}
+
+	// ...and by the numeric id the responses carry, which is what the 4% of
+	// the catalogue with no Wikidata id has to rely on.
+	byNumeric, err := store.MuseumByID(ctx, strconv.FormatInt(byWikidata.ID, 10))
+	if err != nil {
+		t.Fatalf("by numeric id: %v", err)
+	}
+	if byNumeric.ID != byWikidata.ID {
+		t.Errorf("id = %d, want %d", byNumeric.ID, byWikidata.ID)
+	}
+
+	if _, err := store.MuseumByID(ctx, "Q000000"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+// The signal that would have made an empty result readable.
+func TestExhibitionCoverage(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "With Site", Country: "France", WikidataID: "Q1",
+			Latitude: 48.8566, Longitude: 2.3522, Website: "https://example.org"},
+		{Name: "Without Site", Country: "France", WikidataID: "Q2",
+			Latitude: 48.8570, Longitude: 2.3525},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	coverage, err := store.ExhibitionCoverage(ctx, 48.8566, 2.3522, 5)
+	if err != nil {
+		t.Fatalf("coverage: %v", err)
+	}
+	if coverage.MuseumsInArea != 2 {
+		t.Errorf("museums in area = %d, want 2", coverage.MuseumsInArea)
+	}
+	if coverage.MuseumsWithSite != 1 {
+		t.Errorf("museums with a website = %d, want 1", coverage.MuseumsWithSite)
+	}
+	// Never scraped, which is exactly what an empty result needs to say.
+	if coverage.LastScraped != nil {
+		t.Errorf("last scraped = %v, want nil for an area never refreshed", coverage.LastScraped)
 	}
 }

@@ -259,9 +259,34 @@ Springfield it was given.
 preflight is answered, so a map application can call the API directly. The data
 is public and read-only; there are no credentials involved.
 
+**Paging.** Results carry `total` and `has_more` alongside `count`, and take an
+`offset`. Without a total, a full page is indistinguishable from a complete
+result set — London holds 617 museums within 50 km, and the API used to return
+500 of them with nothing to say the other 117 existed.
+
+```bash
+curl 'localhost:8090/v1/museums?place=London&radius_km=50&limit=500'          # count 500, total 617, has_more true
+curl 'localhost:8090/v1/museums?place=London&radius_km=50&limit=500&offset=500'  # count 117, has_more false
+```
+
+**Stable ids.** Every museum carries an `id` that survives re-crawls, and
+`GET /v1/museums/{id}` fetches one by it. The id is what to deep link to and
+dedupe by; `wikidata_id` cannot serve, since about 4% of the catalogue has
+none. Either form works: `/v1/museums/119577` or `/v1/museums/Q19675`.
+
 **Limits.** Every request carries a 10-second deadline, which cancels the
 database query rather than letting it run on unattended. Errors are JSON at
 every status, including 404 and 405.
+
+One client may make 10 requests a second (bursting to 30) and hold 4 at once;
+over either, the API answers `429` with `Retry-After`. The concurrency cap is
+the one that matters, and it is not the same control as the rate: an attack
+made of *slow* requests keeps the rate low while occupying every connection in
+the pool. Measured with 60 concurrent expensive searches from one client — the
+rate limit alone let all 60 through and an ordinary request waited 8.8 s;
+with the concurrency cap, 56 are refused in milliseconds and a *different*
+client is served in 0.11 s. `/livez` and `/readyz` are exempt, since
+rate-limiting a liveness probe turns a busy minute into a restart.
 
 `/health` reports counts, not just a status. An empty catalogue answers every query with nothing and no error, which is indistinguishable from "there are no museums here" unless the counts are visible:
 
@@ -632,7 +657,23 @@ Offline tests in `pkg/wikipedia/extractor_structure_test.go` and `pkg/exhibition
 - **`environment variable MUSEUM_BUCKET_NAME is not set`** — no `.env` in the working directory, or the variable is not exported.
 - **Connection reset on port 9000** — something else on the host owns it (a local Kubernetes cluster is a common culprit). Check with `lsof -nP -iTCP:9000 -sTCP:LISTEN` and remap the published port in `docker-compose.yml`.
 - **No events in Kafka UI** — check `docker logs minio-init`; it must report that the bucket notification was created. Without it MinIO stores objects but publishes nothing, and `enrich` sits idle.
-- **`/v1/exhibitions` returns nothing** — `museum refresh` has not run for that area. The endpoint serves precomputed data only.
+- **`/v1/exhibitions` returns nothing** — almost always because `museum refresh` has not run for that area. The endpoint serves precomputed data only; the crawl finds museums, and only `refresh` reads their websites for what is on show.
+
+  The response says which it is. Check the `coverage` object rather than guessing:
+
+  ```json
+  { "count": 0, "exhibitions": [],
+    "coverage": { "museums_in_area": 28, "museums_with_website": 22,
+                  "note": "no exhibitions have been collected here yet: 22 museums have a website but none has been scraped. Run \"museum refresh\" for this area." } }
+  ```
+
+  A `null` `last_scraped` means nobody has looked; a timestamp with `count: 0` means the area was scraped and nothing is currently on. Fix the first with:
+
+  ```bash
+  docker compose --profile jobs run --rm jobs refresh -place "London" -radius 10 -max-museums 200
+  ```
+
+  That takes a couple of minutes for a city — 40 London museums yielded 90 exhibitions in 1m45s.
 - **Everything returns nothing, and `/health` reports zero museums** — the database is empty. Run `museum reindex` to load it from object storage. The database tests create and drop their own schema, so they cannot cause this; an earlier version truncated whatever `TEST_DATABASE_URL` pointed at and wiped the loaded catalogue.
 - **Museums missing from location queries** — they have no coordinates. Check the `reindex` output for the "no coordinates" count.
 - **A Wikidata country reports far fewer museums than expected** — the paging subquery must stay `SELECT DISTINCT`, and the end-of-page check must count entities rather than emitted museums. Both have caused silent truncation.

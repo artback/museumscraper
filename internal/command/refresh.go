@@ -153,10 +153,11 @@ func nearbyMuseumsWithWebsites(ctx context.Context, lat, lon, radius float64) ([
 
 	// The scraper reads at most a few hundred sites per run, so a generous cap
 	// here is still far more than a refresh will use.
-	hits, err := db.Nearby(ctx, lat, lon, radius, 5000)
+	page, err := db.Nearby(ctx, lat, lon, radius, 5000, 0)
 	if err != nil {
 		return nil, err
 	}
+	hits := page.Hits
 
 	museums := make([]models.Museum, 0, len(hits))
 	for _, hit := range hits {
