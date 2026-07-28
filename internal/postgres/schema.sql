@@ -159,3 +159,15 @@ CREATE TABLE IF NOT EXISTS places (
 
     resolved_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- Fuzzy matching on town names, for resolving a misspelled place against the
+-- localities the catalogue already knows.
+CREATE INDEX IF NOT EXISTS museums_locality_trgm_idx
+    ON museums USING gin (locality_normalized gin_trgm_ops);
+
+-- The town's leading word, which is what a place-name fallback matches on:
+-- localities are stored administratively ("Gothenburg Municipality"), so the
+-- comparison is against the first word rather than the whole string. An
+-- expression index keeps that lookup off a sequential scan.
+CREATE INDEX IF NOT EXISTS museums_locality_head_trgm_idx
+    ON museums USING gin ((split_part(locality_normalized, ' ', 1)) gin_trgm_ops);

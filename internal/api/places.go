@@ -25,6 +25,9 @@ const (
 type PlaceCache interface {
 	LookupPlace(ctx context.Context, query string) (postgres.Place, bool, error)
 	SavePlace(ctx context.Context, place postgres.Place) error
+	// LocalityPlace resolves a name against the towns already in the
+	// catalogue, which the geocoder's exact matching cannot do.
+	LocalityPlace(ctx context.Context, query string) (postgres.Place, error)
 }
 
 // Geocoder turns a place name into a location. Satisfied by pkg/location.
@@ -75,6 +78,16 @@ func (r *PlaceResolver) Resolve(ctx context.Context, name string) (postgres.Plac
 
 	found, err := r.geocode(ctx, name)
 	if errors.Is(err, location.ErrNoResults) {
+		// The geocoder matches exactly, so a typo returns nothing at all —
+		// while a museum search for a name spelled just as badly succeeds,
+		// because that index matches trigrams. Falling back to the towns the
+		// catalogue already holds closes that gap: "gothenborg" resolves to
+		// Gothenburg from our own data.
+		if fallback, localErr := r.cache.LocalityPlace(ctx, key); localErr == nil {
+			fallback.Query = key
+			r.remember(ctx, fallback)
+			return fallback, nil
+		}
 		r.remember(ctx, postgres.Place{Query: key, DisplayName: name, Found: false})
 		return postgres.Place{}, fmt.Errorf("%w: %q", postgres.ErrPlaceUnknown, name)
 	}

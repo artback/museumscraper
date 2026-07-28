@@ -11,9 +11,10 @@ import (
 
 // fakeCache is an in-memory stand-in for the places table.
 type fakeCache struct {
-	entries map[string]postgres.Place
-	lookups int
-	saves   int
+	entries  map[string]postgres.Place
+	lookups  int
+	saves    int
+	locality *postgres.Place
 }
 
 func newFakeCache() *fakeCache {
@@ -30,6 +31,16 @@ func (c *fakeCache) SavePlace(_ context.Context, place postgres.Place) error {
 	c.saves++
 	c.entries[place.Query] = place
 	return nil
+}
+
+// localityPlace is what the catalogue fallback should return, if anything.
+func (c *fakeCache) LocalityPlace(_ context.Context, query string) (postgres.Place, error) {
+	if c.locality == nil {
+		return postgres.Place{}, postgres.ErrPlaceUnknown
+	}
+	found := *c.locality
+	found.Query = query
+	return found, nil
 }
 
 func TestPlaceResolver_ResolvesAndCaches(t *testing.T) {
@@ -154,5 +165,48 @@ func TestPlaceResolver_ClampsHugeBoundingBox(t *testing.T) {
 	}
 	if place.RadiusKm != maxPlaceRadiusKm {
 		t.Errorf("radius = %.1f km, want it clamped to %d km", place.RadiusKm, maxPlaceRadiusKm)
+	}
+}
+
+// The geocoder is exact, so a typo returns nothing — while a museum search
+// spelled just as badly succeeds. Falling back to the towns the catalogue
+// already knows closes that gap.
+func TestPlaceResolver_FallsBackToKnownLocalities(t *testing.T) {
+	cache := newFakeCache()
+	cache.locality = &postgres.Place{
+		DisplayName: "Gothenburg", Latitude: 57.7072, Longitude: 11.967,
+		RadiusKm: 12, Found: true,
+	}
+	geocode := func(context.Context, string) (*location.NominatimLocation, error) {
+		return nil, location.ErrNoResults
+	}
+
+	place, err := NewPlaceResolver(cache, geocode).Resolve(context.Background(), "gothenborg sweden")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if place.DisplayName != "Gothenburg" {
+		t.Errorf("resolved to %q, want Gothenburg from the catalogue", place.DisplayName)
+	}
+	if place.Latitude == 0 {
+		t.Error("the fallback returned no coordinates")
+	}
+	// Cached, so the same typo does not re-run the fallback query either.
+	if cache.saves != 1 {
+		t.Errorf("saved %d entries, want the resolution cached", cache.saves)
+	}
+}
+
+// The fallback must not rescue a name that is simply not a place: answering
+// confidently with the wrong town is harder to notice than a 404.
+func TestPlaceResolver_FallbackStillReportsUnknown(t *testing.T) {
+	cache := newFakeCache() // locality nil, so the fallback finds nothing
+	geocode := func(context.Context, string) (*location.NominatimLocation, error) {
+		return nil, location.ErrNoResults
+	}
+
+	_, err := NewPlaceResolver(cache, geocode).Resolve(context.Background(), "qqzzxx")
+	if !errors.Is(err, postgres.ErrPlaceUnknown) {
+		t.Errorf("error = %v, want ErrPlaceUnknown", err)
 	}
 }
