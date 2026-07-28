@@ -131,3 +131,31 @@ CREATE INDEX IF NOT EXISTS exhibitions_location_idx ON exhibitions USING gist (l
 
 -- "What is on now" filters on the closing date, so it leads the index.
 CREATE INDEX IF NOT EXISTS exhibitions_ends_idx ON exhibitions (ends_on);
+
+-- Resolved place names, so "exhibitions in Paris" costs one geocoder call ever
+-- rather than one per request.
+--
+-- The geocoder allows one request per second, which is unusable on a request
+-- path: a handful of concurrent callers would queue behind each other and the
+-- rate limiter would decide the API's latency. City names repeat heavily, so a
+-- cache turns almost every lookup into a local index hit. It lives in Postgres
+-- rather than in memory because it must survive a restart and be shared by
+-- every replica — a per-process cache would multiply the call rate by the
+-- number of instances, which is exactly what the limit forbids.
+CREATE TABLE IF NOT EXISTS places (
+    -- The normalised query, so "Paris, France" and "paris france" are one entry.
+    query        text PRIMARY KEY,
+
+    display_name text NOT NULL,
+    location     geography(Point, 4326) NOT NULL,
+
+    -- The extent the geocoder reported, used to size the search radius: a
+    -- request for a city should not use the same radius as one for a street.
+    radius_km    double precision NOT NULL,
+
+    -- Negative results are cached too. A misspelled city would otherwise cost a
+    -- geocoder call on every retry, which is how a rate limit gets exhausted.
+    found        boolean NOT NULL DEFAULT true,
+
+    resolved_at  timestamptz NOT NULL DEFAULT now()
+);

@@ -3,8 +3,9 @@
 A catalogue of the world's museums — around **81,000** of them — assembled from four public sources, geocoded, indexed for location queries, and served over HTTP together with the exhibitions currently on show.
 
 ```
+GET /v1/museums?place=Kyoto                              →  ~4 ms
 GET /v1/museums?lat=48.8566&lon=2.3522&radius_km=2       →  ~1 ms
-GET /v1/exhibitions?lat=48.8566&lon=2.3522&radius_km=2   →  ~1 ms
+GET /v1/exhibitions?place=London                         →  ~4 ms
 ```
 
 - **Sources**: Wikidata Query Service, Wikipedia action API, OpenStreetMap Overpass, museum websites
@@ -216,15 +217,51 @@ A refresh replaces only the entries for the museums it just scraped, so a run sc
 ### `museum serve` — the HTTP API
 
 ```bash
-museum serve -addr :8090 -cache-ttl 5m
+museum serve -addr :8090
 ```
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /v1/search?q=…` | Museums by name — the only interface that reaches the 23% with no coordinates |
-| `GET /v1/museums` | Museums near a point |
-| `GET /v1/exhibitions` | What is on show near a point |
-| `GET /health` | Liveness, plus what the catalogue holds |
+| `GET /v1/museums` | Museums near a point, or in a named place |
+| `GET /v1/exhibitions` | What is on show near a point, or in a named place |
+| `GET /health` | What the catalogue holds |
+| `GET /livez` | The process is running |
+| `GET /readyz` | The catalogue can be queried |
+
+**Locating a query.** Every location endpoint takes either coordinates
+(`lat`, `lon`, `radius_km`) or a place name (`place`). Coordinates win if both
+are given.
+
+```bash
+curl 'localhost:8090/v1/exhibitions?place=London'
+curl 'localhost:8090/v1/museums?place=Paris,%20France&limit=5'
+```
+
+A named place is geocoded once and remembered in the `places` table, so the
+second request for a city is a local index hit rather than an upstream call —
+the geocoder allows one request per second, which is unusable per-request. The
+radius is taken from the extent the geocoder reports, so `place=Kyoto` searches
+about 25 km and `place=Zurich` about 7 km; pass `radius_km` to override it. A
+name that cannot be resolved answers 404, and that failure is cached too, so a
+misspelling retried in a loop cannot exhaust the rate limit.
+
+```json
+{ "count": 5, "museums": [ ... ],
+  "query": { "lat": 35.0116, "lon": 135.7681, "radius_km": 24.8, "limit": 5,
+             "place": "Kyoto, Kyoto Prefecture, Japan" } }
+```
+
+The `place` field echoes what the name resolved to, so a caller can tell which
+Springfield it was given.
+
+**Browser clients.** Responses carry `Access-Control-Allow-Origin: *` and
+preflight is answered, so a map application can call the API directly. The data
+is public and read-only; there are no credentials involved.
+
+**Limits.** Every request carries a 10-second deadline, which cancels the
+database query rather than letting it run on unattended. Errors are JSON at
+every status, including 404 and 405.
 
 `/health` reports counts, not just a status. An empty catalogue answers every query with nothing and no error, which is indistinguishable from "there are no museums here" unless the counts are visible:
 
@@ -299,7 +336,29 @@ Three things about this query are load-bearing, each learned by getting it wrong
 
 Measured over 84,584 museums: **14 ms** for a single-word query, **83 ms** for a two-word fuzzy one, **4 ms** for a radius query.
 
-An honest limit: there is no prominence signal. Between two legitimately-named museums the ranking is essentially arbitrary — `kunstmuseum zurich` returns "National Museum Zurich" rather than the Kunsthaus, which is a museum in Zürich but not the one meant. Wikidata sitelink counts would be the obvious fix, and the crawler does not collect them.
+Ranking combines four signals: how the name matches (exact, prefix, or
+substring), trigram similarity blended 0.7/0.3 between whole-name and
+best-extent matching, a bonus when the query names the museum's town, and
+prominence from the museum's Wikidata sitelink count — how many Wikipedia
+language editions cover it, which is the closest thing the sources offer to
+"how well known is this".
+
+The weights are not arbitrary. Measured on 27 realistic queries against the
+live catalogue, the earlier formula scored 19/27; the current one scores 27/27.
+Two mistakes accounted for most of the gap. Taking the *greater* of the two
+similarity measures let the lenient one overrule the strict one, so
+`kunstmuseum zurich` matched "museum zurich" inside "National Museum Zurich"
+and beat "Kunsthaus Zürich". And the town bonus was a plain substring test at
+weight 1.0, which both fired on letters inside unrelated words — 338 towns are
+three characters, and "Sé" matched every query containing "mu-**se**-um" — and
+outweighed the name entirely, so `metropolitan museum new york` returned the
+New York State Museum.
+
+An honest limit that remains: aliases are collected in English only. Five
+languages cost 60% more response bytes and twelve made the query service time
+out, which during a crawl loses a whole page of a country. English is where the
+acronyms live, which is the case nothing else recovers — without it `moma`
+matches a gallery in Wales while the Museum of Modern Art is unreachable.
 
 ### `museum verify` — audit the catalogue
 
@@ -404,6 +463,7 @@ colliding with every other such name.
 | Table | Loaded by | Indexes |
 | --- | --- | --- |
 | `museums` | `crawl`, `reindex` | GIST on `location`, GIN trigram on the name and on name+aliases+town, prefix index for typeahead, partial index on `postcode` |
+| `places` | `serve` | Geocoded place names, so `?place=Paris` costs one upstream call ever |
 | `exhibitions` | `refresh` | GIST on `location`, closing date |
 
 A museum is identified by its Wikidata id where it has one, and otherwise by its name and country — the same rule the in-process merger uses, so the two cannot disagree about what counts as the same museum. Loads upsert on that identity, so a re-crawl updates rows in place rather than accumulating copies.
@@ -528,7 +588,7 @@ Every external API is called with a descriptive User-Agent, a client-side rate l
 cmd/museum/            the only binary; dispatches to subcommands
 internal/
   command/             one file per subcommand
-  api/                 HTTP handlers, query validation, cell cache
+  api/                 HTTP handlers, query validation, middleware, place lookup
   collect/             cross-source deduplication and merging
   geoindex/            degree-cell grid, radius cover, haversine
   enrich/              generic pipeline: parallel steps, sequential stages

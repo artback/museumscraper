@@ -11,6 +11,7 @@ import (
 
 	"museum/internal/api"
 	"museum/pkg/graceful"
+	"museum/pkg/location"
 )
 
 // drainTimeout is how long a stopping server waits for in-flight requests.
@@ -50,8 +51,14 @@ func runServe(ctx context.Context, args []string) error {
 	defer db.Close()
 
 	server := &http.Server{
-		Addr:              *addr,
-		Handler:           api.NewServer(db).Routes(),
+		Addr: *addr,
+		// The resolver is what lets a caller ask for "Paris" instead of a
+		// coordinate pair. It geocodes through the shared rate-limited client
+		// and caches into the same database, so a name costs one upstream call
+		// ever rather than one per request.
+		Handler: api.NewServer(db).
+			WithPlaces(api.NewPlaceResolver(db, location.Geocode)).
+			Routes(),
 		ReadHeaderTimeout: *readTimeout,
 		ReadTimeout:       *readTimeout,
 		IdleTimeout:       *idleTimeout,

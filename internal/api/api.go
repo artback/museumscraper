@@ -14,6 +14,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,9 @@ const (
 
 	// maxQueryRunes bounds a search string. Anything longer is not a search.
 	maxQueryRunes = 200
+
+	// maxPlaceNameChars bounds a place name before it reaches the geocoder.
+	maxPlaceNameChars = 200
 )
 
 // Catalogue is what the API needs from the database.
@@ -51,14 +55,28 @@ type Catalogue interface {
 	Ping(ctx context.Context) error
 }
 
+// placeLookup resolves a place name to coordinates.
+type placeLookup interface {
+	Resolve(ctx context.Context, name string) (postgres.Place, error)
+}
+
 // Server answers catalogue queries over HTTP.
 type Server struct {
 	catalogue Catalogue
+	places    placeLookup
 }
 
-// NewServer returns a Server backed by the catalogue.
+// NewServer returns a Server backed by the catalogue. Without a resolver the
+// API still works; it just cannot answer "what is on in Paris" without being
+// told where Paris is.
 func NewServer(catalogue Catalogue) *Server {
 	return &Server{catalogue: catalogue}
+}
+
+// WithPlaces returns a Server that can resolve place names.
+func (s *Server) WithPlaces(places placeLookup) *Server {
+	s.places = places
+	return s
 }
 
 // Routes returns the HTTP handler for the API.
@@ -103,11 +121,23 @@ type query struct {
 	lat, lon float64
 	radiusKm float64
 	limit    int
+	// place is the name that produced the coordinates, echoed back so a caller
+	// can see which "Springfield" it was given.
+	place string
 }
 
 // parseQuery reads and validates the shared query parameters.
-func parseQuery(r *http.Request) (query, error) {
+//
+// A request may give coordinates directly or name a place. Coordinates win
+// when both are present: they are unambiguous, and a caller that sends both
+// probably means the pair it computed itself.
+func (s *Server) parseQuery(r *http.Request) (query, error) {
 	values := r.URL.Query()
+
+	if name := strings.TrimSpace(values.Get("place")); name != "" &&
+		values.Get("lat") == "" && values.Get("lon") == "" {
+		return s.parsePlaceQuery(r, name, values)
+	}
 
 	lat, err := parseFloat(values.Get("lat"), "lat")
 	if err != nil {
@@ -145,6 +175,47 @@ func parseQuery(r *http.Request) (query, error) {
 	return query{lat: lat, lon: lon, radiusKm: radius, limit: limit}, nil
 }
 
+// parsePlaceQuery resolves a named place into the same query the coordinate
+// form produces.
+//
+// The radius defaults to the extent the geocoder reported for the place rather
+// than the fixed 3 km, so "Paris" searches Paris and "Rue de Rivoli" searches a
+// street. An explicit radius_km still overrides it.
+func (s *Server) parsePlaceQuery(r *http.Request, name string, values url.Values) (query, error) {
+	if s.places == nil {
+		return query{}, errors.New("place lookup is not configured on this server; pass lat and lon")
+	}
+	if len(name) > maxPlaceNameChars {
+		return query{}, fmt.Errorf("place must be %d characters or fewer", maxPlaceNameChars)
+	}
+
+	found, err := s.places.Resolve(r.Context(), name)
+	if err != nil {
+		return query{}, err
+	}
+
+	radius := found.RadiusKm
+	if raw := values.Get("radius_km"); raw != "" {
+		if radius, err = parseFloat(raw, "radius_km"); err != nil {
+			return query{}, err
+		}
+		if radius <= 0 {
+			return query{}, errors.New("radius_km must be greater than zero")
+		}
+		if radius > maxRadiusKm {
+			return query{}, fmt.Errorf("radius_km must be %d or less", maxRadiusKm)
+		}
+	}
+
+	limit, err := parseLimit(values.Get("limit"))
+	if err != nil {
+		return query{}, err
+	}
+
+	return query{lat: found.Latitude, lon: found.Longitude,
+		radiusKm: radius, limit: limit, place: found.DisplayName}, nil
+}
+
 func parseLimit(raw string) (int, error) {
 	if raw == "" {
 		return defaultLimit, nil
@@ -174,10 +245,14 @@ type responseQuery struct {
 	Longitude float64 `json:"lon"`
 	RadiusKm  float64 `json:"radius_km"`
 	Limit     int     `json:"limit"`
+	// Place is the geocoder's full name for what a place= query resolved to,
+	// so a caller can see whether "Springfield" meant the one it had in mind.
+	Place string `json:"place,omitempty"`
 }
 
 func echo(q query) responseQuery {
-	return responseQuery{Latitude: q.lat, Longitude: q.lon, RadiusKm: q.radiusKm, Limit: q.limit}
+	return responseQuery{Latitude: q.lat, Longitude: q.lon,
+		RadiusKm: q.radiusKm, Limit: q.limit, Place: q.place}
 }
 
 type museumResponse struct {
@@ -291,9 +366,9 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMuseums(w http.ResponseWriter, r *http.Request) {
-	q, err := parseQuery(r)
+	q, err := s.parseQuery(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeQueryError(w, r, err)
 		return
 	}
 
@@ -330,7 +405,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	limit, err := parseLimit(r.URL.Query().Get("limit"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeQueryError(w, r, err)
 		return
 	}
 
@@ -355,9 +430,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExhibitions(w http.ResponseWriter, r *http.Request) {
-	q, err := parseQuery(r)
+	q, err := s.parseQuery(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeQueryError(w, r, err)
 		return
 	}
 	// Upcoming exhibitions are excluded by default: the common question is what
@@ -403,6 +478,25 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		log.Printf("api: write response: %v", err)
+	}
+}
+
+// writeQueryError reports a failure to understand or resolve a request.
+//
+// Most are the caller's fault and answer 400. An unresolvable place name is
+// different: the request was well formed and the answer is simply that no such
+// place is known, which is a 404. A geocoder that is unreachable is our
+// problem, not theirs.
+func writeQueryError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, postgres.ErrPlaceUnknown):
+		writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		writeServerError(w, r, err)
+	case strings.HasPrefix(err.Error(), "geocode "):
+		writeServerError(w, r, err)
+	default:
+		writeError(w, http.StatusBadRequest, err)
 	}
 }
 
