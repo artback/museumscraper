@@ -378,6 +378,10 @@ func nullIfEmpty(s string) *string {
 
 // Hit is a museum returned by a query, with why it matched.
 type Hit struct {
+	// ApproximateLocation is true when the position is the museum's town
+	// centre rather than the museum's own, because no geocoder could find it.
+	ApproximateLocation bool
+
 	// ID is the row's stable identifier. Without one there is nothing to deep
 	// link to, nothing to page on, and nothing for a client to dedupe by:
 	// wikidata_id is absent for about 4% of the catalogue, so it cannot serve.
@@ -408,7 +412,7 @@ func (s *Store) Nearby(ctx context.Context, lat, lon, radiusKm float64, limit, o
 	const stmt = `
 SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
-       aliases, sources, verified, street, postcode,
+       aliases, sources, verified, street, postcode, location_approximate,
        ST_Y(location::geometry), ST_X(location::geometry),
        count(*) OVER () AS total,
        ST_Distance(location, $1::geography) / 1000.0 AS distance_km
@@ -458,7 +462,7 @@ func (s *Store) Search(ctx context.Context, query string, limit, offset int) (Pa
 WITH q AS (SELECT $1::text AS term)
 SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
-       aliases, sources, verified, street, postcode,
+       aliases, sources, verified, street, postcode, location_approximate,
        ST_Y(location::geometry), ST_X(location::geometry),
        count(*) OVER () AS total,
        (
@@ -535,7 +539,7 @@ func (s *Store) MuseumByID(ctx context.Context, id string) (Hit, error) {
 	const stmt = `
 SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
-       aliases, sources, verified, street, postcode,
+       aliases, sources, verified, street, postcode, location_approximate,
        ST_Y(location::geometry), ST_X(location::geometry),
        1::bigint AS total, 0::double precision
 FROM museums
@@ -581,7 +585,8 @@ func scanPage(rows pgx.Rows, withDistance bool) (Page, error) {
 			&hit.Museum.Name, &hit.Museum.Country, &hit.Museum.Locality,
 			&hit.Museum.Description, &hit.Museum.Website, &hit.Museum.WikipediaURL,
 			&hit.Museum.WikidataID, &hit.Museum.AlsoKnownAs, &hit.Museum.Sources,
-			&hit.Museum.Verified, &street, &postcode, &lat, &lon, &total, &last,
+			&hit.Museum.Verified, &street, &postcode, &hit.ApproximateLocation,
+			&lat, &lon, &total, &last,
 		); err != nil {
 			return Page{}, fmt.Errorf("scan: %w", err)
 		}
@@ -844,4 +849,66 @@ WHERE location IS NOT NULL AND ST_DWithin(location, $1::geography, $2)`
 		return Coverage{}, fmt.Errorf("exhibition coverage: %w", err)
 	}
 	return coverage, nil
+}
+
+// Unplaced is a museum the catalogue holds but cannot locate.
+type Unplaced struct {
+	ID       int64
+	Name     string
+	Locality string
+	Country  string
+}
+
+// UnplacedMuseums returns museums with no coordinates, optionally narrowed to a
+// town or country.
+//
+// A fifth of the catalogue is in this state. Those records are findable by name
+// and invisible to every radius and place query, which is the one thing a
+// visitor-facing caller does most — a museum nobody can find on a map may as
+// well not be in the catalogue.
+//
+// Only records with something to geocode from are returned: a bare name with no
+// town and no country cannot be resolved to one place with any confidence.
+func (s *Store) UnplacedMuseums(ctx context.Context, locality, country string, limit int) ([]Unplaced, error) {
+	const stmt = `
+SELECT id, name, coalesce(locality, ''), coalesce(country, '')
+FROM museums
+WHERE location IS NULL
+  AND (coalesce(locality, '') <> '' OR coalesce(country, '') <> '')
+  AND ($1 = '' OR locality ILIKE '%' || $1 || '%')
+  AND ($2 = '' OR country ILIKE $2)
+ORDER BY sitelinks DESC, id
+LIMIT $3`
+
+	rows, err := s.pool.Query(ctx, stmt, locality, country, limit)
+	if err != nil {
+		return nil, fmt.Errorf("unplaced museums: %w", err)
+	}
+	defer rows.Close()
+
+	var found []Unplaced
+	for rows.Next() {
+		var u Unplaced
+		if err := rows.Scan(&u.ID, &u.Name, &u.Locality, &u.Country); err != nil {
+			return nil, fmt.Errorf("scan unplaced: %w", err)
+		}
+		found = append(found, u)
+	}
+	return found, rows.Err()
+}
+
+// SetLocation records coordinates for one museum. approximate marks a position
+// taken from the museum's town rather than from the museum itself.
+func (s *Store) SetLocation(ctx context.Context, id int64, lat, lon float64, approximate bool) error {
+	const stmt = `
+UPDATE museums
+SET location = ST_SetSRID(ST_MakePoint($3::double precision, $2::double precision), 4326)::geography,
+    location_approximate = $4,
+    updated_at = now()
+WHERE id = $1`
+
+	if _, err := s.pool.Exec(ctx, stmt, id, lat, lon, approximate); err != nil {
+		return fmt.Errorf("set location for %d: %w", id, err)
+	}
+	return nil
 }

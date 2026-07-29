@@ -641,3 +641,62 @@ func TestSaveMuseums_UnionsAliasesAcrossSources(t *testing.T) {
 		t.Error("the museum is not findable by the name OpenStreetMap knows it by")
 	}
 }
+
+// A museum with no coordinates is findable by name and invisible to every
+// radius and place query. A fifth of the catalogue is in that state, and
+// nothing could repair it: enrichment geocodes only what arrives through the
+// event pipeline.
+func TestUnplacedMuseumsAndSetLocation(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Placed Museum", Country: "Sweden", Locality: "Gothenburg",
+			WikidataID: "Q1", Latitude: 57.70, Longitude: 11.96},
+		{Name: "Unplaced Museum", Country: "Sweden", Locality: "Gothenburg", WikidataID: "Q2"},
+		{Name: "Unplaced Elsewhere", Country: "Norway", Locality: "Oslo", WikidataID: "Q3"},
+		// Nothing to geocode from, so it must not be offered up.
+		{Name: "No Place At All", WikidataID: "Q4"},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	pending, err := store.UnplacedMuseums(ctx, "Gothenburg", "", 10)
+	if err != nil {
+		t.Fatalf("unplaced: %v", err)
+	}
+	if len(pending) != 1 || pending[0].Name != "Unplaced Museum" {
+		t.Fatalf("unplaced = %+v, want only the unplaced Gothenburg museum", pending)
+	}
+
+	all, err := store.UnplacedMuseums(ctx, "", "", 10)
+	if err != nil {
+		t.Fatalf("unplaced all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("unplaced overall = %d, want 2 — a record with no town and no country has nothing to geocode from", len(all))
+	}
+
+	if err := store.SetLocation(ctx, pending[0].ID, 57.7072, 11.967, false); err != nil {
+		t.Fatalf("set location: %v", err)
+	}
+
+	// Now reachable by the query that could not see it before.
+	page, err := store.Nearby(ctx, 57.7072, 11.967, 5, 10, 0)
+	if err != nil {
+		t.Fatalf("nearby: %v", err)
+	}
+	var found bool
+	for _, hit := range page.Hits {
+		if hit.Museum.Name == "Unplaced Museum" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the museum is still invisible to a radius query after being located")
+	}
+
+	if remaining, _ := store.UnplacedMuseums(ctx, "Gothenburg", "", 10); len(remaining) != 0 {
+		t.Errorf("still %d unplaced in Gothenburg, want 0", len(remaining))
+	}
+}

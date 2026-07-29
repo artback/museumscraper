@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 
 	"museum/internal/models"
 )
@@ -39,6 +40,18 @@ type NominatimLocation struct {
 
 // NominatimResponse is the shape of a Nominatim search response.
 type NominatimResponse []NominatimLocation
+
+// Coordinates parses the position Nominatim reported. It returns an error
+// rather than a zero pair, because (0, 0) is a real place in the Atlantic and
+// silently storing it would put museums there.
+func (l NominatimLocation) Coordinates() (lat, lon float64, err error) {
+	lat, latErr := strconv.ParseFloat(l.Lat, 64)
+	lon, lonErr := strconv.ParseFloat(l.Lon, 64)
+	if latErr != nil || lonErr != nil {
+		return 0, 0, fmt.Errorf("unusable coordinates %q, %q", l.Lat, l.Lon)
+	}
+	return lat, lon, nil
+}
 
 // Locality returns the most specific settlement name Nominatim supplied.
 func (l NominatimLocation) Locality() string { return l.Address.Locality() }

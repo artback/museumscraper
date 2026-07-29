@@ -302,18 +302,22 @@ type museumResponse struct {
 type museumHit struct {
 	// ID is stable across requests and re-crawls: the thing to deep link to,
 	// dedupe by, and fetch again from /v1/museums/{id}.
-	ID           int64    `json:"id"`
-	Name         string   `json:"name"`
-	DistanceKm   float64  `json:"distance_km"`
-	Country      string   `json:"country,omitempty"`
-	Locality     string   `json:"locality,omitempty"`
-	Description  string   `json:"description,omitempty"`
-	Latitude     float64  `json:"latitude"`
-	Longitude    float64  `json:"longitude"`
-	Website      string   `json:"website,omitempty"`
-	WikipediaURL string   `json:"wikipedia_url,omitempty"`
-	WikidataID   string   `json:"wikidata_id,omitempty"`
-	Sources      []string `json:"sources,omitempty"`
+	ID          int64   `json:"id"`
+	Name        string  `json:"name"`
+	DistanceKm  float64 `json:"distance_km"`
+	Country     string  `json:"country,omitempty"`
+	Locality    string  `json:"locality,omitempty"`
+	Description string  `json:"description,omitempty"`
+	Latitude    float64 `json:"latitude"`
+	Longitude   float64 `json:"longitude"`
+	// ApproximateLocation marks a position taken from the museum's town rather
+	// than the museum itself, because no geocoder could find it by name. The
+	// museum is really in that town; it is not really at that point.
+	ApproximateLocation bool     `json:"approximate_location,omitempty"`
+	Website             string   `json:"website,omitempty"`
+	WikipediaURL        string   `json:"wikipedia_url,omitempty"`
+	WikidataID          string   `json:"wikidata_id,omitempty"`
+	Sources             []string `json:"sources,omitempty"`
 }
 
 type searchResponse struct {
@@ -594,7 +598,8 @@ func museumHitFrom(hit postgres.Hit, distanceKm float64) museumHit {
 	m := hit.Museum
 	return museumHit{
 		ID: hit.ID, Name: m.Name, DistanceKm: distanceKm,
-		Country: m.Country, Locality: m.Locality, Description: m.Description,
+		ApproximateLocation: hit.ApproximateLocation,
+		Country:             m.Country, Locality: m.Locality, Description: m.Description,
 		Latitude: m.Latitude, Longitude: m.Longitude,
 		Website: m.Website, WikipediaURL: m.WikipediaURL,
 		WikidataID: m.WikidataID, Sources: m.Sources,

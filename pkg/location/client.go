@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sync"
 	"time"
+
+	"museum/internal/ratelimit"
 )
 
 // ErrNoResults means the query was valid but Nominatim matched nothing.
@@ -27,6 +28,14 @@ const (
 	// usage policy of at most one request per second.
 	minInterval = 1100 * time.Millisecond
 
+	// maxInterval is how far apart requests are spaced once Nominatim has
+	// refused some. Slow, but a slow run places every museum and a throttled
+	// one places none.
+	maxInterval = 30 * time.Second
+
+	// maxAttempts is how many times a refused request is retried.
+	maxAttempts = 5
+
 	requestTimeout = 30 * time.Second
 )
 
@@ -43,68 +52,80 @@ var userAgent = func() string {
 }()
 
 // gate serialises outbound requests to respect the rate limit. It is package
-// level because the limit applies per client, not per caller: the enrichment
+// level because the limit applies per endpoint, not per caller: the enrichment
 // pipeline runs steps concurrently and would otherwise burst.
-var gate limiter
-
-// limiter spaces calls at least minInterval apart.
-type limiter struct {
-	mu   sync.Mutex
-	next time.Time
-}
-
-// wait blocks until the caller may issue a request, or until ctx is done.
-func (l *limiter) wait(ctx context.Context) error {
-	l.mu.Lock()
-	now := time.Now()
-	delay := l.next.Sub(now)
-	if delay < 0 {
-		delay = 0
-	}
-	// Reserve this caller's slot before unlocking so concurrent callers queue
-	// behind it rather than all racing for the same instant.
-	l.next = now.Add(delay + minInterval)
-	l.mu.Unlock()
-
-	if delay == 0 {
-		return ctx.Err()
-	}
-
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
+var gate = ratelimit.NewGate(minInterval, maxInterval)
 
 // get performs a rate-limited, properly identified GET against Nominatim and
 // decodes the JSON response into out.
+//
+// A refusal is retried rather than returned. There was no retry here at all,
+// so a single 429 failed the lookup outright: locating a few hundred museums
+// gave up on every one of them the moment Nominatim began throttling, and
+// reported them as unlocatable when they were merely asked for too quickly.
 func get(ctx context.Context, path string, params interface{ Encode() string }, out any) error {
-	if err := gate.wait(ctx); err != nil {
-		return err
-	}
+	requestURL := baseURL + path + "?" + params.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path+"?"+params.Encode(), nil)
+	var (
+		lastErr error
+		wait    time.Duration
+	)
+	for attempt := range maxAttempts {
+		if attempt > 0 {
+			if wait < ratelimit.Backoff(attempt) {
+				wait = ratelimit.Backoff(attempt)
+			}
+			if err := ratelimit.Sleep(ctx, wait); err != nil {
+				return err
+			}
+		}
+		if err := gate.Wait(ctx); err != nil {
+			return err
+		}
+
+		retryable, retryAfter, err := doRequest(ctx, requestURL, out)
+		if err == nil {
+			gate.SpeedUp()
+			return nil
+		}
+		lastErr = err
+		if !retryable {
+			return err
+		}
+		gate.SlowDown()
+		if retryAfter > wait {
+			wait = retryAfter
+		}
+	}
+	return fmt.Errorf("after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// doRequest issues one request, reporting whether a failure is worth retrying.
+func doRequest(ctx context.Context, requestURL string, out any) (retryable bool, retryAfter time.Duration, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return false, 0, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("call nominatim: %w", err)
+		// A cancelled context is deliberate; anything else may be transient.
+		return ctx.Err() == nil, 0, fmt.Errorf("call nominatim: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("nominatim returned %s", resp.Status)
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests, resp.StatusCode >= 500:
+		return true, ratelimit.RetryAfter(resp.Header.Get("Retry-After")),
+			fmt.Errorf("nominatim returned %s", resp.Status)
+	case resp.StatusCode != http.StatusOK:
+		return false, 0, fmt.Errorf("nominatim returned %s", resp.Status)
 	}
+
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode nominatim response: %w", err)
+		return false, 0, fmt.Errorf("decode nominatim response: %w", err)
 	}
-	return nil
+	return false, 0, nil
 }

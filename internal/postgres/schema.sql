@@ -184,3 +184,15 @@ ALTER TABLE museums ADD COLUMN IF NOT EXISTS aliases_normalized text[] NOT NULL 
 
 CREATE INDEX IF NOT EXISTS museums_aliases_normalized_idx
     ON museums USING gin (aliases_normalized);
+
+-- Whether a museum's position is its own or its town's.
+--
+-- A fifth of the catalogue arrives with no coordinates, and the geocoder cannot
+-- find many of them by name — they are historical, merged, or too small for
+-- OpenStreetMap to carry. Leaving those unplaced makes them invisible to every
+-- radius and place query, which for a visitor-facing caller is much the same as
+-- not holding them at all. Placing them at the centre of the town they are
+-- recorded in makes them findable; saying so in the response is what keeps that
+-- honest, because a caller drawing pins on a map must be able to tell a
+-- surveyed position from a town centre.
+ALTER TABLE museums ADD COLUMN IF NOT EXISTS location_approximate boolean NOT NULL DEFAULT false;

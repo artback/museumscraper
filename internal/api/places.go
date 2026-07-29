@@ -95,10 +95,9 @@ func (r *PlaceResolver) Resolve(ctx context.Context, name string) (postgres.Plac
 		return postgres.Place{}, fmt.Errorf("geocode %q: %w", name, err)
 	}
 
-	lat, latErr := strconv.ParseFloat(found.Lat, 64)
-	lon, lonErr := strconv.ParseFloat(found.Lon, 64)
-	if latErr != nil || lonErr != nil {
-		return postgres.Place{}, fmt.Errorf("geocode %q: unusable coordinates %q, %q", name, found.Lat, found.Lon)
+	lat, lon, err := found.Coordinates()
+	if err != nil {
+		return postgres.Place{}, fmt.Errorf("geocode %q: %w", name, err)
 	}
 
 	place := postgres.Place{

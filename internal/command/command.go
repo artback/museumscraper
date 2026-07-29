@@ -43,6 +43,7 @@ func all() []Command {
 		enrichCommand(),
 		crawlCommand(),
 		refreshCommand(),
+		locateCommand(),
 		reindexCommand(),
 		verifyCommand(),
 		queryCommand(),

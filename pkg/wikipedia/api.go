@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"museum/internal/ratelimit"
 )
 
 const (
@@ -54,14 +54,14 @@ const (
 // museums in the United States" and "Lists of museums in England by county"
 // were skipped entirely, which is thousands of museums lost to a race between
 // two halves of the same program.
-var apiGate limiter
+var apiGate = ratelimit.NewGate(minRequestInterval, maxRequestInterval)
 
 // Client talks to the Wikipedia action API. It is safe for concurrent use; the
 // rate limiter is shared across callers.
 type Client struct {
 	httpClient *http.Client
 	userAgent  string
-	gate       *limiter
+	gate       *ratelimit.Gate
 }
 
 // NewClient returns a Client with a sane timeout and a descriptive user agent.
@@ -69,16 +69,16 @@ func NewClient() *Client {
 	return &Client{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		userAgent:  DefaultUserAgent,
-		gate:       &apiGate,
+		gate:       apiGate,
 	}
 }
 
 // limiter returns the gate this client spaces its requests with, falling back
 // to the shared one. A Client built as a bare struct literal — which tests do —
 // is therefore still usable rather than a nil dereference waiting to happen.
-func (c *Client) limiter() *limiter {
+func (c *Client) limiter() *ratelimit.Gate {
 	if c.gate == nil {
-		return &apiGate
+		return apiGate
 	}
 	return c.gate
 }
@@ -103,27 +103,27 @@ func (c *Client) getFrom(ctx context.Context, requestURL string, out any) error 
 	)
 	for attempt := range maxAttempts {
 		if attempt > 0 {
-			if wait < backoff(attempt) {
-				wait = backoff(attempt)
+			if wait < ratelimit.Backoff(attempt) {
+				wait = ratelimit.Backoff(attempt)
 			}
-			if err := sleepCtx(ctx, wait); err != nil {
+			if err := ratelimit.Sleep(ctx, wait); err != nil {
 				return err
 			}
 		}
-		if err := c.limiter().wait(ctx); err != nil {
+		if err := c.limiter().Wait(ctx); err != nil {
 			return err
 		}
 
 		retryable, retryAfter, err := c.doRequest(ctx, requestURL, out)
 		if err == nil {
-			c.limiter().speedUp()
+			c.limiter().SpeedUp()
 			return nil
 		}
 		lastErr = err
 		if !retryable {
 			return err
 		}
-		c.limiter().slowDown()
+		c.limiter().SlowDown()
 
 		// The server's own Retry-After beats a guess: backing off for one
 		// second when it asked for sixty just spends another attempt.
@@ -153,7 +153,7 @@ func (c *Client) doRequest(ctx context.Context, requestURL string, out any) (ret
 
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests, resp.StatusCode >= 500:
-		return true, parseRetryAfter(resp.Header.Get("Retry-After")),
+		return true, ratelimit.RetryAfter(resp.Header.Get("Retry-After")),
 			fmt.Errorf("wikipedia api returned %s", resp.Status)
 	case resp.StatusCode != http.StatusOK:
 		return false, 0, fmt.Errorf("wikipedia api returned %s", resp.Status)
@@ -163,106 +163,6 @@ func (c *Client) doRequest(ctx context.Context, requestURL string, out any) (ret
 		return false, 0, fmt.Errorf("decode wikipedia response: %w", err)
 	}
 	return false, 0, nil
-}
-
-// parseRetryAfter reads the header in either form the spec allows: a number of
-// seconds, or an HTTP date. An unreadable value yields zero, leaving the
-// caller's own backoff in charge.
-func parseRetryAfter(header string) time.Duration {
-	header = strings.TrimSpace(header)
-	if header == "" {
-		return 0
-	}
-	if seconds, err := strconv.Atoi(header); err == nil {
-		if seconds < 0 {
-			return 0
-		}
-		return time.Duration(seconds) * time.Second
-	}
-	if when, err := http.ParseTime(header); err == nil {
-		if delay := time.Until(when); delay > 0 {
-			return delay
-		}
-	}
-	return 0
-}
-
-// backoff returns the delay before the given retry attempt.
-func backoff(attempt int) time.Duration {
-	return time.Duration(1<<uint(attempt-1)) * time.Second
-}
-
-// sleepCtx waits for d or until ctx is done.
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-// limiter spaces requests, and widens that spacing when the API pushes back.
-//
-// A fixed interval is a guess about someone else's capacity. When the guess is
-// wrong the only signal is a 429, and retrying at the same rate earns another.
-// Widening on refusal and narrowing on success lets the crawl settle at
-// whatever rate the API is actually willing to serve, which is the difference
-// between finishing slowly and skipping a country.
-type limiter struct {
-	mu       sync.Mutex
-	next     time.Time
-	interval time.Duration
-}
-
-// wait blocks until the caller may issue a request, or until ctx is done.
-func (l *limiter) wait(ctx context.Context) error {
-	l.mu.Lock()
-	if l.interval < minRequestInterval {
-		l.interval = minRequestInterval
-	}
-	now := time.Now()
-	delay := l.next.Sub(now)
-	if delay < 0 {
-		delay = 0
-	}
-	l.next = now.Add(delay + l.interval)
-	l.mu.Unlock()
-
-	if delay == 0 {
-		return ctx.Err()
-	}
-	return sleepCtx(ctx, delay)
-}
-
-// slowDown widens the spacing after the API refuses a request.
-func (l *limiter) slowDown() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if l.interval < minRequestInterval {
-		l.interval = minRequestInterval
-	}
-	if l.interval *= 2; l.interval > maxRequestInterval {
-		l.interval = maxRequestInterval
-	}
-}
-
-// speedUp narrows the spacing again after a request succeeds, so one burst of
-// throttling does not slow the rest of a multi-hour crawl to a crawl.
-// Recovery is gradual: halving on every success would undo the back-off as
-// fast as it was applied and oscillate straight back into 429s.
-func (l *limiter) speedUp() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if l.interval > minRequestInterval {
-		if l.interval -= l.interval / 8; l.interval < minRequestInterval {
-			l.interval = minRequestInterval
-		}
-	}
 }
 
 // FetchCategoryMembers returns one page of a category's members. Pass the
