@@ -965,3 +965,44 @@ LIMIT $1`
 	}
 	return museums, rows.Err()
 }
+
+// PlaceAtTownCentres gives every unplaced museum the position of the town it is
+// recorded in, and reports how many it placed.
+//
+// One statement rather than one per museum. Doing this a row at a time meant
+// 30,400 round trips, each re-running an ST_Collect aggregate over the town's
+// museums, and the database crashed partway through and recovered from its log.
+// Computing the centroids once and joining against them does the same work in
+// seconds without asking the server for it thirty thousand times.
+//
+// Positions set here are marked approximate, because they are: the museum is
+// really in that town, but it is not really at that point.
+func (s *Store) PlaceAtTownCentres(ctx context.Context) (int64, error) {
+	const stmt = `
+WITH towns AS (
+    -- The town's leading word, as elsewhere: localities are stored
+    -- administratively ("Gothenburg Municipality", "4th arrondissement of
+    -- Paris"), so the whole string rarely matches between two records.
+    SELECT split_part(locality_normalized, ' ', 1) AS head,
+           ST_Centroid(ST_Collect(location::geometry))::geography AS centre
+    FROM museums
+    WHERE location IS NOT NULL
+      AND locality_normalized <> ''
+      AND length(split_part(locality_normalized, ' ', 1)) >= 4
+    GROUP BY 1
+)
+UPDATE museums m
+SET location = t.centre,
+    location_approximate = true,
+    updated_at = now()
+FROM towns t
+WHERE m.location IS NULL
+  AND m.locality_normalized <> ''
+  AND split_part(m.locality_normalized, ' ', 1) = t.head`
+
+	tag, err := s.pool.Exec(ctx, stmt)
+	if err != nil {
+		return 0, fmt.Errorf("place at town centres: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}

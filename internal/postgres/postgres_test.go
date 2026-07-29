@@ -736,3 +736,55 @@ func TestNearbyVerified_FiltersTheUnverifiedTail(t *testing.T) {
 		t.Errorf("total = %d, want it to reflect the filter", only.Total)
 	}
 }
+
+// Placing museums at their town centre must be one statement, not one per
+// museum: doing it a row at a time crashed the database partway through 30,400
+// round trips, each re-running an aggregate over the town's museums.
+func TestPlaceAtTownCentres(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Anchor One", Country: "Sweden", Locality: "Gothenburg Municipality",
+			WikidataID: "Q1", Latitude: 57.70, Longitude: 11.96},
+		{Name: "Anchor Two", Country: "Sweden", Locality: "Gothenburg Municipality",
+			WikidataID: "Q2", Latitude: 57.72, Longitude: 11.98},
+		// Unplaced, but in a town two museums are already placed in.
+		{Name: "Lost Museum", Country: "Sweden", Locality: "Gothenburg Municipality", WikidataID: "Q3"},
+		// Unplaced in a town nothing is placed in: nothing to infer from.
+		{Name: "Nowhere Museum", Country: "Sweden", Locality: "Unknownville", WikidataID: "Q4"},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	placed, err := store.PlaceAtTownCentres(ctx)
+	if err != nil {
+		t.Fatalf("place: %v", err)
+	}
+	if placed != 1 {
+		t.Fatalf("placed = %d, want 1 — only the museum whose town is known", placed)
+	}
+
+	// Now reachable by a radius query, and flagged as approximate.
+	page, err := store.Nearby(ctx, 57.71, 11.97, 10, 10, 0)
+	if err != nil {
+		t.Fatalf("nearby: %v", err)
+	}
+	var found bool
+	for _, hit := range page.Hits {
+		if hit.Museum.Name == "Lost Museum" {
+			found = true
+			if !hit.ApproximateLocation {
+				t.Error("a town-centre position must be reported as approximate")
+			}
+		}
+	}
+	if !found {
+		t.Error("the museum is still invisible to a radius query")
+	}
+
+	// Idempotent: nothing left whose town is known.
+	if again, err := store.PlaceAtTownCentres(ctx); err != nil || again != 0 {
+		t.Errorf("second run placed %d (err %v), want 0", again, err)
+	}
+}

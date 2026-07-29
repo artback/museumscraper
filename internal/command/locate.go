@@ -60,6 +60,8 @@ func runLocate(ctx context.Context, args []string) error {
 	ctx, cancel := graceful.Context(ctx)
 	defer cancel()
 
+	start := time.Now()
+
 	pending, err := db.UnplacedMuseums(ctx, *locality, *country, *limit)
 	if err != nil {
 		return err
@@ -75,25 +77,29 @@ func runLocate(ctx context.Context, args []string) error {
 	// because the honest estimate for tens of thousands is weeks rather than
 	// hours, and -town-centres exists precisely to avoid that.
 	if *townOnly {
-		log.Printf("Placing %d museums at their town centres (no geocoder calls)", len(pending))
-	} else {
-		log.Printf("Locating %d museums (at least %s, and in practice far longer if the geocoder throttles)",
-			len(pending), (time.Duration(len(pending)) * 1100 * time.Millisecond).Round(time.Second))
+		if *dryRun {
+			log.Printf("Would place %d museums at their town centres (no geocoder calls)", len(pending))
+			return nil
+		}
+		placed, err := db.PlaceAtTownCentres(ctx)
+		if err != nil {
+			return err
+		}
+		log.Printf("Placed %d museums at their town centres in %s",
+			placed, time.Since(start).Round(time.Second))
+		return nil
 	}
+	log.Printf("Locating %d museums (at least %s, and in practice far longer if the geocoder throttles)",
+		len(pending), (time.Duration(len(pending)) * 1100 * time.Millisecond).Round(time.Second))
 
 	if *dryRun {
-		action := "would geocode"
-		if *townOnly {
-			action = "would place at its town centre"
-		}
 		for _, m := range pending {
-			log.Printf("  %s %q (%s)", action, m.Name, placeOf(m.Locality, m.Country))
+			log.Printf("  would geocode %q (%s)", m.Name, placeOf(m.Locality, m.Country))
 		}
 		return nil
 	}
 
 	var located, approximated, unresolved int
-	start := time.Now()
 
 	// Museums cluster heavily by town, so resolving each town once turns tens
 	// of thousands of lookups into a few thousand.
@@ -113,19 +119,6 @@ func runLocate(ctx context.Context, args []string) error {
 			lat, lon    float64
 			approximate bool
 		)
-
-		if *townOnly {
-			town, ok := townCentre(ctx, db, towns, m.Locality)
-			if !ok {
-				unresolved++
-				continue
-			}
-			if err := db.SetLocation(ctx, m.ID, town.Latitude, town.Longitude, true); err != nil {
-				return err
-			}
-			approximated++
-			continue
-		}
 
 		found, err := location.Geocode(ctx, query)
 		switch {
