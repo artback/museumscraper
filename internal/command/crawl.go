@@ -135,12 +135,16 @@ func loadIntoDatabase(ctx context.Context, museums []models.Museum) {
 func collectSources(ctx context.Context, enabled []string, merger *collect.Merger) {
 	var wg sync.WaitGroup
 
+	// One Wikipedia client for every source that needs one, so they share both
+	// the rate limiter and the connection pool.
+	wiki := wikipedia.NewClient()
+
 	for _, name := range enabled {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
 
-			for museum := range museumsFrom(ctx, name) {
+			for museum := range museumsFrom(ctx, name, wiki) {
 				merger.Add(museum)
 			}
 			log.Printf("source %q finished", name)
@@ -151,20 +155,28 @@ func collectSources(ctx context.Context, enabled []string, merger *collect.Merge
 }
 
 // museumsFrom starts the named source and returns its stream.
-func museumsFrom(ctx context.Context, name string) <-chan models.Museum {
+//
+// The two Wikipedia-backed sources share one client. They used to build their
+// own, and although each spaced its requests correctly, together they ran at
+// twice the rate the API tolerates: both were throttled, and the lists crawl
+// was cut down to 14 candidates with the United States and England skipped
+// outright. The client's limiter is process-wide now, so a shared client is
+// belt and braces rather than the fix itself — but it also shares connections,
+// which is what a single logical crawler should do.
+func museumsFrom(ctx context.Context, name string, wiki *wikipedia.Client) <-chan models.Museum {
 	switch name {
 	case "wikidata":
 		return wikidata.NewService(wikidata.NewClient()).Museums(ctx)
 
 	case "category":
-		svc := wikipedia.NewCategoryService(wikipedia.NewClient())
+		svc := wikipedia.NewCategoryService(wiki)
 		return wikipedia.NewCategoryCrawler(svc).Museums(ctx, wikipedia.RootMuseumCategory)
 
 	case "osm":
 		return osm.NewService(osm.NewClient()).Museums(ctx)
 
 	case "lists":
-		svc := wikipedia.NewCategoryService(wikipedia.NewClient())
+		svc := wikipedia.NewCategoryService(wiki)
 		processor := wikipedia.NewCategoryProcessor(svc, wikipedia.NewMuseumExtractor(nil))
 		return processor.ProcessCategoryAsync(ctx, rootListCategory)
 
