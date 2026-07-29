@@ -7,12 +7,9 @@ import (
 	"log"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
-	"museum/internal/keys"
 	"museum/internal/models"
-	"museum/internal/storage"
 	"museum/pkg/exhibitions"
 	"museum/pkg/graceful"
 	"museum/pkg/location"
@@ -46,16 +43,13 @@ func runRefresh(ctx context.Context, args []string) error {
 		return err
 	}
 
-	store, bucket, err := museumStore()
-	if err != nil {
-		return err
-	}
-
+	// Object storage is no longer consulted here: the catalogue in Postgres is
+	// what says which museums have a website worth reading.
 	ctx, cancel := graceful.Context(ctx)
 	defer cancel()
 
 	start := time.Now()
-	museums, err := selectMuseums(ctx, store, bucket, *all, *place, *lat, *lon, *radius)
+	museums, err := selectMuseums(ctx, *all, *place, *lat, *lon, *radius, *maxMuseums)
 	if err != nil {
 		return err
 	}
@@ -97,9 +91,9 @@ var errNoArea = errors.New("pass -all, -place, or -lat and -lon")
 
 // selectMuseums picks the museums to scrape, either everything in the
 // catalogue or the ones near a point.
-func selectMuseums(ctx context.Context, store *storage.S3Service[models.Museum], bucketName string, all bool, place string, lat, lon, radius float64) ([]models.Museum, error) {
+func selectMuseums(ctx context.Context, all bool, place string, lat, lon, radius float64, maxMuseums int) ([]models.Museum, error) {
 	if all {
-		return allMuseumsWithWebsites(ctx, store, bucketName)
+		return allMuseumsWithWebsites(ctx, maxMuseums)
 	}
 
 	if place != "" {
@@ -125,21 +119,20 @@ func selectMuseums(ctx context.Context, store *storage.S3Service[models.Museum],
 
 // allMuseumsWithWebsites reads the whole catalogue, keeping the museums that
 // have both a website to scrape and a position to index the results under.
-func allMuseumsWithWebsites(ctx context.Context, store *storage.S3Service[models.Museum], bucketName string) ([]models.Museum, error) {
-	var (
-		mu      sync.Mutex
-		museums []models.Museum
-	)
+func allMuseumsWithWebsites(ctx context.Context, limit int) ([]models.Museum, error) {
+	db, err := database(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
 
-	err := store.EachObject(ctx, bucketName, keys.RawPrefix+"/", func(_ string, museum models.Museum) {
-		if museum.Website == "" || !museum.HasCoordinates() {
-			return
-		}
-		mu.Lock()
-		museums = append(museums, museum)
-		mu.Unlock()
-	})
-	return museums, err
+	// Read from the serving store rather than by listing object storage.
+	// Listing 96,000 objects to find the ones with a website was slow, and it
+	// failed outright on a transient storage error mid-run. Postgres already
+	// holds the merged, deduplicated catalogue with the websites indexed, and
+	// it can order by prominence so a capped run scrapes the museums most
+	// likely to publish listings rather than an arbitrary few thousand.
+	return db.MuseumsWithWebsites(ctx, limit)
 }
 
 // nearbyMuseumsWithWebsites asks the database for the museums around a point

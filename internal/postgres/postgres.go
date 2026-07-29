@@ -924,3 +924,44 @@ WHERE id = $1`
 	}
 	return nil
 }
+
+// MuseumsWithWebsites returns museums that have a site worth scraping for
+// exhibitions, most prominent first.
+//
+// Ordering by sitelinks is what makes a capped run useful: the scraper reads a
+// few thousand sites, and the museums most likely to publish a structured
+// "what's on" page are the ones the world writes most about. A cap without an
+// ordering would scrape an arbitrary few thousand of 71,728.
+func (s *Store) MuseumsWithWebsites(ctx context.Context, limit int) ([]models.Museum, error) {
+	const stmt = `
+SELECT name, coalesce(country,''), coalesce(locality,''), coalesce(website,''),
+       coalesce(wikidata_id,''), ST_Y(location::geometry), ST_X(location::geometry)
+FROM museums
+WHERE website IS NOT NULL AND website <> ''
+  AND location IS NOT NULL
+ORDER BY sitelinks DESC, id
+LIMIT $1`
+
+	rows, err := s.pool.Query(ctx, stmt, limit)
+	if err != nil {
+		return nil, fmt.Errorf("museums with websites: %w", err)
+	}
+	defer rows.Close()
+
+	var museums []models.Museum
+	for rows.Next() {
+		var (
+			m        models.Museum
+			lat, lon *float64
+		)
+		if err := rows.Scan(&m.Name, &m.Country, &m.Locality, &m.Website,
+			&m.WikidataID, &lat, &lon); err != nil {
+			return nil, fmt.Errorf("scan museum with website: %w", err)
+		}
+		if lat != nil && lon != nil {
+			m.Latitude, m.Longitude = *lat, *lon
+		}
+		museums = append(museums, m)
+	}
+	return museums, rows.Err()
+}

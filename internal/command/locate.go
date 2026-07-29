@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"museum/internal/models"
+	"museum/internal/postgres"
 	"museum/internal/search"
 	"museum/pkg/graceful"
 	"museum/pkg/location"
@@ -37,6 +38,8 @@ func runLocate(ctx context.Context, args []string) error {
 		country  = fs.String("country", "", "only museums in this country")
 		limit    = fs.Int("limit", 200, "how many museums to attempt")
 		dryRun   = fs.Bool("dry-run", false, "report what would be geocoded, without calling the geocoder")
+		townOnly = fs.Bool("town-centres", false,
+			"skip the geocoder and place every museum at the centre of its recorded town")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -66,21 +69,35 @@ func runLocate(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	// The geocoder allows one request per second, so the run time is knowable
-	// in advance and worth stating: a caller asking for thousands should know
-	// it is an hours-long job before it starts rather than after.
-	log.Printf("Locating %d museums (about %s at the geocoder's one request per second)",
-		len(pending), (time.Duration(len(pending)) * 1100 * time.Millisecond).Round(time.Second))
+	// The geocoder's advertised one request per second is a floor, not a
+	// promise: a run of 114 museums took 79 minutes because the public instance
+	// kept refusing and the backoff kept widening. Saying so up front matters,
+	// because the honest estimate for tens of thousands is weeks rather than
+	// hours, and -town-centres exists precisely to avoid that.
+	if *townOnly {
+		log.Printf("Placing %d museums at their town centres (no geocoder calls)", len(pending))
+	} else {
+		log.Printf("Locating %d museums (at least %s, and in practice far longer if the geocoder throttles)",
+			len(pending), (time.Duration(len(pending)) * 1100 * time.Millisecond).Round(time.Second))
+	}
 
 	if *dryRun {
+		action := "would geocode"
+		if *townOnly {
+			action = "would place at its town centre"
+		}
 		for _, m := range pending {
-			log.Printf("  would geocode %q (%s)", m.Name, placeOf(m.Locality, m.Country))
+			log.Printf("  %s %q (%s)", action, m.Name, placeOf(m.Locality, m.Country))
 		}
 		return nil
 	}
 
 	var located, approximated, unresolved int
 	start := time.Now()
+
+	// Museums cluster heavily by town, so resolving each town once turns tens
+	// of thousands of lookups into a few thousand.
+	towns := make(map[string]postgres.Place)
 
 	for _, m := range pending {
 		if ctx.Err() != nil {
@@ -96,6 +113,19 @@ func runLocate(ctx context.Context, args []string) error {
 			lat, lon    float64
 			approximate bool
 		)
+
+		if *townOnly {
+			town, ok := townCentre(ctx, db, towns, m.Locality)
+			if !ok {
+				unresolved++
+				continue
+			}
+			if err := db.SetLocation(ctx, m.ID, town.Latitude, town.Longitude, true); err != nil {
+				return err
+			}
+			approximated++
+			continue
+		}
 
 		found, err := location.Geocode(ctx, query)
 		switch {
@@ -116,8 +146,8 @@ func runLocate(ctx context.Context, args []string) error {
 			// The town centre comes from museums already placed there rather
 			// than from another geocoder call: it costs nothing, and it is
 			// derived from the same data the query will search.
-			town, townErr := db.LocalityPlace(ctx, search.Normalize(m.Locality))
-			if townErr != nil {
+			town, ok := townCentre(ctx, db, towns, m.Locality)
+			if !ok {
 				unresolved++
 				continue
 			}
@@ -142,6 +172,33 @@ func runLocate(ctx context.Context, args []string) error {
 	log.Printf("Finished in %s: located %d exactly, %d at their town centre, %d still unresolved",
 		time.Since(start).Round(time.Second), located, approximated, unresolved)
 	return nil
+}
+
+// townCentre resolves a town to a position, remembering what it resolves.
+//
+// The centre comes from museums already placed in that town rather than from a
+// geocoder: it costs nothing, needs no network, and is derived from the same
+// data the query will search. A town nothing is placed in yet cannot be
+// resolved, and the museum is left alone rather than guessed at.
+func townCentre(ctx context.Context, db *postgres.Store, known map[string]postgres.Place, locality string) (postgres.Place, bool) {
+	key := search.Normalize(locality)
+	if key == "" {
+		return postgres.Place{}, false
+	}
+	if cached, ok := known[key]; ok {
+		return cached, cached.Found
+	}
+
+	town, err := db.LocalityPlace(ctx, key)
+	if err != nil {
+		// Cached as unresolvable too, so a town shared by hundreds of museums
+		// is not looked up hundreds of times to fail each time.
+		known[key] = postgres.Place{}
+		return postgres.Place{}, false
+	}
+	town.Found = true
+	known[key] = town
+	return town, true
 }
 
 // placeOf describes where a museum is said to be, for logging.
