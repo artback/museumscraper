@@ -216,6 +216,7 @@ func (p *CategoryProcessor) processPage(ctx context.Context, title, countryHint 
 			Country:     country,
 			Locality:    candidate.Locality,
 			SourcePage:  title,
+			Sources:     []string{ListSourceName},
 			Verified:    decision == Accept,
 			Description: meta.Description,
 		}

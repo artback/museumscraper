@@ -12,6 +12,12 @@ import (
 // CategorySourceName identifies records discovered by the category crawl.
 const CategorySourceName = "wikipedia-category"
 
+// ListSourceName identifies records read off Wikipedia's "List of museums in …"
+// pages. Records from that source carried no provenance at all, so 8,536
+// museums in the catalogue could not be attributed to anything — and, more to
+// the point, could not be found again when their quality came into question.
+const ListSourceName = "wikipedia-list"
+
 // RootMuseumCategory is the top of Wikipedia's museum category tree.
 const RootMuseumCategory = "Category:Museums by country"
 

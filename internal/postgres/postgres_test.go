@@ -700,3 +700,39 @@ func TestUnplacedMuseumsAndSetLocation(t *testing.T) {
 		t.Errorf("still %d unplaced in Gothenburg, want 0", len(remaining))
 	}
 }
+
+// The unverified tail is names read off list pages that no source confirmed
+// are museums — a list of museums in Maryland yielded "Williamsburg, Virginia".
+// A caller that cannot tolerate them must be able to exclude them.
+func TestNearbyVerified_FiltersTheUnverifiedTail(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Real Museum", Country: "Sweden", WikidataID: "Q1",
+			Latitude: 57.7072, Longitude: 11.967, Verified: true},
+		{Name: "Williamsburg, Virginia", Country: "Sweden", WikidataID: "Q2",
+			Latitude: 57.7073, Longitude: 11.968, Verified: false},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	all, err := store.NearbyVerified(ctx, 57.7072, 11.967, 5, 10, 0, false)
+	if err != nil {
+		t.Fatalf("nearby: %v", err)
+	}
+	if len(all.Hits) != 2 {
+		t.Errorf("unfiltered = %d hits, want both", len(all.Hits))
+	}
+
+	only, err := store.NearbyVerified(ctx, 57.7072, 11.967, 5, 10, 0, true)
+	if err != nil {
+		t.Fatalf("nearby verified: %v", err)
+	}
+	if len(only.Hits) != 1 || only.Hits[0].Museum.Name != "Real Museum" {
+		t.Errorf("verified-only = %+v, want just the confirmed museum", only.Hits)
+	}
+	if only.Total != 1 {
+		t.Errorf("total = %d, want it to reflect the filter", only.Total)
+	}
+}

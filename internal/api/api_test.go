@@ -29,11 +29,13 @@ type fakeCatalogue struct {
 	lastOffset   int
 	lastUpcoming bool
 
-	coverage postgres.Coverage
+	coverage         postgres.Coverage
+	lastVerifiedOnly bool
 }
 
-func (f *fakeCatalogue) Nearby(_ context.Context, _, _, radiusKm float64, limit, offset int) (postgres.Page, error) {
+func (f *fakeCatalogue) NearbyVerified(_ context.Context, _, _, radiusKm float64, limit, offset int, verifiedOnly bool) (postgres.Page, error) {
 	f.lastRadiusKm, f.lastLimit, f.lastOffset = radiusKm, limit, offset
+	f.lastVerifiedOnly = verifiedOnly
 	return postgres.Page{Hits: f.nearby, Total: int64(len(f.nearby))}, f.err
 }
 

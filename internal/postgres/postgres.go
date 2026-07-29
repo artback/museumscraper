@@ -407,6 +407,17 @@ type Page struct {
 
 // Nearby returns the museums within radiusKm of a point, nearest first.
 func (s *Store) Nearby(ctx context.Context, lat, lon, radiusKm float64, limit, offset int) (Page, error) {
+	return s.NearbyVerified(ctx, lat, lon, radiusKm, limit, offset, false)
+}
+
+// NearbyVerified is Nearby, optionally restricted to museums backed by a
+// Wikipedia article — which is what verified means across every source.
+//
+// It trades recall for precision rather than filtering error from truth. The
+// unverified set holds both the noise (names read off list pages: "Williamsburg,
+// Virginia", "Silverton (hotel and casino)") and a great many real museums too
+// small to have an article. Gothenburg has 75 museums and 20 verified ones.
+func (s *Store) NearbyVerified(ctx context.Context, lat, lon, radiusKm float64, limit, offset int, verifiedOnly bool) (Page, error) {
 	// count(*) OVER () reports the size of the whole matching set from the same
 	// scan that produces the page, so a total costs no second query.
 	const stmt = `
@@ -419,12 +430,13 @@ SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(descripti
 FROM museums
 WHERE location IS NOT NULL
   AND ST_DWithin(location, $1::geography, $2)
+  AND (NOT $5::boolean OR verified)
 ORDER BY location <-> $1::geography, id
 LIMIT $3 OFFSET $4`
 
 	point := fmt.Sprintf("SRID=4326;POINT(%v %v)", lon, lat)
 
-	rows, err := s.pool.Query(ctx, stmt, point, radiusKm*1000, limit, offset)
+	rows, err := s.pool.Query(ctx, stmt, point, radiusKm*1000, limit, offset, verifiedOnly)
 	if err != nil {
 		return Page{}, fmt.Errorf("nearby: %w", err)
 	}

@@ -53,7 +53,7 @@ const (
 // It is an interface so the handlers can be tested without a database, and so
 // the storage layer can be replaced without touching them.
 type Catalogue interface {
-	Nearby(ctx context.Context, lat, lon, radiusKm float64, limit, offset int) (postgres.Page, error)
+	NearbyVerified(ctx context.Context, lat, lon, radiusKm float64, limit, offset int, verifiedOnly bool) (postgres.Page, error)
 	Search(ctx context.Context, query string, limit, offset int) (postgres.Page, error)
 	MuseumByID(ctx context.Context, id string) (postgres.Hit, error)
 	ExhibitionsNearby(ctx context.Context, lat, lon, radiusKm float64, includeUpcoming bool, limit int) ([]postgres.ExhibitionHit, error)
@@ -130,6 +130,9 @@ type query struct {
 	radiusKm float64
 	limit    int
 	offset   int
+	// verifiedOnly drops the unverified tail: names read off list pages that
+	// no source confirmed are museums.
+	verifiedOnly bool
 	// place is the name that produced the coordinates, echoed back so a caller
 	// can see which "Springfield" it was given.
 	place string
@@ -185,7 +188,8 @@ func (s *Server) parseQuery(r *http.Request) (query, error) {
 		return query{}, err
 	}
 
-	return query{lat: lat, lon: lon, radiusKm: radius, limit: limit, offset: offset}, nil
+	return query{lat: lat, lon: lon, radiusKm: radius, limit: limit, offset: offset,
+		verifiedOnly: values.Get("verified") == "true"}, nil
 }
 
 func parseOffset(raw string) (int, error) {
@@ -244,7 +248,8 @@ func (s *Server) parsePlaceQuery(r *http.Request, name string, values url.Values
 	}
 
 	return query{lat: found.Latitude, lon: found.Longitude, radiusKm: radius,
-		limit: limit, offset: offset, place: found.DisplayName}, nil
+		limit: limit, offset: offset, place: found.DisplayName,
+		verifiedOnly: values.Get("verified") == "true"}, nil
 }
 
 func parseLimit(raw string) (int, error) {
@@ -313,11 +318,22 @@ type museumHit struct {
 	// ApproximateLocation marks a position taken from the museum's town rather
 	// than the museum itself, because no geocoder could find it by name. The
 	// museum is really in that town; it is not really at that point.
-	ApproximateLocation bool     `json:"approximate_location,omitempty"`
-	Website             string   `json:"website,omitempty"`
-	WikipediaURL        string   `json:"wikipedia_url,omitempty"`
-	WikidataID          string   `json:"wikidata_id,omitempty"`
-	Sources             []string `json:"sources,omitempty"`
+	ApproximateLocation bool `json:"approximate_location,omitempty"`
+	// Verified means the museum is backed by a Wikipedia article — every source
+	// sets it on that basis and no other. It is a proxy for confidence, not a
+	// judgement that the record is a museum: plenty of real small museums have
+	// no article, and Gothenburg has 75 museums of which 20 are verified.
+	//
+	// It is still the best filter available against the catalogue's noisy tail.
+	// Names read off list pages are emitted unverified, which is where
+	// "Williamsburg, Virginia" and "Silverton (hotel and casino)" come from —
+	// real entries on a list of museums, but not museums. A caller that cannot
+	// tolerate those should pass verified=true and accept losing some real ones.
+	Verified     bool     `json:"verified"`
+	Website      string   `json:"website,omitempty"`
+	WikipediaURL string   `json:"wikipedia_url,omitempty"`
+	WikidataID   string   `json:"wikidata_id,omitempty"`
+	Sources      []string `json:"sources,omitempty"`
 }
 
 type searchResponse struct {
@@ -436,7 +452,7 @@ func (s *Server) handleMuseums(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, err := s.catalogue.Nearby(r.Context(), q.lat, q.lon, q.radiusKm, q.limit, q.offset)
+	page, err := s.catalogue.NearbyVerified(r.Context(), q.lat, q.lon, q.radiusKm, q.limit, q.offset, q.verifiedOnly)
 	if err != nil {
 		writeServerError(w, r, err)
 		return
@@ -599,6 +615,7 @@ func museumHitFrom(hit postgres.Hit, distanceKm float64) museumHit {
 	return museumHit{
 		ID: hit.ID, Name: m.Name, DistanceKm: distanceKm,
 		ApproximateLocation: hit.ApproximateLocation,
+		Verified:            m.Verified,
 		Country:             m.Country, Locality: m.Locality, Description: m.Description,
 		Latitude: m.Latitude, Longitude: m.Longitude,
 		Website: m.Website, WikipediaURL: m.WikipediaURL,
