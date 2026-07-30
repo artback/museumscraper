@@ -15,6 +15,16 @@ import (
 	"museum/pkg/location"
 )
 
+const (
+	// checkpointSize is how many exhibitions accumulate before being written.
+	// Small enough that a crash costs seconds of scraping, large enough that
+	// the writes stay batched.
+	checkpointSize = 200
+
+	// checkpointTimeout bounds one checkpoint's write.
+	checkpointTimeout = 2 * time.Minute
+)
+
 // refreshCommand scrapes museum websites and indexes what is on show.
 func refreshCommand() Command {
 	return Command{
@@ -62,27 +72,60 @@ func runRefresh(ctx context.Context, args []string) error {
 	}
 
 	log.Printf("Scraping %d museum websites...", len(museums))
-	found := exhibitions.NewScraper().ForMuseums(ctx, museums, *concurrency)
-	log.Printf("Found %d exhibitions in %s", len(found), time.Since(start).Round(time.Second))
-
-	// Writing runs on its own context so an interrupted refresh still stores
-	// what it managed to scrape, rather than discarding minutes of polite,
-	// rate-limited crawling.
-	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
-	defer cancelWrite()
-
 	db, err := database(ctx)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	written, err := db.SaveExhibitions(writeCtx, found)
-	if err != nil {
-		return err
+	// Exhibitions are written as they are scraped, in checkpoints, rather than
+	// once at the end.
+	//
+	// The single write at the end made an hour's work all-or-nothing: a scrape
+	// of 6,000 sites found 9,148 exhibitions and stored none, because the one
+	// insert hit a mis-encoded title and the whole batch was refused. A crash
+	// or a restart at minute 67 would have cost the same. Checkpointing bounds
+	// the loss to whatever has been found since the last one.
+	var (
+		buffer  []exhibitions.Exhibition
+		written int64
+		found   int
+		failed  int
+	)
+
+	flush := func() {
+		if len(buffer) == 0 {
+			return
+		}
+		// Each checkpoint gets a context that outlives cancellation: a Ctrl-C
+		// during a scrape should still commit what has already been found.
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), checkpointTimeout)
+		defer cancel()
+
+		stored, err := db.SaveExhibitions(writeCtx, buffer)
+		if err != nil {
+			// A failed checkpoint costs that checkpoint, not the run. The
+			// scrape continues, and the log says how much was lost.
+			log.Printf("Checkpoint failed, %d exhibitions lost: %v", len(buffer), err)
+			failed += len(buffer)
+		}
+		written += stored
+		buffer = buffer[:0]
 	}
-	log.Printf("Refresh finished in %s: %d exhibitions stored",
-		time.Since(start).Round(time.Second), written)
+
+	exhibitions.NewScraper().Stream(ctx, museums, *concurrency, func(batch []exhibitions.Exhibition) {
+		found += len(batch)
+		buffer = append(buffer, batch...)
+		if len(buffer) >= checkpointSize {
+			flush()
+			log.Printf("  ... %d exhibitions stored so far (%s elapsed)",
+				written, time.Since(start).Round(time.Second))
+		}
+	})
+	flush()
+
+	log.Printf("Refresh finished in %s: found %d exhibitions, stored %d, lost %d",
+		time.Since(start).Round(time.Second), found, written, failed)
 	return nil
 }
 

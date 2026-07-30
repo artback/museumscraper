@@ -16,10 +16,12 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -356,6 +358,20 @@ func normalizedAliases(aliases []string) []string {
 	return normalized
 }
 
+// validUTF8 replaces byte sequences Postgres would refuse.
+//
+// A text column will not accept invalid UTF-8, and there is no encoding to fall
+// back on: the alternative to substituting the bad bytes is losing the record,
+// and in a batch, losing every record alongside it. The replacement character
+// is visible in the output, which is the point — it shows where the source was
+// mis-encoded rather than hiding it.
+func validUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "�")
+}
+
 // textArray makes a slice safe to send to a NOT NULL array column. A nil Go
 // slice encodes as SQL NULL, not as an empty array, so a museum with no aliases
 // would be rejected by the constraint rather than stored with none.
@@ -679,6 +695,22 @@ SELECT
 	return counts, nil
 }
 
+// execBatch runs a prepared batch and reports how many rows it wrote.
+func (s *Store) execBatch(ctx context.Context, batch *pgx.Batch) (int64, error) {
+	results := s.pool.SendBatch(ctx, batch)
+	defer results.Close()
+
+	var written int64
+	for range batch.Len() {
+		tag, err := results.Exec()
+		if err != nil {
+			return 0, err
+		}
+		written += tag.RowsAffected()
+	}
+	return written, nil
+}
+
 // SaveExhibitions upserts scraped listings, keyed by URL.
 func (s *Store) SaveExhibitions(ctx context.Context, found []exhibitions.Exhibition) (int64, error) {
 	const stmt = `
@@ -695,7 +727,11 @@ ON CONFLICT (url) DO UPDATE SET
     location   = coalesce(EXCLUDED.location, exhibitions.location),
     scraped_at = EXCLUDED.scraped_at`
 
+	// The arguments are kept alongside the batch so a failed batch can be
+	// replayed row by row.
+	queries := make([][]any, 0, len(found))
 	batch := &pgx.Batch{}
+
 	for _, e := range found {
 		if strings.TrimSpace(e.URL) == "" {
 			continue
@@ -708,23 +744,47 @@ ON CONFLICT (url) DO UPDATE SET
 		if scraped.IsZero() {
 			scraped = time.Now()
 		}
-		batch.Queue(stmt, e.URL, e.Title, e.Museum, e.MuseumWikidataID,
-			e.Start, e.End, lat, lon, e.SourcePage, scraped)
+		// Text scraped from a museum's own website is not guaranteed to be
+		// valid UTF-8: plenty of sites still serve Latin-1 without declaring
+		// it, and Postgres rejects the byte sequence outright. Cleaning here is
+		// the cheap half; decoding the declared charset properly, in the
+		// scraper, is the other and preserves the characters rather than
+		// replacing them.
+		args := []any{validUTF8(e.URL), validUTF8(e.Title), validUTF8(e.Museum),
+			validUTF8(e.MuseumWikidataID),
+			e.Start, e.End, lat, lon, validUTF8(e.SourcePage), scraped}
+
+		queries = append(queries, args)
+		batch.Queue(stmt, args...)
 	}
 	if batch.Len() == 0 {
 		return 0, nil
 	}
 
-	results := s.pool.SendBatch(ctx, batch)
-	defer results.Close()
+	written, err := s.execBatch(ctx, batch)
+	if err == nil {
+		return written, nil
+	}
 
-	var written int64
-	for range batch.Len() {
-		tag, err := results.Exec()
-		if err != nil {
-			return written, fmt.Errorf("save exhibitions: %w", err)
+	// pgx runs a batch in an implicit transaction, so one rejected row rolls
+	// back every row sent with it. That turned a single mis-encoded title into
+	// the loss of 9,148 exhibitions. Retrying the rows one at a time costs a
+	// round trip each, but only on the rare batch that actually failed, and it
+	// confines the damage to the row that caused it.
+	log.Printf("postgres: exhibition batch failed (%v); retrying rows individually", err)
+
+	written = 0
+	var rejected int
+	for _, queued := range queries {
+		tag, rowErr := s.pool.Exec(ctx, stmt, queued...)
+		if rowErr != nil {
+			rejected++
+			continue
 		}
 		written += tag.RowsAffected()
+	}
+	if rejected > 0 {
+		log.Printf("postgres: %d of %d exhibitions rejected", rejected, len(queries))
 	}
 	return written, nil
 }

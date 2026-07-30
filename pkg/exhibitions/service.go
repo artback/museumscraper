@@ -228,6 +228,28 @@ func dedupe(exhibitions []Exhibition) []Exhibition {
 // sharing the site. The first museum given for a site keeps the attribution,
 // so passing them in distance order attributes to the nearest.
 func (s *Scraper) ForMuseums(ctx context.Context, museums []models.Museum, concurrency int) []Exhibition {
+	var all []Exhibition
+	s.Stream(ctx, museums, concurrency, func(found []Exhibition) {
+		all = append(all, found...)
+	})
+	return all
+}
+
+// Stream scrapes each museum and hands its exhibitions to fn as soon as they
+// are found, rather than returning everything at the end.
+//
+// This exists because holding a run's whole output in memory made the run
+// all-or-nothing. A scrape of 6,000 sites took 68 minutes, found 9,148
+// exhibitions, and stored none of them: the single write at the end hit one
+// mis-encoded title and the entire batch was refused. A crash, a restart or a
+// power cut at minute 67 would have cost exactly as much. Work that took an
+// hour to produce should not depend on a later step succeeding.
+//
+// fn is called from one goroutine at a time and must not block for long: the
+// workers are held up while it runs. Exhibitions are deduplicated by URL
+// across the whole run before fn sees them, because sites cross-list — one
+// venue's programme page carries entries another site also shows.
+func (s *Scraper) Stream(ctx context.Context, museums []models.Museum, concurrency int, fn func([]Exhibition)) {
 	if concurrency < 1 {
 		concurrency = 4
 	}
@@ -266,18 +288,28 @@ func (s *Scraper) ForMuseums(ctx context.Context, museums []models.Museum, concu
 		}
 	}()
 
-	// Waiting before draining is safe because results is buffered: the workers
-	// finish whether or not anything is reading yet.
-	wg.Wait()
-	close(results)
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
-	var all []Exhibition
+	seen := make(map[string]struct{})
 	for found := range results {
-		all = append(all, found...)
+		fresh := found[:0:0]
+		for _, e := range found {
+			if e.URL == "" {
+				continue
+			}
+			if _, dup := seen[e.URL]; dup {
+				continue
+			}
+			seen[e.URL] = struct{}{}
+			fresh = append(fresh, e)
+		}
+		if len(fresh) > 0 {
+			fn(fresh)
+		}
 	}
-	// Sites cross-list: one venue's programme page can carry entries that
-	// another site also shows. The exhibition URL is its identity.
-	return dedupe(all)
 }
 
 // uniqueBySite keeps the first museum for each distinct website, preserving
