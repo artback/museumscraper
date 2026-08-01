@@ -27,14 +27,28 @@ type Harvester interface {
 //
 // This turns someone panning a map into requests against museums' own
 // websites, so the bounds are the important part of the feature, not a detail
-// of it. One area at a time, a cap on how many sites any one area reads, and a
-// long cooldown before the same place is read again.
+// of it: a cap on how many areas are read at once, a cap on how many sites any
+// one area reads, and a long cooldown before the same place is read again.
 const (
-	scrapeMaxMuseums   = 120
-	scrapeConcurrency  = 6
-	scrapeQueueDepth   = 32
-	scrapeCooldown     = 24 * time.Hour
-	scrapeJobTimeout   = 15 * time.Minute
+	scrapeMaxMuseums = 120
+	scrapeQueueDepth = 32
+	scrapeCooldown   = 24 * time.Hour
+	scrapeJobTimeout = 15 * time.Minute
+
+	// scrapeWorkers is how many areas are read at once, and scrapeConcurrency
+	// how many sites within each. Their product is the number of fetches that
+	// can be in flight, which is not what politeness is measured in.
+	//
+	// What protects a museum's server is the fetcher's own rule of one request
+	// per host per second. That gate is held under a mutex on the Fetcher this
+	// queue shares between every area it reads, so a site's load is the same
+	// whether one area is being read or five — the requests queue up behind the
+	// same per-host clock either way. Serialising whole areas on top of that
+	// protected nobody: two cities have no websites in common, and the second
+	// visitor waited three minutes for the first visitor's city to finish.
+	scrapeWorkers     = 3
+	scrapeConcurrency = 10
+
 	scrapeCellDegrees  = 0.25 // areas are rounded to this grid before dedup
 	scrapeMinZoomRadiu = 60.0 // km; wider than a city is not a scrape target
 )
@@ -72,21 +86,47 @@ type scrapeRequest struct {
 	cell               string
 }
 
-// scrapeQueue runs at most one area scrape at a time.
+// scrapeProgress is how far along an area is.
 //
-// A single worker on purpose. The point of the queue is not throughput; it is
-// that a page which starts a scrape whenever someone looks at a new city must
-// never turn into many simultaneous crawlers pointed at other people's servers.
+// Reading a city's museum websites takes minutes, and a page that says only
+// "not scraped yet" for all of them is indistinguishable from one where nothing
+// is happening. Sites and Found are what a visitor can actually judge: how much
+// is left, and whether it is turning anything up.
+type scrapeProgress struct {
+	Sites int `json:"sites"`
+	Read  int `json:"sites_read"`
+	Found int `json:"exhibitions_found"`
+	// Elapsed is seconds spent reading, filled in when asked rather than
+	// stored. Reporting the start instant instead meant an area that had not
+	// started yet answered with the zero time, which reads as a date in the
+	// year 1 — a number no caller can do anything sensible with.
+	Elapsed int `json:"elapsed_seconds"`
+	// Waiting is how many other areas are queued ahead of this one. Only
+	// meaningful while queued, and zero for the area being read now.
+	Waiting int `json:"waiting_behind"`
+
+	started time.Time
+}
+
+// scrapeQueue reads several areas at once, bounded, sharing one scraper.
+//
+// One scraper between all of them is what keeps this polite: the per-host clock
+// lives on it, so adding workers adds no load to any single museum's server. It
+// only stops one visitor's city from being read before another visitor's city
+// can start.
 type scrapeQueue struct {
 	store   Harvester
 	scraper *exhibitions.Scraper
 
 	requests chan scrapeRequest
 
-	mu      sync.Mutex
-	state   map[string]scrapeState
-	done    map[string]time.Time
-	running string
+	mu    sync.Mutex
+	state map[string]scrapeState
+	done  map[string]time.Time
+	// progress holds an entry per area being read now. Keyed by cell rather
+	// than kept as one struct, because several are in flight and each visitor
+	// is asking about their own.
+	progress map[string]*scrapeProgress
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -99,10 +139,13 @@ func newScrapeQueue(store Harvester) *scrapeQueue {
 		requests: make(chan scrapeRequest, scrapeQueueDepth),
 		state:    make(map[string]scrapeState),
 		done:     make(map[string]time.Time),
+		progress: make(map[string]*scrapeProgress),
 		stop:     make(chan struct{}),
 	}
-	q.wg.Add(1)
-	go q.run()
+	q.wg.Add(scrapeWorkers)
+	for range scrapeWorkers {
+		go q.run()
+	}
 	return q
 }
 
@@ -164,19 +207,31 @@ func (q *scrapeQueue) enqueue(lat, lon, radiusKm float64) (scrapeState, error) {
 	}
 }
 
-// status reports what is known about an area without asking for anything.
-func (q *scrapeQueue) status(lat, lon float64) scrapeState {
+// status reports what is known about an area without asking for anything, and
+// how far along it is when it is being read now.
+func (q *scrapeQueue) status(lat, lon float64) (scrapeState, scrapeProgress) {
 	cell := cellFor(lat, lon)
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if at, ok := q.done[cell]; ok && time.Since(at) < scrapeCooldown {
-		return scrapeCooling
+		return scrapeCooling, scrapeProgress{}
 	}
-	if state, ok := q.state[cell]; ok {
-		return state
+	state, ok := q.state[cell]
+	switch {
+	case !ok:
+		return scrapeIdle, scrapeProgress{}
+	case q.progress[cell] != nil:
+		progress := *q.progress[cell]
+		progress.Elapsed = int(time.Since(progress.started).Seconds())
+		return state, progress
+	case state == scrapeQueued:
+		// Everything still in the channel is waiting alongside this one. With
+		// several workers taking from it they do not all go first, so this is
+		// how many are waiting rather than how many are ahead.
+		return state, scrapeProgress{Waiting: len(q.requests)}
 	}
-	return scrapeIdle
+	return state, scrapeProgress{}
 }
 
 func (q *scrapeQueue) run() {
@@ -189,15 +244,15 @@ func (q *scrapeQueue) run() {
 		case req := <-q.requests:
 			q.mu.Lock()
 			q.state[req.cell] = scrapeRunning
-			q.running = req.cell
+			q.progress[req.cell] = &scrapeProgress{started: time.Now()}
 			q.mu.Unlock()
 
 			q.scrape(req)
 
 			q.mu.Lock()
 			delete(q.state, req.cell)
+			delete(q.progress, req.cell)
 			q.done[req.cell] = time.Now()
-			q.running = ""
 			q.mu.Unlock()
 		}
 	}
@@ -215,9 +270,15 @@ func (q *scrapeQueue) scrape(req scrapeRequest) {
 		log.Printf("scrape %s: %v", req.cell, err)
 		return
 	}
+	// Deduplicated here rather than left to Stream, which does it silently:
+	// several museums can share one website, and a total that counts them
+	// separately is a progress bar that stops short of the end.
+	museums = exhibitions.UniqueBySite(museums)
 	if len(museums) == 0 {
 		return
 	}
+
+	q.setProgress(req.cell, func(p *scrapeProgress) { p.Sites = len(museums) })
 
 	start := time.Now()
 	var found, stored int
@@ -238,12 +299,15 @@ func (q *scrapeQueue) scrape(req scrapeRequest) {
 		buffer = buffer[:0]
 	}
 
+	// Stream calls this once per site, whether or not that site had anything,
+	// so counting the calls is counting the sites read.
 	q.scraper.Stream(ctx, museums, scrapeConcurrency, func(batch []exhibitions.Exhibition) {
 		found += len(batch)
 		buffer = append(buffer, batch...)
 		if len(buffer) >= 128 {
 			flush()
 		}
+		q.setProgress(req.cell, func(p *scrapeProgress) { p.Read++; p.Found = found })
 	})
 	flush()
 
@@ -256,6 +320,18 @@ func (q *scrapeQueue) scrape(req scrapeRequest) {
 
 	log.Printf("scrape %s: %d sites, %d exhibitions found, %d stored, %s",
 		req.cell, len(museums), found, stored, time.Since(start).Round(time.Second))
+}
+
+// setProgress edits one area's progress under the lock. Stream calls the
+// collector from one goroutine at a time, but every request asking how far
+// along the area is reads this from another, and other areas are being read
+// alongside it.
+func (q *scrapeQueue) setProgress(cell string, edit func(*scrapeProgress)) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if p := q.progress[cell]; p != nil {
+		edit(p)
+	}
 }
 
 // close stops the worker and waits for the job in flight.
@@ -277,15 +353,22 @@ func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var state scrapeState
+	var (
+		state    scrapeState
+		progress scrapeProgress
+	)
 	if r.Method == http.MethodPost {
 		state, err = s.scrapes.enqueue(q.lat, q.lon, q.radiusKm)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+		// The state a POST returns is what enqueue decided; the numbers behind
+		// it come from the same place a GET would read them, so a caller that
+		// starts a scrape and one that polls an existing one see the same shape.
+		_, progress = s.scrapes.status(q.lat, q.lon)
 	} else {
-		state = s.scrapes.status(q.lat, q.lon)
+		state, progress = s.scrapes.status(q.lat, q.lon)
 	}
 
 	status := http.StatusOK
@@ -293,8 +376,12 @@ func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusAccepted
 	}
 
-	writeJSON(w, status, map[string]any{
+	body := map[string]any{
 		"state": string(state),
 		"area":  echo(q),
-	})
+	}
+	if state == scrapeQueued || state == scrapeRunning {
+		body["progress"] = progress
+	}
+	writeJSON(w, status, body)
 }

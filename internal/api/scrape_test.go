@@ -91,6 +91,64 @@ func TestScrapeKeepsAWiderRequest(t *testing.T) {
 	}
 }
 
+// blockingHarvester holds every scrape inside the store call until released, so
+// a test can see how many areas are being read at the same moment.
+type blockingHarvester struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *blockingHarvester) MuseumsWithWebsitesNear(context.Context, float64, float64, float64, int) ([]models.Museum, error) {
+	h.entered <- struct{}{}
+	<-h.release
+	return nil, nil
+}
+
+func (h *blockingHarvester) SaveExhibitions(context.Context, []exhibitions.Exhibition) (int64, error) {
+	return 0, nil
+}
+func (h *blockingHarvester) MergeDuplicateExhibitions(context.Context) (int64, error) { return 0, nil }
+func (h *blockingHarvester) PruneNavigationListings(context.Context) (int64, error)   { return 0, nil }
+
+// Different places must not wait for each other.
+//
+// One worker read one area at a time, so a visitor opening Copenhagen queued
+// behind a visitor who had opened Stockholm and waited out its full three
+// minutes before their own city even started. Nothing was protected by that:
+// two cities share no websites, and what keeps a museum's server safe is the
+// fetcher's per-host clock, which every area shares regardless.
+func TestScrapeReadsSeveralAreasAtOnce(t *testing.T) {
+	// Three areas offered and two required to be running at once. Written as
+	// numbers rather than as scrapeWorkers, so that turning the workers back
+	// down to one fails here instead of quietly making the test trivial.
+	const offered, wantAtOnce = 3, 2
+
+	harvester := &blockingHarvester{
+		entered: make(chan struct{}, offered),
+		release: make(chan struct{}),
+	}
+	queue := newScrapeQueue(harvester)
+	defer func() { close(harvester.release); queue.close() }()
+
+	// Far enough apart to be different cells, and so different areas.
+	for i := range offered {
+		if _, err := queue.enqueue(50+float64(i), 10, 5); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+
+	// Every one of these is held inside the store call, so each arrival is an
+	// area being read at this moment rather than one that has been and gone.
+	for i := range wantAtOnce {
+		select {
+		case <-harvester.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%d of %d areas were being read at once; the rest wait for a city"+
+				" they share no websites with", i, wantAtOnce)
+		}
+	}
+}
+
 // haversineKm is the great-circle distance, for checking coverage in the test's
 // own terms rather than the implementation's.
 func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
