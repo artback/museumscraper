@@ -95,7 +95,15 @@ func (f *Fetcher) fetch(ctx context.Context, target *url.URL) (string, string, e
 	}
 	req.Header.Set("User-Agent", f.userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
-	req.Header.Set("Accept-Language", "en;q=0.9,*;q=0.5")
+	// No language preference, deliberately. Asking for English redirects
+	// multilingual sites to their translation, and a museum's translation is
+	// not the same page: Göteborgs stadsmuseum's Swedish site files ten
+	// exhibitions under /utstallningar/, while its English one spells the
+	// section /en/exihibitions/ and scatters the entries across the top level,
+	// so nothing could find them. The original is the version the museum
+	// maintains, and reading it is what makes a catalogue of the whole world
+	// possible — extraction here is already multilingual.
+	req.Header.Set("Accept-Language", "*")
 
 	resp, err := f.client.Do(req)
 	if err != nil {

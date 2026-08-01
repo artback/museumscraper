@@ -140,7 +140,7 @@ func TestCandidatesOn_DeclaredEventsWinButDoNotReplace(t *testing.T) {
 	  <a href="/exhibitions/only-in-html"><h3>Only in HTML</h3><p>Until 4 Oct 2026</p></a>
 	</body></html>`
 
-	got := candidatesOn(page, mustURL(t, "https://example.org/exhibitions"))
+	got := candidatesOn(page, mustURL(t, "https://example.org/exhibitions"), "")
 
 	if len(got) != 2 {
 		t.Fatalf("got %d candidates, want both: %+v", len(got), got)

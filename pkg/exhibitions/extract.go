@@ -69,6 +69,69 @@ var weakPathHints = []string{
 // index rather than to an individual entry.
 var exhibitionPathHints = append(append([]string{}, strongPathHints...), weakPathHints...)
 
+// ProgrammeSection returns the path a listing page indexes, or "" for a page
+// that indexes nothing — a site's front page, which is everyone's parent.
+//
+// The caller is what makes this meaningful: it is only ever asked about a page
+// already chosen as a museum's programme index, either because the home page
+// linked to it as one or because it is a conventional programme path. Given
+// that, "one segment below this page" is a better description of an entry than
+// any list of words can be.
+//
+// It has to be, because the words run out. Göteborgs stadsmuseum publishes its
+// English programme at /en/exihibitions/ — the museum's own spelling — and no
+// vocabulary will ever contain that. What is still true is that the page is the
+// index and its entries sit directly beneath it.
+//
+// Every segment, not pathSections, which drops the last one on purpose so a
+// slug cannot decide an entry's type. Here the last segment is the section.
+func ProgrammeSection(page *url.URL) string {
+	if page == nil {
+		return ""
+	}
+	segments := allPathSegments(page.Path)
+	if len(segments) == 0 {
+		return ""
+	}
+	return "/" + strings.Join(segments, "/") + "/"
+}
+
+// allPathSegments splits a URL path, keeping every segment and lowercasing.
+func allPathSegments(path string) []string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(strings.ToLower(trimmed), "/")
+}
+
+// EntryUnder reports whether a URL is an individual entry beneath a programme
+// index — one segment deeper, in the same section.
+//
+// The index's own sibling indexes are excluded by the same test that finds it:
+// /utstallningar/tidigare-utstallningar/ names exhibitions in its last segment,
+// so it is another index rather than an entry, and reading it as one would list
+// a museum's closed shows as though they were open.
+func EntryUnder(section, entryURL string) bool {
+	if section == "" {
+		return false
+	}
+	parsed, err := url.Parse(entryURL)
+	if err != nil {
+		return false
+	}
+	segments := allPathSegments(parsed.Path)
+	if len(segments) == 0 {
+		return false
+	}
+	path := "/" + strings.Join(segments, "/") + "/"
+	if path == section || !strings.HasPrefix(path, section) {
+		return false
+	}
+	rest := allPathSegments(strings.TrimPrefix(path, section))
+	return len(rest) == 1 && !containsAny(rest[0], strongPathHints)
+}
+
 // skipLinkWords mark navigation, commerce and boilerplate that sits alongside
 // the listings and would otherwise be read as exhibitions.
 var skipLinkWords = []string{
@@ -280,7 +343,15 @@ func repeatedLinkTexts(root *html.Node) map[string]bool {
 	return repeated
 }
 
+// ExtractCandidates reads a page with no knowledge of what indexes it.
 func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
+	return ExtractCandidatesUnder(pageHTML, base, "")
+}
+
+// ExtractCandidatesUnder reads a listing page, treating links one segment below
+// section as entries even when nothing in their path says so. Pass "" when the
+// page is not known to be an index.
+func ExtractCandidatesUnder(pageHTML string, base *url.URL, section string) []Candidate {
 	doc, err := html.Parse(strings.NewReader(pageHTML))
 	if err != nil {
 		return nil
@@ -294,7 +365,7 @@ func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "a" {
-			if candidate, isStrong, ok := candidateFrom(n, base, repeated); ok {
+			if candidate, isStrong, ok := candidateFrom(n, base, repeated, section); ok {
 				// Paging and view-switching links are calendar chrome,
 				// whatever their text says.
 				if IsNavigationLink(candidate.URL, base) {
@@ -326,7 +397,7 @@ func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
 }
 
 // candidateFrom decides whether an anchor names an exhibition.
-func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool) (Candidate, bool, bool) {
+func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool, section string) (Candidate, bool, bool) {
 	href := attr(anchor, "href")
 	if href == "" {
 		return Candidate{}, false, false
@@ -345,20 +416,33 @@ func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool) (
 	// The type is carried by the path *segments*, never by the final slug: the
 	// Royal Academy files a DJ night at /event/summer-exhibition-friday-lates,
 	// whose slug contains "exhibition" while the entry plainly is not one.
+	// Sitting directly under the index counts as strongly as a recognised word
+	// in the path, and covers the sites whose own spelling no vocabulary has.
+	under := EntryUnder(section, resolved)
+
 	sections := pathSections(parsed.Path)
-	if len(sections) == 0 {
+	if len(sections) == 0 && !under {
 		// A listing index links to its entries, so an entry is deeper than the
 		// index itself.
 		return Candidate{}, false, false
 	}
-	isStrong := containsAny(strings.Join(sections, "/"), strongPathHints)
+	isStrong := under || containsAny(strings.Join(sections, "/"), strongPathHints)
 	if !isStrong && !containsAny(strings.Join(sections, "/"), weakPathHints) {
 		return Candidate{}, false, false
 	}
 
 	text := titleOf(anchor)
-	if len([]rune(text)) < 4 || len(text) > 400 {
+	if len(text) > 400 {
 		return Candidate{}, false, false
+	}
+	// Too little text to be a name is treated as no name, not as a reason to
+	// drop the link. A very common card is a linked photograph with nothing
+	// inside the anchor at all — Göteborgs stadsmuseum lists every one of its
+	// exhibitions that way, an <img alt=""> and an empty div — and rejecting
+	// those here meant the slug fallback below could never run for them. That
+	// site yielded nothing at all as a result.
+	if len([]rune(text)) < 4 {
+		text = ""
 	}
 
 	linkText := textOf(anchor)

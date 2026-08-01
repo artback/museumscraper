@@ -438,17 +438,27 @@ function scrapeStatusHTML(data) {
          '<div class="where">' + escape(describeScrape(data)) + "</div>";
 }
 
-// Asks what is happening at a point without starting anything. A GET, so
-// opening a museum never sets a scrape running on its own.
+// Asks what is happening at a point, and starts a scrape if nothing is.
+//
+// Opening a museum used to only ask. That was the wrong instinct about consent:
+// someone who has clicked a museum and is reading its panel has asked for its
+// exhibitions more plainly than someone who merely panned the map past it, and
+// answering "this area has not been scraped yet" while doing nothing about it
+// is a dead end with no way out of it. An area already read, running, or inside
+// its cooldown is left alone by the server either way.
 async function scrapeStatusAt(lat, lon) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const params = new URLSearchParams({
+    lat: lat.toFixed(5), lon: lon.toFixed(5), radius_km: "5",
+  });
   try {
-    const params = new URLSearchParams({
-      lat: lat.toFixed(5), lon: lon.toFixed(5), radius_km: "5",
-    });
-    const res = await fetch("/v1/scrape?" + params);
+    let res = await fetch("/v1/scrape?" + params);
     if (!res.ok) return null;
-    return await res.json();
+    const status = await res.json();
+    if (status.state !== "idle") return status;
+
+    res = await fetch("/v1/scrape?" + params, { method: "POST" });
+    return res.ok ? await res.json() : status;
   } catch (_) { return null; }
 }
 
@@ -570,9 +580,11 @@ async function loadShows(museum) {
         watchScrape({ lat: museum.latitude, lon: museum.longitude, radiusKm: 5 });
         return;
       }
-      const said = data.coverage && data.coverage.last_scraped
+      const read = (status && status.state === "recently-scraped") ||
+                   (data.coverage && data.coverage.last_scraped);
+      const said = read
         ? "Nothing listed for this museum."
-        : "This area has not been scraped for exhibitions yet.";
+        : "No exhibitions found for this area.";
       box.innerHTML = "<h3>What's on</h3><div class=\"where\">" + said + "</div>";
       return;
     }

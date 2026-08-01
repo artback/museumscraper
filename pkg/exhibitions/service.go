@@ -212,8 +212,12 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 	// the page already gave them.
 	pagePermanent := assumePermanent || isPermanentListing(body, pageBase)
 
+	// The section this page indexes, when it is a museum's exhibitions index
+	// rather than some other page that happens to link to exhibitions.
+	section := ProgrammeSection(pageBase)
+
 	var found []Exhibition
-	for _, candidate := range candidatesOn(body, pageBase) {
+	for _, candidate := range candidatesOn(body, pageBase, section) {
 		dates := datesFor(candidate, now)
 		// An entry with no readable dates cannot be placed in time, and listing
 		// pages are full of links that are not exhibitions at all; requiring a
@@ -221,16 +225,35 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 		// and has to name itself one to be kept: otherwise the rule that keeps
 		// the noise out is gone.
 		permanent := dates.Permanent
+		// listed says the entry is on the museum's exhibitions index and sits
+		// inside that same section. That is a stronger claim than any date:
+		// the noise the date rule guards against is links to /visit, /tickets
+		// and /support-us, and none of those are filed under /exhibitions.
+		//
+		// It has to exist because a great many museums publish no dates at all
+		// on the index. Göteborgs stadsmuseum lists ten exhibitions as linked
+		// photographs, and the dates, where there are any, are prose on the
+		// entry's own page — "Visas tills 2030". Requiring a date discarded
+		// every one of them and the museum came back empty.
+		listed := EntryUnder(section, candidate.URL)
 		if dates.IsZero() && !permanent {
-			if !candidateIsPermanent(candidate, pagePermanent) {
+			switch {
+			case candidateIsPermanent(candidate, pagePermanent):
+				permanent = true
+			case listed:
+				// Kept with no dates rather than guessed at. A museum's index
+				// of what is on is a statement that these are on now; how long
+				// for is simply not recorded there.
+			default:
 				continue
 			}
-			permanent = true
 		}
 
 		running, upcoming := dates.Runs(now), dates.Upcoming(now)
 		if permanent {
 			running, upcoming = true, false
+		} else if dates.IsZero() && listed {
+			running = true
 		}
 		if !running && !upcoming {
 			continue // already closed

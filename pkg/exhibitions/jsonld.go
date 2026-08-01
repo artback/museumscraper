@@ -81,7 +81,7 @@ func ExtractJSONLDCandidates(pageHTML string, base *url.URL) []Candidate {
 // them has stated what the HTML reader can only infer. The HTML reader still
 // runs on the same page: sites routinely declare a handful of events and list
 // thirty, and reading only the declaration would silently lose the rest.
-func candidatesOn(pageHTML string, base *url.URL) []Candidate {
+func candidatesOn(pageHTML string, base *url.URL, section string) []Candidate {
 	declared := ExtractJSONLDCandidates(pageHTML, base)
 
 	seen := make(map[string]struct{}, len(declared))
@@ -90,7 +90,7 @@ func candidatesOn(pageHTML string, base *url.URL) []Candidate {
 	}
 
 	found := declared
-	for _, candidate := range ExtractCandidates(pageHTML, base) {
+	for _, candidate := range ExtractCandidatesUnder(pageHTML, base, section) {
 		if _, dup := seen[candidate.URL]; dup {
 			continue
 		}

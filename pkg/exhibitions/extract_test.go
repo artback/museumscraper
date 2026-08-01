@@ -456,3 +456,69 @@ func TestExtractCandidates_SwedishListingWithReadMoreLinks(t *testing.T) {
 		}
 	}
 }
+
+// A card that is nothing but a linked photograph still names its exhibition —
+// in the URL.
+//
+// Göteborgs stadsmuseum lists every exhibition this way: an <a> containing an
+// <img alt=""> and an empty div, with no text anywhere inside the link. The
+// minimum-length check rejected those anchors outright, which meant the slug
+// fallback below it could never run for the case it was written for, and the
+// museum yielded nothing at all.
+func TestExtractCandidates_ReadsCardsThatAreOnlyALinkedImage(t *testing.T) {
+	const page = `<html><body>
+	  <a class="hero" href="/utstallningar/vikingr/">
+	    <div class="background"><img src="/img/v.jpg" alt=""/></div>
+	    <div class="content"></div>
+	  </a>
+	</body></html>`
+
+	got := ExtractCandidates(page, mustURL(t, "https://goteborgsstadsmuseum.se/utstallningar/"))
+
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want 1: %+v", len(got), got)
+	}
+	if got[0].Title != "Vikingr" {
+		t.Errorf("Title = %q, want the slug, which is the only name on offer", got[0].Title)
+	}
+}
+
+// An entry one segment below a programme index is an entry, whatever the words
+// in its path.
+//
+// The vocabulary runs out: this museum's own English section is spelled
+// /en/exihibitions/, and no list will ever hold that. What stays true is that
+// the page is the index and the entries sit under it.
+func TestEntryUnder(t *testing.T) {
+	cases := []struct {
+		section, entry string
+		want           bool
+		why            string
+	}{
+		{"/utstallningar/", "https://x.se/utstallningar/vikingr/", true, "an entry below the index"},
+		{"/en/exihibitions/", "https://x.se/en/exihibitions/vikingr/", true, "the museum's own spelling"},
+		{"/utstallningar/", "https://x.se/utstallningar/", false, "the index is not its own entry"},
+		{"/utstallningar/", "https://x.se/utstallningar/tidigare-utstallningar/", false,
+			"a sibling index of closed shows, not an entry"},
+		{"/utstallningar/", "https://x.se/utstallningar/vikingr/bilder/", false, "two levels down"},
+		{"/utstallningar/", "https://x.se/besok-oss/", false, "a different section"},
+		{"", "https://x.se/utstallningar/vikingr/", false, "no index means no claim"},
+	}
+
+	for _, c := range cases {
+		if got := EntryUnder(c.section, c.entry); got != c.want {
+			t.Errorf("EntryUnder(%q, %q) = %v, want %v — %s", c.section, c.entry, got, c.want, c.why)
+		}
+	}
+}
+
+// The front page indexes nothing, so it cannot make entries of everything it
+// links to.
+func TestProgrammeSection(t *testing.T) {
+	if got := ProgrammeSection(mustURL(t, "https://x.se/")); got != "" {
+		t.Errorf("front page section = %q, want none", got)
+	}
+	if got := ProgrammeSection(mustURL(t, "https://x.se/en/exihibitions/")); got != "/en/exihibitions/" {
+		t.Errorf("section = %q, want the page's own path", got)
+	}
+}
