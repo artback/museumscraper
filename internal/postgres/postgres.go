@@ -1280,3 +1280,83 @@ LIMIT $3`
 	}
 	return museums, rows.Err()
 }
+
+// MergeNameVariants folds together museums that are the same place recorded
+// under different names, and reports how many rows it removed.
+//
+// "Gothenburg Museum" and "Museum of Gothenburg" are one museum two hundred
+// metres apart in the catalogue, because each source named it its own way and
+// the upsert keys on the exact name. Trigram similarity is the wrong tool here:
+// it would merge "Tate Modern" with "Tate Britain", which are two museums.
+//
+// The rule is that two records are the same museum when they sit almost on top
+// of each other AND their names use the same significant words. Word order and
+// filler differ between sources — "of", "the", "der" — and word length is a
+// cheap, language-independent way to drop those. Tate Modern and Tate Britain
+// survive it: their word sets differ, so no distance would merge them.
+//
+// The radius is deliberately small. Two genuinely different museums can share a
+// building, and 150 m is close enough that a false merge needs both the same
+// words and the same doorway.
+func (s *Store) MergeNameVariants(ctx context.Context) (int64, error) {
+	const stmt = `
+WITH tokens AS (
+    SELECT id, location, sitelinks, normalized,
+           (SELECT array_agg(word ORDER BY word)
+              FROM unnest(string_to_array(normalized, ' ')) AS word
+             WHERE length(word) > 2) AS words
+    FROM museums
+    WHERE location IS NOT NULL AND normalized <> ''
+),
+candidates AS (
+    -- At least two significant words: a single shared word is a coincidence,
+    -- not an identity. "Museum" alone would merge a town's every museum.
+    SELECT * FROM tokens WHERE words IS NOT NULL AND cardinality(words) >= 2
+),
+pairs AS (
+    SELECT a.id AS keeper, b.id AS victim
+    FROM candidates a
+    JOIN candidates b
+      ON a.words = b.words
+     AND a.id <> b.id
+     AND ST_DWithin(a.location, b.location, 150)
+    -- The better-documented record survives, so the merge keeps the row more
+    -- of the catalogue already points at.
+    WHERE (a.sitelinks, -a.id) > (b.sitelinks, -b.id)
+),
+-- One keeper per victim: a cluster of three collapses onto a single row rather
+-- than each pair merging separately and leaving fragments.
+resolved AS (
+    SELECT victim, min(keeper) AS keeper FROM pairs GROUP BY victim
+),
+final AS (
+    SELECT r.victim, r.keeper FROM resolved r
+    WHERE NOT EXISTS (SELECT 1 FROM resolved o WHERE o.victim = r.keeper)
+),
+merged AS (
+    UPDATE museums m SET
+        aliases = (SELECT coalesce(array_agg(DISTINCT a), '{}')
+                     FROM unnest(m.aliases || v.aliases || ARRAY[v.name]) a WHERE a <> ''),
+        aliases_normalized = (SELECT coalesce(array_agg(DISTINCT a), '{}')
+                     FROM unnest(m.aliases_normalized || v.aliases_normalized || ARRAY[v.normalized]) a WHERE a <> ''),
+        sources = (SELECT coalesce(array_agg(DISTINCT s), '{}')
+                     FROM unnest(m.sources || v.sources) s WHERE s <> ''),
+        search_text = m.search_text || ' ' || v.normalized,
+        sitelinks = greatest(m.sitelinks, v.sitelinks),
+        website = coalesce(nullif(m.website, ''), v.website),
+        wikipedia_url = coalesce(nullif(m.wikipedia_url, ''), v.wikipedia_url),
+        description = coalesce(nullif(m.description, ''), v.description),
+        verified = m.verified OR v.verified,
+        updated_at = now()
+    FROM final f JOIN museums v ON v.id = f.victim
+    WHERE m.id = f.keeper
+    RETURNING m.id
+)
+DELETE FROM museums WHERE id IN (SELECT victim FROM final)`
+
+	tag, err := s.pool.Exec(ctx, stmt)
+	if err != nil {
+		return 0, fmt.Errorf("merge name variants: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}

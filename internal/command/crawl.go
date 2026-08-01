@@ -315,6 +315,18 @@ func loadIntoDatabase(ctx context.Context, museums []models.Museum) {
 	if removed > 0 {
 		log.Printf("Merged %d duplicate records", removed)
 	}
+
+	// The same museum under two names, which the identity key cannot catch
+	// because the names differ. Run after the id-based merge so it works on
+	// what that leaves behind.
+	variants, err := db.MergeNameVariants(ctx)
+	if err != nil {
+		log.Printf("Name-variant merge failed: %v (records are intact)", err)
+		return
+	}
+	if variants > 0 {
+		log.Printf("Merged %d museums recorded under more than one name", variants)
+	}
 }
 
 // collectSources runs every enabled source concurrently and feeds the merger.

@@ -858,3 +858,84 @@ func TestMergeDuplicateExhibitions(t *testing.T) {
 		}
 	}
 }
+
+// One museum recorded under two names is a duplicate; two museums with similar
+// names are not. The second half is what makes this dangerous, so it is tested
+// harder than the first.
+func TestMergeNameVariants(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		// The reported duplicate: same words, 200 m apart.
+		{Name: "Gothenburg Museum", Country: "Sweden", WikidataID: "Q1",
+			Latitude: 57.7070, Longitude: 11.9670, Sitelinks: 12},
+		{Name: "Museum of Gothenburg", Country: "Sweden", WikidataID: "Q2",
+			Latitude: 57.7072, Longitude: 11.9673, Sitelinks: 3,
+			Website: "https://example.org", AlsoKnownAs: []string{"Stadsmuseum"}},
+
+		// Same city, same word "museum", different museums — must survive.
+		{Name: "Maritime Museum", Country: "Sweden", WikidataID: "Q3",
+			Latitude: 57.7071, Longitude: 11.9671, Sitelinks: 5},
+
+		// The case that makes trigram similarity unusable: near-identical
+		// names, genuinely different museums, 2 km apart.
+		{Name: "Tate Modern", Country: "United Kingdom", WikidataID: "Q4",
+			Latitude: 51.5076, Longitude: -0.0994, Sitelinks: 60},
+		{Name: "Tate Britain", Country: "United Kingdom", WikidataID: "Q5",
+			Latitude: 51.4911, Longitude: -0.1278, Sitelinks: 50},
+
+		// Same words but far apart: two branches of one institution.
+		{Name: "Louvre Museum", Country: "France", WikidataID: "Q6",
+			Latitude: 48.8606, Longitude: 2.3376, Sitelinks: 167},
+		{Name: "Museum Louvre", Country: "United Arab Emirates", WikidataID: "Q7",
+			Latitude: 24.5339, Longitude: 54.3980, Sitelinks: 40},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	removed, err := store.MergeNameVariants(ctx)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want exactly the one duplicate", removed)
+	}
+
+	survivors := map[string]bool{}
+	if err := store.EachMuseum(ctx, func(m models.Museum) { survivors[m.Name] = true }); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+
+	for _, want := range []string{
+		"Gothenburg Museum", "Maritime Museum",
+		"Tate Modern", "Tate Britain", "Louvre Museum", "Museum Louvre",
+	} {
+		if !survivors[want] {
+			t.Errorf("%q was merged away and should not have been", want)
+		}
+	}
+	if survivors["Museum of Gothenburg"] {
+		t.Error("the duplicate survived")
+	}
+
+	// The survivor must inherit what the merged record knew, or merging is
+	// just deletion.
+	page, err := store.Search(ctx, "gothenburg museum", 1, 0)
+	if err != nil || len(page.Hits) == 0 {
+		t.Fatalf("search: %v", err)
+	}
+	kept := page.Hits[0].Museum
+	if kept.Website == "" {
+		t.Error("the merged record's website was lost")
+	}
+	if !slices.Contains(kept.AlsoKnownAs, "Museum of Gothenburg") {
+		t.Errorf("the merged name was not kept as an alias; have %v", kept.AlsoKnownAs)
+	}
+
+	// And it must still be findable by the name that disappeared.
+	byOldName, err := store.Search(ctx, "museum of gothenburg", 1, 0)
+	if err != nil || len(byOldName.Hits) == 0 {
+		t.Fatal("the museum is no longer findable by its merged-away name")
+	}
+}
