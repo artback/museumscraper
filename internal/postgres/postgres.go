@@ -888,6 +888,90 @@ LIMIT $4`
 	return hits, rows.Err()
 }
 
+// SearchExhibitions finds what is on show by name, best match first.
+//
+// Exhibitions could only be reached through a location, so someone who knew a
+// show's name but not which museum held it — the ordinary case for anything
+// touring, and for anything a friend mentioned — had no way to ask at all.
+//
+// A location is optional and narrows rather than decides: with one, the match
+// must also be within the radius, and ties break towards the nearer venue.
+//
+// Scored like the museum search, and for the same reasons: an exact title beats
+// a prefix, a prefix beats a substring, and trigram similarity carries the
+// near-misses that are most of what people type. The museum's name is searchable
+// too, so "hasselblad" finds what is on at the Hasselblad Center, but it scores
+// below the title so a show's own name always wins.
+func (s *Store) SearchExhibitions(ctx context.Context, query string, lat, lon, radiusKm float64, near, includeUpcoming bool, limit, offset int) ([]ExhibitionHit, int64, error) {
+	term := strings.ToLower(strings.TrimSpace(query))
+	if term == "" {
+		return nil, 0, nil
+	}
+
+	const stmt = `
+WITH q AS (SELECT $1::text AS term)
+SELECT url, title, coalesce(museum,''), coalesce(museum_wikidata_id,''),
+       starts_on, ends_on, coalesce(source_page,''), scraped_at, permanent,
+       ST_Y(location::geometry), ST_X(location::geometry),
+       CASE WHEN $2::boolean THEN ST_Distance(location, $3::geography) / 1000.0 ELSE 0 END AS distance_km,
+       count(*) OVER () AS total,
+       (CASE WHEN lower(title) = q.term THEN 3.0
+             WHEN lower(title) LIKE q.term || '%' THEN 1.5
+             WHEN position(q.term in lower(title)) > 0 THEN 0.75
+             -- The venue matches too, but never as strongly as the show.
+             WHEN position(q.term in lower(coalesce(museum, ''))) > 0 THEN 0.5
+             ELSE 0 END
+        + similarity(lower(title), q.term)) AS score
+FROM exhibitions, q
+WHERE (ends_on IS NULL OR ends_on >= current_date)
+  AND ($4 OR starts_on IS NULL OR starts_on <= current_date)
+  AND (NOT $2::boolean OR (location IS NOT NULL AND ST_DWithin(location, $3::geography, $5)))
+  -- Similarity is measured against the title alone, never the title and the
+  -- venue joined together. Whole-string similarity falls away as the string
+  -- grows, so the concatenation buries the match: "vikingar" scores 0.55
+  -- against "vikingr" and 0.19 against "vikingr museum of gothenburg", which is
+  -- under the threshold. The venue is matched as a substring instead, which is
+  -- all it needs to be.
+  AND (lower(title) % q.term
+       OR position(q.term in lower(title)) > 0
+       OR position(q.term in lower(coalesce(museum, ''))) > 0)
+ORDER BY score DESC, distance_km, ends_on NULLS LAST
+LIMIT $6 OFFSET $7`
+
+	point := fmt.Sprintf("SRID=4326;POINT(%v %v)", lon, lat)
+
+	rows, err := s.pool.Query(ctx, stmt, term, near, point, includeUpcoming, radiusKm*1000, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("search exhibitions %q: %w", query, err)
+	}
+	defer rows.Close()
+
+	var (
+		hits  []ExhibitionHit
+		total int64
+	)
+	now := time.Now()
+	for rows.Next() {
+		var (
+			hit      ExhibitionHit
+			lat, lon *float64
+			score    float64
+		)
+		if err := rows.Scan(&hit.URL, &hit.Title, &hit.Museum, &hit.MuseumWikidataID,
+			&hit.Start, &hit.End, &hit.SourcePage, &hit.ScrapedAt, &hit.Permanent,
+			&lat, &lon, &hit.DistanceKm, &total, &score); err != nil {
+			return nil, 0, fmt.Errorf("scan exhibition: %w", err)
+		}
+		if lat != nil && lon != nil {
+			hit.Latitude, hit.Longitude = *lat, *lon
+		}
+		hit.Running = hit.Permanent || hit.Start == nil || !hit.Start.After(now)
+		hit.Upcoming = !hit.Permanent && hit.Start != nil && hit.Start.After(now)
+		hits = append(hits, hit)
+	}
+	return hits, total, rows.Err()
+}
+
 // EachMuseum streams the whole catalogue, for the audit.
 //
 // Genuinely streams: it calls fn as each row arrives. It used to gather every
