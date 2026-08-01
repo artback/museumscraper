@@ -448,6 +448,12 @@ func (s *Scraper) ForMuseums(ctx context.Context, museums []models.Museum, concu
 // power cut at minute 67 would have cost exactly as much. Work that took an
 // hour to produce should not depend on a later step succeeding.
 //
+// fn is called exactly once per site, in whatever order the sites finish, and
+// with an empty slice for a site that had nothing. Counting the calls is
+// therefore counting the sites read, which is what a caller reporting progress
+// needs — most sites find nothing, so calling fn only when something turned up
+// would make a progress bar that barely moves.
+//
 // fn is called from one goroutine at a time and must not block for long: the
 // workers are held up while it runs. Exhibitions are deduplicated by URL
 // across the whole run before fn sees them, because sites cross-list — one
@@ -509,14 +515,17 @@ func (s *Scraper) Stream(ctx context.Context, museums []models.Museum, concurren
 			seen[e.URL] = struct{}{}
 			fresh = append(fresh, e)
 		}
-		if len(fresh) > 0 {
-			fn(fresh)
-		}
+		fn(fresh)
 	}
 }
 
 // uniqueBySite keeps the first museum for each distinct website, preserving
 // order.
+// UniqueBySite is uniqueBySite for callers that need to know how many sites a
+// list of museums really amounts to before handing it over — a caller reporting
+// progress cannot count what Stream silently drops.
+func UniqueBySite(museums []models.Museum) []models.Museum { return uniqueBySite(museums) }
+
 func uniqueBySite(museums []models.Museum) []models.Museum {
 	seen := make(map[string]struct{}, len(museums))
 	unique := museums[:0:0]

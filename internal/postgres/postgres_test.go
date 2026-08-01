@@ -753,16 +753,22 @@ func TestPlaceAtTownCentres(t *testing.T) {
 		{Name: "Lost Museum", Country: "Sweden", Locality: "Gothenburg Municipality", WikidataID: "Q3"},
 		// Unplaced in a town nothing is placed in: nothing to infer from.
 		{Name: "Nowhere Museum", Country: "Sweden", Locality: "Unknownville", WikidataID: "Q4"},
+		// The same town under the plain name the sources also use. Matching it
+		// to the administrative form is the only reason the second pass exists.
+		{Name: "Plainly Named Museum", Country: "Sweden", Locality: "Gothenburg", WikidataID: "Q5"},
 	}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	placed, err := store.PlaceAtTownCentres(ctx)
+	placed, discarded, err := store.PlaceAtTownCentres(ctx)
 	if err != nil {
 		t.Fatalf("place: %v", err)
 	}
-	if placed != 1 {
-		t.Fatalf("placed = %d, want 1 — only the museum whose town is known", placed)
+	if placed != 2 {
+		t.Fatalf("placed = %d, want 2 — the museums whose town is known under either name", placed)
+	}
+	if discarded != 0 {
+		t.Errorf("discarded = %d, want 0 — nothing was approximately placed before", discarded)
 	}
 
 	// Now reachable by a radius query, and flagged as approximate.
@@ -783,10 +789,78 @@ func TestPlaceAtTownCentres(t *testing.T) {
 		t.Error("the museum is still invisible to a radius query")
 	}
 
-	// Idempotent: nothing left whose town is known.
-	if again, err := store.PlaceAtTownCentres(ctx); err != nil || again != 0 {
-		t.Errorf("second run placed %d (err %v), want 0", again, err)
+	// Idempotent, but by recomputing rather than by leaving things alone: the
+	// second run takes back the one approximate position it made and arrives at
+	// the same one again. That is the property worth having, because a position
+	// derived from a rule that later turns out to be wrong has to be reachable.
+	again, discarded, err := store.PlaceAtTownCentres(ctx)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
 	}
+	if again != 2 || discarded != 2 {
+		t.Errorf("second run placed %d and discarded %d, want 2 and 2", again, discarded)
+	}
+}
+
+// Towns are matched within a country, by their full name before their leading
+// word, and only when the town's own museums sit close together.
+//
+// Without all three, a centroid stops describing anywhere: grouping on the
+// leading word alone put "Kingston" in five countries and "South Bend" with
+// South Korea, and the resulting centroids were points in the open ocean. 3,677
+// museums were placed that way, Korean ones off the coast of Spain.
+func TestPlaceAtTownCentresRefusesGroupsThatDescribeNowhere(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		// Two towns sharing a leading word, one per country and far apart.
+		{Name: "Ontario Anchor", Country: "Canada", Locality: "Port Hope",
+			WikidataID: "Q10", Latitude: 43.95, Longitude: -78.29},
+		{Name: "NSW Anchor", Country: "Australia", Locality: "Port Macquarie",
+			WikidataID: "Q11", Latitude: -31.43, Longitude: 152.91},
+		// Two towns sharing a leading word within one country, far apart.
+		{Name: "Illinois Anchor", Country: "United States", Locality: "Springfield, Illinois",
+			WikidataID: "Q12", Latitude: 39.80, Longitude: -89.64},
+		{Name: "Massachusetts Anchor", Country: "United States", Locality: "Springfield, Massachusetts",
+			WikidataID: "Q13", Latitude: 42.10, Longitude: -72.59},
+
+		// Each of these must stay unplaced rather than be put in the sea.
+		{Name: "Adrift Abroad", Country: "Canada", Locality: "Port Colborne", WikidataID: "Q14"},
+		{Name: "Adrift At Home", Country: "United States", Locality: "Springfield, Missouri", WikidataID: "Q15"},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	if _, _, err := store.PlaceAtTownCentres(ctx); err != nil {
+		t.Fatalf("place: %v", err)
+	}
+
+	for _, name := range []string{"Adrift Abroad", "Adrift At Home"} {
+		museum, err := museumNamed(ctx, store, name)
+		if err != nil {
+			t.Fatalf("read back %q: %v", name, err)
+		}
+		if museum.Latitude != 0 || museum.Longitude != 0 {
+			t.Errorf("%q was placed at %.4f,%.4f — a centroid of towns this far apart is not a place",
+				name, museum.Latitude, museum.Longitude)
+		}
+	}
+}
+
+// museumNamed reads one museum back by name, for assertions about what was
+// written rather than about what a query returns.
+func museumNamed(ctx context.Context, store *Store, name string) (models.Museum, error) {
+	page, err := store.Search(ctx, name, 10, 0)
+	if err != nil {
+		return models.Museum{}, err
+	}
+	for _, hit := range page.Hits {
+		if hit.Museum.Name == name {
+			return hit.Museum, nil
+		}
+	}
+	return models.Museum{}, fmt.Errorf("no museum named %q", name)
 }
 
 // Museums publish recurring events as one row per occurrence. Eight listings of
