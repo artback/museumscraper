@@ -491,6 +491,53 @@ Later sources fill gaps without overwriting established facts, with one exceptio
 
 ---
 
+## Backups and durability
+
+Postgres, MinIO and Kafka each write to a named Docker volume, so the data
+survives container restarts, `docker compose down`, and image upgrades.
+
+It does **not** survive `docker compose down -v`, `docker volume rm`, or a
+Docker Desktop reset — and on macOS every volume lives inside one VM disk
+image, so a single corrupted file takes all of them together. The catalogue
+costs roughly four hours of rate-limited crawling to rebuild.
+
+Take a dump before anything risky, and on a schedule if the data matters:
+
+```bash
+docker compose --profile backup run --rm backup
+```
+
+It writes a compressed custom-format dump to `./backups` on the host, outside
+Docker — about 17 MB for 181,000 museums and 9,000 exhibitions. Restore with:
+
+```bash
+docker compose exec -T postgres pg_restore -U museum -d museum --clean --if-exists < backups/museum-<stamp>.dump
+```
+
+Verify a backup by restoring it into a scratch database rather than trusting
+that a non-empty file is a good one:
+
+```bash
+docker compose exec -T postgres psql -U museum -d postgres -c "CREATE DATABASE restore_check"
+docker compose exec -T postgres pg_restore -U museum -d restore_check --no-owner < backups/museum-<stamp>.dump
+docker compose exec -T postgres psql -U museum -d restore_check -c "SELECT count(*) FROM museums"
+```
+
+**The project name is pinned to `museum`** in `docker-compose.yml`. Without
+that, Compose names volumes after whichever directory it is run from, so the
+same repository checked out twice — or worked on in a git worktree — mounts
+two different, empty databases and the data appears to have vanished. Do not
+remove the `name:` key.
+
+Object storage is not covered by the dump. It holds the raw crawl output and
+is rebuildable by re-crawling, whereas Postgres also holds the enrichment,
+geocoding and scraped exhibitions that took much longer to produce. Copy the
+volume directly if you want it:
+
+```bash
+docker run --rm -v museum_minio_data:/from -v $(pwd)/backups:/to alpine tar czf /to/minio.tar.gz -C /from .
+```
+
 ## Storage layout
 
 **Object storage** holds the durable record of what each source said:

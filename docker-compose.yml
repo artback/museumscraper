@@ -1,3 +1,12 @@
+# The project name is pinned so the data does not depend on where the repository
+# happens to sit. Compose derives it from the directory otherwise, which named
+# these volumes after a temporary git worktree — delete the worktree, or run
+# compose from the main checkout, and 1.3 GB of crawled catalogue appears to
+# vanish because a different, empty volume is mounted instead. The orphaned
+# "ica_scraper_postgres_data" volume on this machine is that having already
+# happened once, under the repository's previous name.
+name: museum
+
 services:
   # Official Apache image running in KRaft mode. The Bitnami kafka tags this
   # project used previously were withdrawn from Docker Hub.
@@ -185,6 +194,38 @@ services:
       - type: bind
         source: ./create_event.sh
         target: /create_event.sh
+
+  # Dumps the catalogue to ./backups on the host, outside Docker entirely.
+  #
+  # The named volumes below survive "docker compose down", restarts and image
+  # upgrades, but they do not survive "docker compose down -v", "docker volume
+  # rm", or a Docker Desktop reset — and on macOS they all live inside one VM
+  # disk image, so a single corrupted file takes every volume with it. The
+  # catalogue costs about four hours of rate-limited crawling to rebuild, which
+  # is worth more than the seventeen megabytes a compressed dump takes.
+  #
+  #   docker compose --profile backup run --rm backup
+  #
+  # Restore into an empty database with:
+  #
+  #   docker compose exec -T postgres pg_restore -U museum -d museum --clean --if-exists < backups/<file>.dump
+  backup:
+    image: postgis/postgis:16-3.4
+    profiles: ["backup"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: museum
+    volumes:
+      - ./backups:/backups
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        pg_dump -h postgres -U museum -d museum --format=custom --compress=9
+        -f /backups/museum-$$(date +%Y%m%d-%H%M%S).dump
+        && echo "Wrote /backups/museum-$$(date +%Y%m%d)*.dump"
+        && ls -lh /backups
 
 volumes:
   minio_data:
