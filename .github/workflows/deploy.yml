@@ -1,0 +1,120 @@
+# Builds the museum image and deploys it to the Nomad cluster.
+#
+# Runs on a self-hosted runner on the Pi itself, which is what makes this
+# simple: the cluster is only reachable over Tailscale, so a GitHub-hosted
+# runner would need to join the tailnet and be handed the Nomad mTLS certs as
+# secrets. A runner already inside the network needs neither. It also means the
+# image never has to leave the machine that runs it — the Pi builds arm64
+# natively and loads straight into its own Docker daemon, so there is no
+# registry in the path at all.
+#
+# The job spec is not in this repository: it lives in artback/iac_jonathan
+# alongside the other sixteen services, and is checked out here at deploy time.
+# See .github/workflows/README.md for the one-time runner setup.
+name: Deploy to Nomad
+
+on:
+  push:
+    branches: [main]
+    # Documentation changes do not need a deploy.
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  workflow_dispatch:
+    inputs:
+      seed_mode:
+        description: "Deploy without the bucket notification and with the enricher stopped"
+        type: boolean
+        default: false
+
+# One deploy at a time. Two overlapping runs would race each other's
+# nomad-pack invocations, and Nomad rejects a scale or update while another
+# deployment is in flight.
+concurrency:
+  group: nomad-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, ARM64]
+
+    env:
+      # Where the runner keeps its checkout of the IaC repository and the vars
+      # file. The vars file holds the database and MinIO passwords and is
+      # gitignored, so it is placed on the Pi once by hand rather than coming
+      # from the repository or from GitHub secrets.
+      IAC_DIR: /opt/iac_jonathan
+      VARS_FILE: /opt/museum/museum-kalmar.pkrvars.hcl
+
+      NOMAD_ADDR: https://100.116.81.88:4646
+      NOMAD_CACERT: /opt/museum/certs/nomad-ca.pem
+      NOMAD_CLIENT_CERT: /opt/museum/certs/nomad-cli.pem
+      NOMAD_CLIENT_KEY: /opt/museum/certs/nomad-cli-key.pem
+
+    steps:
+      - name: Check out the application
+        uses: actions/checkout@v4
+
+      - name: Verify the runner's prerequisites
+        run: |
+          set -eu
+          fail=0
+          for f in "$VARS_FILE" "$NOMAD_CACERT" "$NOMAD_CLIENT_CERT" "$NOMAD_CLIENT_KEY"; do
+            [ -r "$f" ] || { echo "missing or unreadable: $f"; fail=1; }
+          done
+          [ -d "$IAC_DIR/.git" ] || { echo "missing IaC checkout: $IAC_DIR"; fail=1; }
+          command -v nomad-pack >/dev/null || { echo "nomad-pack is not installed"; fail=1; }
+          if [ "$fail" = "1" ]; then
+            echo "Run scripts/setup-runner.sh from the iac repo — see .github/workflows/README.md" >&2
+            exit 1
+          fi
+
+      - name: Update the IaC checkout
+        run: |
+          set -eu
+          git -C "$IAC_DIR" fetch --quiet origin main
+          git -C "$IAC_DIR" reset --hard --quiet origin/main
+          echo "iac at $(git -C "$IAC_DIR" rev-parse --short HEAD)"
+
+      - name: Build the image
+        id: build
+        run: |
+          set -eu
+          TAG="museum:${GITHUB_SHA::12}"
+          docker build -t "$TAG" .
+          # The runner is the Pi, so this is a native build. Checked anyway:
+          # the failure mode otherwise is an opaque "exec format error" inside
+          # Nomad long after the workflow has gone green.
+          ARCH="$(docker image inspect "$TAG" --format '{{.Architecture}}')"
+          [ "$ARCH" = "arm64" ] || { echo "built $ARCH, need arm64" >&2; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy
+        run: |
+          set -eu
+          cd "$IAC_DIR"
+          nomad-pack run packs/museum \
+            -f "$VARS_FILE" \
+            --var image="${{ steps.build.outputs.tag }}" \
+            --var seed_mode=${{ inputs.seed_mode || false }}
+
+      - name: Verify the API is serving
+        run: |
+          set -eu
+          # Polled rather than checked once: nomad-pack returns when the
+          # deployment is healthy, but fabio and Consul take a moment longer.
+          for _ in $(seq 30); do
+            if curl -fsS -m 5 http://100.116.81.88:8091/livez >/dev/null 2>&1; then
+              COUNT="$(curl -fsS -m 15 'http://100.116.81.88:8091/v1/museums?place=Paris' |
+                       sed -n 's/.*"total":\([0-9]*\).*/\1/p')"
+              echo "API is serving; Paris returns ${COUNT:-unknown} museums"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "API did not become healthy" >&2
+          exit 1
+
+      - name: Prune old images
+        if: always()
+        run: docker image prune -f --filter "until=168h" --filter "label!=keep" || true
