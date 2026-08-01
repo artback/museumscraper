@@ -30,6 +30,12 @@ var listingLinkWords = []string{
 	"exposition", "expositions", "agenda",
 	"esposizioni", "mostre", "exposiciones", "exposições",
 	"tentoonstelling", "tentoonstellingen", "utstilling", "wystawy",
+	// Words for permanent displays are deliberately absent: this list decides
+	// which page is read for the programme, and the loop that uses it stops at
+	// the first page that yields anything. Scoring a permanent link here put
+	// Ateneum's permanent collection ahead of "/nayttelyt/" and lost all three
+	// of its temporary exhibitions. Permanent pages are found separately, by
+	// FindPermanentLinks, so they add to the programme instead of replacing it.
 }
 
 // strongPathHints name a URL as an exhibition outright. A site that uses these
@@ -45,6 +51,9 @@ var strongPathHints = []string{
 	"utstallning", "utställning", "udstilling", "nayttely", "näyttely",
 	"wystawa", "vystava", "výstava", "kiallitas", "kiállítás", "sergi",
 	"izlozba", "izložba", "razstava", "naroda", "vystavka", "выставка",
+	// A permanent display is as plainly an exhibition as a temporary one, and
+	// the sites that separate the two say which is which in the path.
+	"permanent", "dauerausstellung", "basutstallning", "basutställning",
 }
 
 // weakPathHints name a URL as some kind of programme entry, which may or may
@@ -80,6 +89,11 @@ type Candidate struct {
 	// Context is the text surrounding the link, which is where the dates
 	// usually live.
 	Context string
+	// Dates are the run dates when the page gave them in a machine-readable
+	// form — a <time datetime> attribute, or a schema.org event. Both are
+	// ISO-8601 whatever language the page is written in, so where they exist
+	// they are used in place of reading the text.
+	Dates DateRange
 }
 
 // FindListingLinks returns the URLs on a page that look like they lead to the
@@ -182,6 +196,9 @@ var containerSegments = map[string]bool{
 	"ausstellungen": true, "mostre": true, "expositions": true,
 	"whats-on": true, "what-s-on": true, "programme": true, "program": true,
 	"programs": true, "programmes": true, "kalendarium": true,
+	"permanent": true, "permanent-exhibitions": true, "permanent-exhibition": true,
+	"dauerausstellung": true, "fasta-utstallningar": true, "basutstallningar": true,
+	"vaste-collectie": true,
 }
 
 // IsNavigationLink reports whether a link is a way of paging through a listing
@@ -386,7 +403,14 @@ func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool) (
 	if title == "" {
 		return Candidate{}, false, false
 	}
-	return Candidate{Title: title, URL: resolved, Context: cardContext(anchor, linkText)}, isStrong, true
+
+	context, card := cardContext(anchor, linkText)
+	return Candidate{
+		Title:   title,
+		URL:     resolved,
+		Context: context,
+		Dates:   machineDates(card),
+	}, isStrong, true
 }
 
 // callsToAction are the button labels that stand in for a title on cards whose
@@ -464,13 +488,15 @@ func containsAny(s string, substrings []string) bool {
 }
 
 // cardContext returns the text to search for dates: the link's own text plus
-// the smallest enclosing element that adds anything.
+// the smallest enclosing element that adds anything. It also returns the
+// element that text came from, which is the card, so its markup can be read
+// for dates the text does not spell out.
 //
 // The bound matters. Climbing to any ancestor would eventually reach the page
 // body, whose text holds every other listing's dates; a card is only modestly
 // larger than the link it wraps, so growth is capped.
-func cardContext(anchor *html.Node, linkText string) string {
-	context := linkText
+func cardContext(anchor *html.Node, linkText string) (string, *html.Node) {
+	context, card := linkText, anchor
 	limit := max(3*len(linkText), 300)
 
 	for parent := anchor.Parent; parent != nil; parent = parent.Parent {
@@ -479,10 +505,78 @@ func cardContext(anchor *html.Node, linkText string) string {
 			break
 		}
 		if len(surrounding) > len(context) {
-			context = surrounding
+			context, card = surrounding, parent
 		}
 	}
-	return context
+	return context, card
+}
+
+// maxCardTimes bounds how many <time> elements are read from one card. A card
+// carries an opening and a closing date; a page whose markup put a hundred
+// inside one is not a listing card and should not be read as though the first
+// and last of them were an exhibition's run.
+const maxCardTimes = 8
+
+// machineDates reads the ISO dates a card states in <time datetime="…">
+// attributes.
+//
+// This is the cheapest language-independence available. A site writes "12.
+// marts – 7. september 2026" or "12 марта" in its own language and its own
+// order, and then marks the same two dates up as datetime="2026-03-12" for
+// browsers and search engines. The date table in dates.go knows ten languages
+// and will never know all of them; this knows the format every site agrees on.
+func machineDates(card *html.Node) DateRange {
+	var stamps []time.Time
+
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if len(stamps) >= maxCardTimes {
+			return
+		}
+		if n.Type == html.ElementNode && n.Data == "time" {
+			if when, ok := parseISODate(attr(n, "datetime")); ok {
+				stamps = append(stamps, when)
+			}
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(card)
+
+	switch len(stamps) {
+	case 0:
+		return DateRange{}
+	case 1:
+		// One stamp is a single-day entry as far as the markup says. The text
+		// around it decides whether it is really an opening or a closing date,
+		// which is what the text reader is for, so this is left for it.
+		return DateRange{}
+	default:
+		start, end := stamps[0], stamps[len(stamps)-1]
+		for _, when := range stamps {
+			if when.Before(start) {
+				start = when
+			}
+			if when.After(end) {
+				end = when
+			}
+		}
+		return DateRange{Start: &start, End: &end}
+	}
+}
+
+// parseISODate reads the date out of an ISO-8601 date or date-time attribute.
+func parseISODate(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) < 10 {
+		return time.Time{}, false
+	}
+	when, err := time.Parse("2006-01-02", value[:10])
+	if err != nil {
+		return time.Time{}, false
+	}
+	return when, true
 }
 
 // titleOf picks the cleanest title an anchor offers.
@@ -571,6 +665,12 @@ func cleanTitle(text string) string {
 		}
 	}
 
+	// The label is two words when the entry is a permanent one — "Exposition
+	// permanente", "Ausstellung dauerhaft" — and only the first is a type. The
+	// Mucem's "Exposition permanente Méditerranées" came out titled
+	// "permanente Méditerranées" until the adjective went too.
+	title = trimLeadingWord(title, permanenceAdjectives)
+
 	// Listing cards run the title into the dates and the "now on view" badge.
 	// Cutting at the first date keeps the title and drops the rest.
 	if idx := firstDateIndex(title); idx > 3 {
@@ -596,6 +696,33 @@ var markupRe = regexp.MustCompile(`<[^>]*>?`)
 var typeLabels = []string{
 	"Youth exhibition", "Exhibition", "Ausstellung", "Exposition",
 	"Mostra", "Tentoonstelling", "Display", "Event", "Teens",
+}
+
+// permanenceAdjectives are the words that follow a type label to say the entry
+// has no closing date, in the languages that put the adjective after the noun.
+var permanenceAdjectives = []string{
+	"permanente", "permanenta", "permanentes", "permanenti", "permanent",
+	"dauerhaft", "stała", "stálá",
+}
+
+// trimLeadingWord removes a leading word from title when it is one of words,
+// leaving the title untouched when nothing readable would remain.
+func trimLeadingWord(title string, words []string) string {
+	first, rest, found := strings.Cut(strings.TrimSpace(title), " ")
+	if !found {
+		return title
+	}
+	lower := strings.ToLower(first)
+	for _, word := range words {
+		if lower != word {
+			continue
+		}
+		if trimmed := strings.TrimLeft(rest, " :–—-"); len([]rune(trimmed)) >= 4 {
+			return trimmed
+		}
+		return title
+	}
+	return title
 }
 
 // lastTypeLabel returns the offset just past the last type label in title, or
@@ -699,11 +826,14 @@ func candidateListingURLs(base *url.URL) []string {
 	return urls
 }
 
-// datesFor reads the run dates for a candidate, preferring text inside the link
-// and falling back to its surroundings.
+// datesFor reads the run dates for a candidate: what the markup stated
+// outright first, then the text inside the link, then its surroundings.
 func datesFor(c Candidate, now time.Time) DateRange {
-	if dates := ParseDateRange(c.Title, now); !dates.IsZero() {
-		return dates
+	if c.Dates.Known() {
+		return c.Dates.resolveOpenEnd(now)
 	}
-	return ParseDateRange(c.Context, now)
+	if dates := ParseDateRange(c.Title, now); dates.Known() {
+		return dates.resolveOpenEnd(now)
+	}
+	return ParseDateRange(c.Context, now).resolveOpenEnd(now)
 }

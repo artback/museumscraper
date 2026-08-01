@@ -752,16 +752,17 @@ func (s *Store) execBatch(ctx context.Context, batch *pgx.Batch) (int64, error) 
 // SaveExhibitions upserts scraped listings, keyed by URL.
 func (s *Store) SaveExhibitions(ctx context.Context, found []exhibitions.Exhibition) (int64, error) {
 	const stmt = `
-INSERT INTO exhibitions (url, title, museum, museum_wikidata_id, starts_on, ends_on, location, source_page, scraped_at)
+INSERT INTO exhibitions (url, title, museum, museum_wikidata_id, starts_on, ends_on, location, source_page, scraped_at, permanent)
 VALUES ($1, $2, $3, $4, $5, $6,
         CASE WHEN $7::double precision IS NULL THEN NULL
              ELSE ST_SetSRID(ST_MakePoint($8::double precision, $7::double precision), 4326)::geography END,
-        $9, $10)
+        $9, $10, $11)
 ON CONFLICT (url) DO UPDATE SET
     title      = EXCLUDED.title,
     museum     = EXCLUDED.museum,
     starts_on  = EXCLUDED.starts_on,
     ends_on    = EXCLUDED.ends_on,
+    permanent  = EXCLUDED.permanent,
     location   = coalesce(EXCLUDED.location, exhibitions.location),
     scraped_at = EXCLUDED.scraped_at`
 
@@ -790,7 +791,7 @@ ON CONFLICT (url) DO UPDATE SET
 		// replacing them.
 		args := []any{validUTF8(e.URL), validUTF8(e.Title), validUTF8(e.Museum),
 			validUTF8(e.MuseumWikidataID),
-			e.Start, e.End, lat, lon, validUTF8(e.SourcePage), scraped}
+			e.Start, e.End, lat, lon, validUTF8(e.SourcePage), scraped, e.Permanent}
 
 		queries = append(queries, args)
 		batch.Queue(stmt, args...)
@@ -841,7 +842,7 @@ type ExhibitionHit struct {
 func (s *Store) ExhibitionsNearby(ctx context.Context, lat, lon, radiusKm float64, includeUpcoming bool, limit int) ([]ExhibitionHit, error) {
 	const stmt = `
 SELECT url, title, coalesce(museum,''), coalesce(museum_wikidata_id,''),
-       starts_on, ends_on, coalesce(source_page,''), scraped_at,
+       starts_on, ends_on, coalesce(source_page,''), scraped_at, permanent,
        ST_Y(location::geometry), ST_X(location::geometry),
        ST_Distance(location, $1::geography) / 1000.0 AS distance_km
 FROM exhibitions
@@ -849,6 +850,9 @@ WHERE location IS NOT NULL
   AND ST_DWithin(location, $1::geography, $2)
   AND (ends_on IS NULL OR ends_on >= current_date)
   AND ($3 OR starts_on IS NULL OR starts_on <= current_date)
+-- Soonest to close leads, so a permanent display — which has no closing date
+-- and will still be there next year — sorts behind everything a visitor could
+-- miss, and gives way first when the limit is reached.
 ORDER BY ends_on NULLS LAST, distance_km
 LIMIT $4`
 
@@ -868,15 +872,17 @@ LIMIT $4`
 			lat, lon *float64
 		)
 		if err := rows.Scan(&hit.URL, &hit.Title, &hit.Museum, &hit.MuseumWikidataID,
-			&hit.Start, &hit.End, &hit.SourcePage, &hit.ScrapedAt,
+			&hit.Start, &hit.End, &hit.SourcePage, &hit.ScrapedAt, &hit.Permanent,
 			&lat, &lon, &hit.DistanceKm); err != nil {
 			return nil, fmt.Errorf("scan exhibition: %w", err)
 		}
 		if lat != nil && lon != nil {
 			hit.Latitude, hit.Longitude = *lat, *lon
 		}
-		hit.Running = hit.Start == nil || !hit.Start.After(now)
-		hit.Upcoming = hit.Start != nil && hit.Start.After(now)
+		// A permanent display is on today whatever its dates say, and cannot be
+		// upcoming: there is nothing for it to be waiting for.
+		hit.Running = hit.Permanent || hit.Start == nil || !hit.Start.After(now)
+		hit.Upcoming = !hit.Permanent && hit.Start != nil && hit.Start.After(now)
 		hits = append(hits, hit)
 	}
 	return hits, rows.Err()
@@ -1064,45 +1070,134 @@ LIMIT $1`
 	return museums, rows.Err()
 }
 
-// PlaceAtTownCentres gives every unplaced museum the position of the town it is
-// recorded in, and reports how many it placed.
+// maxTownSpreadKm is how far a town's museums may lie from their own centre
+// before that centre is refused as a position for the town's other museums.
 //
-// One statement rather than one per museum. Doing this a row at a time meant
-// 30,400 round trips, each re-running an ST_Collect aggregate over the town's
-// museums, and the database crashed partway through and recovered from its log.
-// Computing the centroids once and joining against them does the same work in
-// seconds without asking the server for it thirty thousand times.
+// The number that matters is not the ideal town radius but the point beyond
+// which a centroid stops describing anywhere. A group whose members are 50 km
+// apart still puts a museum in roughly the right city; a group whose members
+// are 19,000 km apart puts it in the ocean.
+const maxTownSpreadKm = 50
+
+// PlaceAtTownCentres gives every unplaced museum the position of the town it is
+// recorded in. It reports how many it placed and how many earlier approximate
+// positions it discarded.
+//
+// One statement per pass rather than one per museum. Doing this a row at a time
+// meant 30,400 round trips, each re-running an ST_Collect aggregate over the
+// town's museums, and the database crashed partway through and recovered from
+// its log. Computing the centroids once and joining against them does the same
+// work in seconds without asking the server for it thirty thousand times.
 //
 // Positions set here are marked approximate, because they are: the museum is
 // really in that town, but it is not really at that point.
-func (s *Store) PlaceAtTownCentres(ctx context.Context) (int64, error) {
-	const stmt = `
-WITH towns AS (
-    -- The town's leading word, as elsewhere: localities are stored
-    -- administratively ("Gothenburg Municipality", "4th arrondissement of
-    -- Paris"), so the whole string rarely matches between two records.
-    SELECT split_part(locality_normalized, ' ', 1) AS head,
-           ST_Centroid(ST_Collect(location::geometry))::geography AS centre
+//
+// Three things decide whether the centre is anywhere at all.
+//
+// Towns are grouped within a country. Without that, "Kingston" spanned five
+// countries and "Cambridge" four, and their centroids were points in the
+// Atlantic; 3,677 museums were placed that way, including Korean ones off the
+// coast of Spain.
+//
+// Towns are matched by their recorded name first, and only then by one name
+// being a whole-word extension of the other. That second pass exists to merge
+// the administrative forms the sources carry — "Gothenburg" against "Gothenburg
+// Municipality" — and the prefix is what limits it to that. Matching on the
+// leading word alone instead merges "Port Hope" with "Port Colborne", which are
+// different towns 300 km apart, and "South Bend" with South Korea.
+//
+// A group is refused when its own members are spread wider than a city. This is
+// what catches what the first two miss — one country still holds three
+// Springfields, so no centre can stand for "Springfield" and each is placed
+// only from its own fully-qualified name.
+//
+// Centres are computed only from surveyed positions, never from approximate
+// ones, so a run cannot feed on the output of the run before it.
+func (s *Store) PlaceAtTownCentres(ctx context.Context) (placed, discarded int64, err error) {
+	// Earlier approximate positions are cleared first. They are derived, not
+	// sourced — this call recomputes every one it can — and leaving them is
+	// precisely the bug: a museum placed in the sea by a bad grouping stays
+	// there forever, because it is no longer unplaced.
+	const clear = `
+UPDATE museums
+SET location = NULL, location_approximate = false, updated_at = now()
+WHERE location_approximate`
+
+	// Tier 1 keys on the town as recorded; tier 2 keys on its leading word to
+	// find candidates cheaply and then keeps only those that are a whole-word
+	// extension of the museum's own town. Both are scoped to a country and both
+	// must be tight. The tiers run in order, so the looser one is consulted only
+	// for a museum the exact name could not place.
+	const centres = `
+WITH surveyed AS (
+    SELECT lower(country) AS country, locality_normalized AS town, location
     FROM museums
     WHERE location IS NOT NULL
+      AND NOT location_approximate
       AND locality_normalized <> ''
-      AND length(split_part(locality_normalized, ' ', 1)) >= 4
-    GROUP BY 1
+      AND coalesce(country, '') <> ''
+),
+keyed AS (
+    SELECT country, town AS key, town, location FROM surveyed WHERE $1 = 1
+    UNION ALL
+    SELECT country, split_part(town, ' ', 1), town, location FROM surveyed
+    WHERE $1 = 2 AND length(split_part(town, ' ', 1)) >= 4
+),
+centre AS (
+    SELECT country, key, ST_Centroid(ST_Collect(location::geometry))::geography AS point
+    FROM keyed
+    GROUP BY 1, 2
+),
+towns AS (
+    SELECT c.country, c.key, c.point, array_agg(DISTINCT k.town) AS names
+    FROM centre c
+    JOIN keyed k ON k.country = c.country AND k.key = c.key
+    GROUP BY 1, 2, 3
+    HAVING max(ST_Distance(k.location, c.point)) <= $2::double precision * 1000
 )
 UPDATE museums m
-SET location = t.centre,
+SET location = t.point,
     location_approximate = true,
     updated_at = now()
 FROM towns t
 WHERE m.location IS NULL
   AND m.locality_normalized <> ''
-  AND split_part(m.locality_normalized, ' ', 1) = t.head`
+  AND lower(m.country) = t.country
+  AND t.key = CASE WHEN $1 = 1 THEN m.locality_normalized
+                   ELSE split_part(m.locality_normalized, ' ', 1) END
+  AND ($1 = 1 OR EXISTS (
+      SELECT 1 FROM unnest(t.names) AS n
+      -- One name extends the other, on a word boundary: "Gothenburg" and
+      -- "Gothenburg Municipality" are the same town, "Port Hope" and "Port
+      -- Colborne" are not. starts_with rather than LIKE, so a locality
+      -- containing % or _ is compared literally.
+      WHERE starts_with(n, m.locality_normalized || ' ')
+         OR starts_with(m.locality_normalized, n || ' ')))`
 
-	tag, err := s.pool.Exec(ctx, stmt)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("place at town centres: %w", err)
+		return 0, 0, fmt.Errorf("place at town centres: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, clear)
+	if err != nil {
+		return 0, 0, fmt.Errorf("clear approximate positions: %w", err)
+	}
+	discarded = tag.RowsAffected()
+
+	for tier := 1; tier <= 2; tier++ {
+		tag, err := tx.Exec(ctx, centres, tier, maxTownSpreadKm)
+		if err != nil {
+			return 0, 0, fmt.Errorf("place at town centres (pass %d): %w", tier, err)
+		}
+		placed += tag.RowsAffected()
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("place at town centres: %w", err)
+	}
+	return placed, discarded, nil
 }
 
 // Point is a museum reduced to what a map needs to draw it.
@@ -1205,9 +1300,15 @@ WHERE e.museum = g.museum
 //
 // The test is the scraper's own, applied to the URL against the page it was
 // found on, so the two cannot drift apart on what counts as navigation.
+//
+// Permanent displays are exempt. A museum with no programme is recorded from
+// the page that describes it, so its URL and its source page are the same page
+// — which is exactly the shape the navigation test rejects, and here means the
+// opposite of a paging control.
 func (s *Store) PruneNavigationListings(ctx context.Context) (int64, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT url, source_page FROM exhibitions WHERE source_page IS NOT NULL AND source_page <> ''`)
+		`SELECT url, source_page FROM exhibitions
+          WHERE source_page IS NOT NULL AND source_page <> '' AND NOT permanent`)
 	if err != nil {
 		return 0, fmt.Errorf("prune navigation: %w", err)
 	}
