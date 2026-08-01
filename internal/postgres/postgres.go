@@ -158,9 +158,13 @@ ON CONFLICT (identity) DO UPDATE SET
     location      = coalesce(EXCLUDED.location, museums.location),
     updated_at    = now()`
 
+	// The arguments are kept alongside the batch so a failed batch can be
+	// replayed row by row.
+	queries := make([][]any, 0, len(museums))
 	batch := &pgx.Batch{}
+
 	for _, m := range museums {
-		name := strings.TrimSpace(m.Name)
+		name := validUTF8(strings.TrimSpace(m.Name))
 		if name == "" {
 			continue
 		}
@@ -170,28 +174,52 @@ ON CONFLICT (identity) DO UPDATE SET
 			lat, lon = &m.Latitude, &m.Longitude
 		}
 
-		batch.Queue(stmt,
-			m.WikidataID, name, search.Normalize(name), searchText(m), search.Normalize(m.Locality),
-			nullIfEmpty(m.Country),
-			m.Locality, m.Description, m.Website, m.WikipediaURL, m.PageID,
-			m.SourcePage, textArray(m.AlsoKnownAs), normalizedAliases(m.AlsoKnownAs),
-			textArray(m.Sources), m.Verified,
-			m.Sitelinks, m.Address.Street(), m.Address.Postcode, lat, lon)
+		// Museum names come from Wikipedia wikitext, OpenStreetMap tags and
+		// SPARQL results, none of which guarantee valid UTF-8. Postgres rejects
+		// the byte sequence outright, and in a batch it rejects every row sent
+		// alongside it.
+		args := []any{
+			validUTF8(m.WikidataID), name, search.Normalize(name), validUTF8(searchText(m)),
+			search.Normalize(m.Locality),
+			nullIfEmpty(validUTF8(m.Country)),
+			validUTF8(m.Locality), validUTF8(m.Description), validUTF8(m.Website),
+			validUTF8(m.WikipediaURL), m.PageID,
+			validUTF8(m.SourcePage), validUTF8Each(textArray(m.AlsoKnownAs)),
+			validUTF8Each(normalizedAliases(m.AlsoKnownAs)),
+			validUTF8Each(textArray(m.Sources)), m.Verified,
+			m.Sitelinks, validUTF8(m.Address.Street()), validUTF8(m.Address.Postcode), lat, lon,
+		}
+
+		queries = append(queries, args)
+		batch.Queue(stmt, args...)
 	}
 	if batch.Len() == 0 {
 		return 0, nil
 	}
 
-	results := s.pool.SendBatch(ctx, batch)
-	defer results.Close()
+	written, err := s.execBatch(ctx, batch)
+	if err == nil {
+		return written, nil
+	}
 
-	var written int64
-	for range batch.Len() {
-		tag, err := results.Exec()
-		if err != nil {
-			return written, fmt.Errorf("save museums: %w", err)
+	// pgx runs a batch in an implicit transaction, so one rejected row rolls
+	// back every row sent with it — 2,000 museums lost to one bad record. The
+	// retry costs a round trip per row, but only on a batch that failed, and it
+	// confines the damage to the row that caused it.
+	log.Printf("postgres: museum batch failed (%v); retrying rows individually", err)
+
+	written = 0
+	var rejected int
+	for _, queued := range queries {
+		tag, rowErr := s.pool.Exec(ctx, stmt, queued...)
+		if rowErr != nil {
+			rejected++
+			continue
 		}
 		written += tag.RowsAffected()
+	}
+	if rejected > 0 {
+		log.Printf("postgres: %d of %d museums rejected", rejected, len(queries))
 	}
 	return written, nil
 }
@@ -370,6 +398,15 @@ func validUTF8(s string) string {
 		return s
 	}
 	return strings.ToValidUTF8(s, "�")
+}
+
+// validUTF8Each cleans every element of an array bound for a text[] column. One
+// bad alias rejects the whole row, and with it the whole batch.
+func validUTF8Each(values []string) []string {
+	for i, v := range values {
+		values[i] = validUTF8(v)
+	}
+	return values
 }
 
 // textArray makes a slice safe to send to a NOT NULL array column. A nil Go

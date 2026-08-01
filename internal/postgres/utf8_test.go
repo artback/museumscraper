@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"museum/internal/models"
 	"strings"
 	"testing"
 	"time"
@@ -83,5 +84,46 @@ func TestSaveExhibitions_SurvivesInvalidUTF8(t *testing.T) {
 	}
 	if !repaired {
 		t.Error("the mis-encoded title was not stored with its readable part intact")
+	}
+}
+
+// One museum with a mis-encoded name must not take the batch down with it.
+//
+// pgx runs a batch in an implicit transaction, so a single rejected row rolls
+// back every row queued alongside it. That is the mechanism that turned one bad
+// title into 9,148 lost exhibitions, and SaveMuseums had the same shape: a
+// crawl batches 2,000 museums at a time.
+func TestSaveMuseums_SurvivesInvalidUTF8(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	// 0xC1 0x54 is the byte pair that actually failed a run: Latin-1 text
+	// served without declaring its charset.
+	bad := string([]byte{0x43, 0xC1, 0x54, 0x65})
+
+	museums := []models.Museum{
+		{Name: "Good Museum One", Country: "Sweden", WikidataID: "Q1"},
+		{Name: "Mus" + bad + "um", Country: "Sweden", WikidataID: "Q2",
+			Description: "desc " + bad, AlsoKnownAs: []string{"alias " + bad}},
+		{Name: "Good Museum Two", Country: "Sweden", WikidataID: "Q3"},
+	}
+
+	written, err := store.SaveMuseums(ctx, museums)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if written != 3 {
+		t.Errorf("written = %d, want all 3 — a bad row must not cost its neighbours", written)
+	}
+
+	// The good records either side must be present and unharmed.
+	for _, want := range []string{"Good Museum One", "Good Museum Two"} {
+		page, err := store.Search(ctx, want, 1, 0)
+		if err != nil {
+			t.Fatalf("search %q: %v", want, err)
+		}
+		if len(page.Hits) == 0 || page.Hits[0].Museum.Name != want {
+			t.Errorf("%q was lost alongside the mis-encoded record", want)
+		}
 	}
 }
