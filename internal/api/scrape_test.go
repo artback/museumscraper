@@ -149,6 +149,59 @@ func TestScrapeReadsSeveralAreasAtOnce(t *testing.T) {
 	}
 }
 
+// A small area must not wait for a large one to finish.
+//
+// Handing a whole area to a worker meant the unit of scheduling was the area,
+// and the areas are wildly different sizes: a hamlet with two museums sat
+// behind a capital with a hundred and twenty and waited out all of them, though
+// its own share of the work was seconds. The dispatcher takes one site from
+// each waiting area in turn, so the small one is done in a couple of rounds.
+func TestScrapeTakesSitesFromEveryAreaInTurn(t *testing.T) {
+	area := func(cell string, sites int) *scrapeArea {
+		museums := make([]models.Museum, sites)
+		for i := range museums {
+			museums[i] = models.Museum{Name: cell, Website: "https://example.invalid/"}
+		}
+		return &scrapeArea{cell: cell, museums: museums}
+	}
+
+	// Only the dispatcher: no workers, so this test reads the jobs itself and
+	// sees the order they are handed out in.
+	q := &scrapeQueue{
+		ready: make(chan *scrapeArea),
+		jobs:  make(chan scrapeJob),
+		stop:  make(chan struct{}),
+	}
+	q.wg.Add(1)
+	go q.dispatch()
+	defer q.close()
+
+	big, small := area("big", 120), area("small", 2)
+	q.ready <- big
+	q.ready <- small
+
+	// Within the first handful of sites handed out, the small area has to be
+	// finished. Before, its first site came after the big area's hundred and
+	// twentieth.
+	const patience = 6
+	var smallSeen int
+	for i := range patience {
+		select {
+		case job := <-q.jobs:
+			if job.area == small {
+				smallSeen++
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the dispatcher stopped handing out work after %d sites", i)
+		}
+		if smallSeen == len(small.museums) {
+			return
+		}
+	}
+	t.Errorf("after %d sites the small area had %d of its %d read; it is waiting for the large one",
+		patience, smallSeen, len(small.museums))
+}
+
 // haversineKm is the great-circle distance, for checking coverage in the test's
 // own terms rather than the implementation's.
 func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {

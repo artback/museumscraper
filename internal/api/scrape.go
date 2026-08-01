@@ -35,19 +35,26 @@ const (
 	scrapeCooldown   = 24 * time.Hour
 	scrapeJobTimeout = 15 * time.Minute
 
-	// scrapeWorkers is how many areas are read at once, and scrapeConcurrency
-	// how many sites within each. Their product is the number of fetches that
-	// can be in flight, which is not what politeness is measured in.
+	// scrapeSiteWorkers is how many museum websites are read at once, across
+	// every area together rather than within one.
 	//
 	// What protects a museum's server is the fetcher's own rule of one request
 	// per host per second. That gate is held under a mutex on the Fetcher this
 	// queue shares between every area it reads, so a site's load is the same
-	// whether one area is being read or five — the requests queue up behind the
-	// same per-host clock either way. Serialising whole areas on top of that
-	// protected nobody: two cities have no websites in common, and the second
-	// visitor waited three minutes for the first visitor's city to finish.
-	scrapeWorkers     = 3
-	scrapeConcurrency = 10
+	// whether the workers reading it came from one area or six — the requests
+	// queue up behind the same per-host clock either way. This number is
+	// therefore about our own resources, not about politeness.
+	scrapeSiteWorkers = 24
+
+	// scrapeAdmitters is how many areas can be looked up in the database at
+	// once. Small: it is one indexed query per area, and it only has to keep
+	// ahead of the site workers.
+	scrapeAdmitters = 3
+
+	// scrapeStoreBatch is how many exhibitions are held before writing. A
+	// scrape that only persists at the end loses everything if anything goes
+	// wrong before it gets there.
+	scrapeStoreBatch = 128
 
 	scrapeCellDegrees  = 0.25 // areas are rounded to this grid before dedup
 	scrapeMinZoomRadiu = 60.0 // km; wider than a city is not a scrape target
@@ -108,17 +115,46 @@ type scrapeProgress struct {
 	started time.Time
 }
 
-// scrapeQueue reads several areas at once, bounded, sharing one scraper.
+// scrapeArea is one area being read: the sites still to visit, and the results
+// coming back from them.
+//
+// sent is touched only by the dispatcher, so it needs no lock.
+type scrapeArea struct {
+	cell    string
+	ctx     context.Context
+	cancel  context.CancelFunc
+	museums []models.Museum
+	sent    int
+	// results is buffered to the full site count so a worker can always deposit
+	// its result and move on, even if the area's collector has stopped.
+	results chan []exhibitions.Exhibition
+}
+
+// scrapeJob is one museum website for one worker to read.
+type scrapeJob struct {
+	area   *scrapeArea
+	museum models.Museum
+}
+
+// scrapeQueue reads museum websites from every waiting area at once, taking one
+// site from each area in turn.
+//
+// The unit of scheduling is the site rather than the area, because the areas
+// are wildly different sizes. Giving a whole worker to an area meant a hamlet
+// with two museums sat behind a capital with a hundred and twenty and waited
+// for all of them, even though its own share of the work was seconds. Taking
+// turns site by site, the small area is finished within a couple of rounds
+// whatever else is running.
 //
 // One scraper between all of them is what keeps this polite: the per-host clock
-// lives on it, so adding workers adds no load to any single museum's server. It
-// only stops one visitor's city from being read before another visitor's city
-// can start.
+// lives on it, so more workers add no load to any single museum's server.
 type scrapeQueue struct {
 	store   Harvester
 	scraper *exhibitions.Scraper
 
 	requests chan scrapeRequest
+	ready    chan *scrapeArea
+	jobs     chan scrapeJob
 
 	mu    sync.Mutex
 	state map[string]scrapeState
@@ -137,14 +173,23 @@ func newScrapeQueue(store Harvester) *scrapeQueue {
 		store:    store,
 		scraper:  exhibitions.NewScraper(),
 		requests: make(chan scrapeRequest, scrapeQueueDepth),
+		ready:    make(chan *scrapeArea),
+		jobs:     make(chan scrapeJob),
 		state:    make(map[string]scrapeState),
 		done:     make(map[string]time.Time),
 		progress: make(map[string]*scrapeProgress),
 		stop:     make(chan struct{}),
 	}
-	q.wg.Add(scrapeWorkers)
-	for range scrapeWorkers {
-		go q.run()
+
+	q.wg.Add(1)
+	go q.dispatch()
+	q.wg.Add(scrapeAdmitters)
+	for range scrapeAdmitters {
+		go q.admit()
+	}
+	q.wg.Add(scrapeSiteWorkers)
+	for range scrapeSiteWorkers {
+		go q.work()
 	}
 	return q
 }
@@ -234,7 +279,12 @@ func (q *scrapeQueue) status(lat, lon float64) (scrapeState, scrapeProgress) {
 	return state, scrapeProgress{}
 }
 
-func (q *scrapeQueue) run() {
+// admit turns a requested area into the list of sites it means, and hands that
+// to the dispatcher.
+//
+// Separate from the dispatcher because it talks to the database: a slow query
+// here must not stop sites already in flight from being handed out.
+func (q *scrapeQueue) admit() {
 	defer q.wg.Done()
 
 	for {
@@ -242,90 +292,204 @@ func (q *scrapeQueue) run() {
 		case <-q.stop:
 			return
 		case req := <-q.requests:
-			q.mu.Lock()
-			q.state[req.cell] = scrapeRunning
-			q.progress[req.cell] = &scrapeProgress{started: time.Now()}
-			q.mu.Unlock()
-
-			q.scrape(req)
-
-			q.mu.Lock()
-			delete(q.state, req.cell)
-			delete(q.progress, req.cell)
-			q.done[req.cell] = time.Now()
-			q.mu.Unlock()
+			q.prepare(req)
 		}
 	}
 }
 
-// scrape reads one area's museum sites and stores what it finds.
-func (q *scrapeQueue) scrape(req scrapeRequest) {
+// prepare looks up one area's sites and starts collecting for it.
+func (q *scrapeQueue) prepare(req scrapeRequest) {
 	// Detached from any request: the visitor who triggered this has long since
 	// had their response, and the work should not die with their connection.
 	ctx, cancel := context.WithTimeout(context.Background(), scrapeJobTimeout)
-	defer cancel()
 
 	museums, err := q.store.MuseumsWithWebsitesNear(ctx, req.lat, req.lon, req.radiusKm, scrapeMaxMuseums)
 	if err != nil {
+		// No cooldown on a failure. The cooldown means "this has been read
+		// recently", and a database that was briefly unavailable has not read
+		// anything — leaving it set would block the area for a day over a
+		// hiccup that lasted a second.
 		log.Printf("scrape %s: %v", req.cell, err)
+		q.release(req.cell, false)
+		cancel()
 		return
 	}
-	// Deduplicated here rather than left to Stream, which does it silently:
-	// several museums can share one website, and a total that counts them
-	// separately is a progress bar that stops short of the end.
+	// Deduplicated before the count is published: several museums can share one
+	// website, and a total that counts them separately is a progress bar that
+	// stops short of the end.
 	museums = exhibitions.UniqueBySite(museums)
 	if len(museums) == 0 {
+		q.release(req.cell, true)
+		cancel()
 		return
 	}
 
-	q.setProgress(req.cell, func(p *scrapeProgress) { p.Sites = len(museums) })
+	q.mu.Lock()
+	q.state[req.cell] = scrapeRunning
+	q.progress[req.cell] = &scrapeProgress{Sites: len(museums), started: time.Now()}
+	q.mu.Unlock()
+
+	area := &scrapeArea{
+		cell:    req.cell,
+		ctx:     ctx,
+		cancel:  cancel,
+		museums: museums,
+		results: make(chan []exhibitions.Exhibition, len(museums)),
+	}
+
+	q.wg.Add(1)
+	go q.collect(area)
+
+	select {
+	case q.ready <- area:
+	case <-q.stop:
+		cancel()
+	}
+}
+
+// dispatch hands out one site at a time, taking areas in turn.
+//
+// Round-robin rather than first-come: an area's place in the queue should not
+// decide how long a different, smaller area waits.
+func (q *scrapeQueue) dispatch() {
+	defer q.wg.Done()
+	// Closing this is what tells the workers to stop, so it has to happen on
+	// every exit from here.
+	defer close(q.jobs)
+
+	var areas []*scrapeArea
+	turn := 0
+
+	for {
+		// A nil channel blocks forever in a select, which is exactly what is
+		// wanted while there is nothing to hand out.
+		var offer chan scrapeJob
+		var job scrapeJob
+		if len(areas) > 0 {
+			area := areas[turn]
+			job = scrapeJob{area: area, museum: area.museums[area.sent]}
+			offer = q.jobs
+		}
+
+		select {
+		case <-q.stop:
+			return
+		case area := <-q.ready:
+			areas = append(areas, area)
+		case offer <- job:
+			area := areas[turn]
+			area.sent++
+			if area.sent == len(area.museums) {
+				// Fully handed out. Its collector goes on working; there is
+				// simply nothing left here to give anyone.
+				areas = append(areas[:turn], areas[turn+1:]...)
+			} else {
+				turn++
+			}
+			if turn >= len(areas) {
+				turn = 0
+			}
+		}
+	}
+}
+
+// work reads one museum website at a time, for whichever area it was given.
+func (q *scrapeQueue) work() {
+	defer q.wg.Done()
+
+	for job := range q.jobs {
+		found, err := q.scraper.ForMuseum(job.area.ctx, job.museum)
+		if err != nil && !errors.Is(err, exhibitions.ErrNoWebsite) {
+			log.Printf("scrape %s: %s: %v", job.area.cell, job.museum.Name, err)
+		}
+		// Never blocks: the channel holds one slot per site in the area.
+		job.area.results <- found
+	}
+}
+
+// collect gathers one area's results, stores them as they arrive, and finishes
+// the area off.
+//
+// One of these per area, so the batching and the deduplication belong to that
+// area alone even though the workers filling it are shared with every other.
+func (q *scrapeQueue) collect(area *scrapeArea) {
+	defer q.wg.Done()
+	defer area.cancel()
 
 	start := time.Now()
 	var found, stored int
 
-	// Stored in batches as they arrive, for the same reason the command-line
-	// refresh does: a scrape that only persists at the end loses everything if
-	// anything goes wrong before it gets there.
-	buffer := make([]exhibitions.Exhibition, 0, 128)
+	// Deduplicated by URL within the area, because sites cross-list: one
+	// venue's programme page carries entries another venue's site also shows.
+	seen := make(map[string]struct{})
+	buffer := make([]exhibitions.Exhibition, 0, scrapeStoreBatch)
+
 	flush := func() {
 		if len(buffer) == 0 {
 			return
 		}
-		n, err := q.store.SaveExhibitions(ctx, buffer)
+		n, err := q.store.SaveExhibitions(area.ctx, buffer)
 		if err != nil {
-			log.Printf("scrape %s: storing: %v", req.cell, err)
+			log.Printf("scrape %s: storing: %v", area.cell, err)
 		}
 		stored += int(n)
 		buffer = buffer[:0]
 	}
 
-	// Stream calls this once per site, whether or not that site had anything,
-	// so counting the calls is counting the sites read.
-	q.scraper.Stream(ctx, museums, scrapeConcurrency, func(batch []exhibitions.Exhibition) {
-		found += len(batch)
-		buffer = append(buffer, batch...)
-		if len(buffer) >= 128 {
+	for range area.museums {
+		select {
+		case <-q.stop:
+			// Keep what has already been read rather than discarding it.
 			flush()
+			return
+		case batch := <-area.results:
+			for _, e := range batch {
+				if e.URL == "" {
+					continue
+				}
+				if _, dup := seen[e.URL]; dup {
+					continue
+				}
+				seen[e.URL] = struct{}{}
+				buffer = append(buffer, e)
+				found++
+			}
+			if len(buffer) >= scrapeStoreBatch {
+				flush()
+			}
+			q.setProgress(area.cell, func(p *scrapeProgress) { p.Read++; p.Found = found })
 		}
-		q.setProgress(req.cell, func(p *scrapeProgress) { p.Read++; p.Found = found })
-	})
+	}
 	flush()
 
-	if _, err := q.store.PruneNavigationListings(ctx); err != nil {
-		log.Printf("scrape %s: pruning: %v", req.cell, err)
+	if _, err := q.store.PruneNavigationListings(area.ctx); err != nil {
+		log.Printf("scrape %s: pruning: %v", area.cell, err)
 	}
-	if _, err := q.store.MergeDuplicateExhibitions(ctx); err != nil {
-		log.Printf("scrape %s: merging: %v", req.cell, err)
+	if _, err := q.store.MergeDuplicateExhibitions(area.ctx); err != nil {
+		log.Printf("scrape %s: merging: %v", area.cell, err)
 	}
 
 	log.Printf("scrape %s: %d sites, %d exhibitions found, %d stored, %s",
-		req.cell, len(museums), found, stored, time.Since(start).Round(time.Second))
+		area.cell, len(area.museums), found, stored, time.Since(start).Round(time.Second))
+
+	q.release(area.cell, true)
 }
 
-// setProgress edits one area's progress under the lock. Stream calls the
-// collector from one goroutine at a time, but every request asking how far
-// along the area is reads this from another, and other areas are being read
-// alongside it.
+// release lets go of an area, either recording that it has just been read or
+// leaving it free to be asked for again.
+func (q *scrapeQueue) release(cell string, scraped bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.state, cell)
+	delete(q.progress, cell)
+	if scraped {
+		q.done[cell] = time.Now()
+	}
+}
+
+// setProgress edits one area's progress under the lock. Its collector is the
+// only writer, but every request asking how far along the area is reads this
+// from another goroutine.
 func (q *scrapeQueue) setProgress(cell string, edit func(*scrapeProgress)) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -334,7 +498,7 @@ func (q *scrapeQueue) setProgress(cell string, edit func(*scrapeProgress)) {
 	}
 }
 
-// close stops the worker and waits for the job in flight.
+// close stops every worker and waits for the work in flight.
 func (q *scrapeQueue) close() {
 	close(q.stop)
 	q.wg.Wait()
