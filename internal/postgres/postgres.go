@@ -1103,3 +1103,46 @@ WHERE m.location IS NULL
 	}
 	return tag.RowsAffected(), nil
 }
+
+// Point is a museum reduced to what a map needs to draw it.
+type Point struct {
+	ID  int64
+	Lat float64
+	Lon float64
+}
+
+// Points returns museum positions for drawing, most prominent first.
+//
+// The ordinary radius query caps at 500 hits and carries a dozen fields per
+// museum, which is right for a list and wrong for a map: a world view wants
+// tens of thousands of positions and nothing else. Ordering by prominence means
+// a truncated view shows the museums worth seeing at that scale rather than an
+// arbitrary subset, and zooming in narrows the box until everything local fits.
+//
+// An empty box means the whole world.
+func (s *Store) Points(ctx context.Context, west, south, east, north float64, hasBox bool, limit int) ([]Point, error) {
+	const stmt = `
+SELECT id, ST_Y(location::geometry), ST_X(location::geometry)
+FROM museums
+WHERE location IS NOT NULL
+  AND (NOT $1::boolean
+       OR ST_Intersects(location::geometry, ST_MakeEnvelope($2, $3, $4, $5, 4326)))
+ORDER BY sitelinks DESC, id
+LIMIT $6`
+
+	rows, err := s.pool.Query(ctx, stmt, hasBox, west, south, east, north, limit)
+	if err != nil {
+		return nil, fmt.Errorf("points: %w", err)
+	}
+	defer rows.Close()
+
+	points := make([]Point, 0, min(limit, 4096))
+	for rows.Next() {
+		var p Point
+		if err := rows.Scan(&p.ID, &p.Lat, &p.Lon); err != nil {
+			return nil, fmt.Errorf("scan point: %w", err)
+		}
+		points = append(points, p)
+	}
+	return points, rows.Err()
+}

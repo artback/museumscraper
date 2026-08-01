@@ -491,6 +491,28 @@ Later sources fill gaps without overwriting established facts, with one exceptio
 
 ---
 
+## The map
+
+```bash
+docker compose up -d api
+open http://localhost:8090/map
+```
+
+A globe of the whole catalogue: drag to spin, scroll to zoom, click a museum
+for its details and what is on there, and search from the box in the top left.
+
+It has no basemap and loads no tiles, fonts or libraries — the only thing it
+talks to is this API, so it works with no internet connection. It can afford
+that because at 154,000 placed museums the points draw the coastlines
+themselves, which is also the most honest picture of where the catalogue is
+thin: the Sahara, Siberia and central Australia are genuinely empty, not
+missing.
+
+Zoomed out it shows the 40,000 most prominent museums, since that is as many as
+is worth drawing at that scale; zooming in narrows the query to the visible box
+until everything local is on screen. `GET /v1/points?bbox=w,s,e,n` is the
+endpoint behind it, returning flat `[id, lat, lon]` triples.
+
 ## Backups and durability
 
 Postgres, MinIO and Kafka each write to a named Docker volume, so the data

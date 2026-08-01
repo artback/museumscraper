@@ -56,6 +56,17 @@ func (f *fakeCatalogue) MuseumByID(_ context.Context, id string) (postgres.Hit, 
 	return postgres.Hit{}, postgres.ErrNotFound
 }
 
+func (f *fakeCatalogue) Points(_ context.Context, _, _, _, _ float64, _ bool, limit int) ([]postgres.Point, error) {
+	f.lastLimit = limit
+	points := make([]postgres.Point, 0, len(f.nearby))
+	for _, hit := range f.nearby {
+		points = append(points, postgres.Point{
+			ID: hit.ID, Lat: hit.Museum.Latitude, Lon: hit.Museum.Longitude,
+		})
+	}
+	return points, f.err
+}
+
 func (f *fakeCatalogue) ExhibitionCoverage(context.Context, float64, float64, float64) (postgres.Coverage, error) {
 	return f.coverage, f.err
 }

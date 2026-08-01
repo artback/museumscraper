@@ -56,6 +56,7 @@ type Catalogue interface {
 	NearbyVerified(ctx context.Context, lat, lon, radiusKm float64, limit, offset int, verifiedOnly bool) (postgres.Page, error)
 	Search(ctx context.Context, query string, limit, offset int) (postgres.Page, error)
 	MuseumByID(ctx context.Context, id string) (postgres.Hit, error)
+	Points(ctx context.Context, west, south, east, north float64, hasBox bool, limit int) ([]postgres.Point, error)
 	ExhibitionsNearby(ctx context.Context, lat, lon, radiusKm float64, includeUpcoming bool, limit int) ([]postgres.ExhibitionHit, error)
 	ExhibitionCoverage(ctx context.Context, lat, lon, radiusKm float64) (postgres.Coverage, error)
 	Counts(ctx context.Context) (postgres.Counts, error)
@@ -101,6 +102,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /v1/museums", s.handleMuseums)
 	mux.HandleFunc("GET /v1/museums/{id}", s.handleMuseum)
+	mux.HandleFunc("GET /v1/points", s.handlePoints)
+	mux.HandleFunc("GET /map", s.handleMap)
+	mux.HandleFunc("GET /{$}", s.handleMap)
 	mux.HandleFunc("GET /v1/exhibitions", s.handleExhibitions)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
 
@@ -470,6 +474,85 @@ func (s *Server) handleMuseums(w http.ResponseWriter, r *http.Request) {
 		Museums: museums,
 		Query:   echo(q),
 	})
+}
+
+// maxPoints bounds a map request. Enough to draw the world — the museums are
+// dense enough that at this count they trace the coastlines themselves — while
+// keeping the response to a few megabytes on a local connection.
+const maxPoints = 40_000
+
+// handlePoints returns museum positions for drawing.
+func (s *Server) handlePoints(w http.ResponseWriter, r *http.Request) {
+	values := r.URL.Query()
+
+	limit := maxPoints
+	if raw := values.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			writeError(w, http.StatusBadRequest, errors.New("limit must be a positive whole number"))
+			return
+		}
+		limit = min(parsed, maxPoints)
+	}
+
+	west, south, east, north, hasBox, err := parseBBox(values.Get("bbox"))
+	if err != nil {
+		writeQueryError(w, r, err)
+		return
+	}
+
+	points, err := s.catalogue.Points(r.Context(), west, south, east, north, hasBox, limit)
+	if err != nil {
+		writeServerError(w, r, err)
+		return
+	}
+
+	// Flat triples rather than objects: forty thousand museums as
+	// {"id":…,"lat":…,"lon":…} is several times the size for the same numbers,
+	// and every byte of it crosses the wire before the map can draw.
+	flat := make([][3]float64, 0, len(points))
+	for _, p := range points {
+		flat = append(flat, [3]float64{float64(p.ID), p.Lat, p.Lon})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":     len(flat),
+		"truncated": len(flat) == limit,
+		"points":    flat,
+	})
+}
+
+// parseBBox reads "west,south,east,north" in degrees.
+func parseBBox(raw string) (west, south, east, north float64, ok bool, err error) {
+	if raw == "" {
+		return 0, 0, 0, 0, false, nil
+	}
+
+	parts := strings.Split(raw, ",")
+	if len(parts) != 4 {
+		return 0, 0, 0, 0, false, errors.New("bbox must be west,south,east,north")
+	}
+
+	values := make([]float64, 4)
+	for i, part := range parts {
+		parsed, parseErr := strconv.ParseFloat(strings.TrimSpace(part), 64)
+		if parseErr != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return 0, 0, 0, 0, false, errors.New("bbox values must be numbers")
+		}
+		values[i] = parsed
+	}
+
+	west, south, east, north = values[0], values[1], values[2], values[3]
+	if south > north {
+		south, north = north, south
+	}
+	// Clamped rather than rejected: a map dragged past the pole produces
+	// out-of-range latitudes constantly, and refusing them would make the view
+	// stutter at the edges for no benefit.
+	south, north = math.Max(south, -90), math.Min(north, 90)
+	west, east = math.Max(west, -180), math.Min(east, 180)
+
+	return west, south, east, north, true, nil
 }
 
 // handleMuseum returns one museum by id, so a result can be linked to.
