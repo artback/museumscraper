@@ -222,6 +222,12 @@ Scraping twenty museum websites takes about **16 seconds**, and politeness limit
 
 A refresh replaces only the entries for the museums it just scraped, so a run scoped to one city does not wipe another city's results out of a shared cell.
 
+**Permanent displays are collected too, and marked `permanent`.** Most museums are not the Tate: they run no temporary programme at all, and reading their sites for dated listings returned nothing — which in a result set is indistinguishable from having nothing to see. Radiomuseet in Göteborg has no exhibitions page, no calendar and no date anywhere on its site, and rooms full of radios.
+
+A display is taken as permanent when something says so — the entry's own text, its URL, or the heading of the page listing it — or when its closing date is too far off to be one, which is how a content system writes "no end" (the Technisches Museum Wien closes its permanent halls in the year 3000). A site that lists nothing at all is recorded once, as itself, pointing at the page that describes what it holds. Permanent entries carry no closing date, so they sort behind everything a visitor could miss and give way first when a result limit is reached.
+
+Two readers run on every listing page. The first infers exhibitions from markup written for people, and is language-bound at every step; the second reads schema.org JSON-LD and `<time datetime>` attributes, which are ISO-8601 and identical in every language, and is believed over the first where it exists. Few sites publish either, but where they do the result is exact rather than inferred — reading them took the Technisches Museum Wien from 3 exhibitions to 15.
+
 ### `museum serve` — the HTTP API
 
 ```bash
@@ -438,6 +444,7 @@ The pipeline reproduces what its sources say, and sources contain errors that no
 | `null-island` | error | Coordinates within 1 km of 0,0 — a failed parse, not a location |
 | `exhibition-ends-before-it-starts` | error | Reversed date range |
 | `exhibition-title-is-boilerplate` | error | A "Find out more" button label used as a title |
+| `exhibition-permanent-but-ends` | error | Marked always-on yet carrying a closing date |
 | `no-coordinates` | warning | Cannot be found by any location query |
 | `unknown-country` | warning | Cannot be grouped or keyed reliably |
 | `duplicate-record` | warning | Two records share a name and country |
@@ -652,7 +659,18 @@ fields rather than one display string so a caller can use the parts it needs:
       "distance_km": 1.42,
       "end": "2027-01-03T00:00:00Z",
       "running": true,
+      "permanent": false,
       "scraped_at": "2026-07-27T22:25:24Z"
+    },
+    {
+      "title": "medien.welten",
+      "url": "https://www.technischesmuseum.at/ausstellung/medienwelten",
+      "museum": "Technisches Museum Wien",
+      "distance_km": 3.10,
+      "start": "2020-11-07T00:00:00Z",
+      "running": true,
+      "permanent": true,
+      "scraped_at": "2026-08-01T09:14:02Z"
     }
   ],
   "query": { "lat": 51.5074, "lon": -0.1278, "radius_km": 2, "limit": 50 }
@@ -665,13 +683,17 @@ fields rather than one display string so a caller can use the parts it needs:
 
 No open catalogue carries current exhibitions. Wikidata holds **411,771** exhibition items, but a query for those with an end date in the future returns **40** worldwide — they are a historical record, not a listings feed. OpenStreetMap has no notion of a temporary exhibition at all. The only place a museum reliably publishes its programme is its own website.
 
-Almost none publish structured data either: of five major museums sampled, one emitted any JSON-LD, and only for `WebPage`. So extraction is structural:
+Few publish structured data either — three of thirty-four museums surveyed across nine countries declared their exhibitions in schema.org JSON-LD. Where they do, it is read first and believed: it gives the title, the URL and ISO-8601 dates, none of which change with the language the site is written in. `<time datetime="…">` attributes are read the same way and are commoner, which is what lets a Danish or Czech listing be dated at all — the month-name table knows ten languages and never will know the rest.
+
+For everything else, extraction is structural:
 
 1. Find the programme page — links the home page offers, then conventional paths (`/whats-on`, `/exhibitions`, `/ausstellungen`, `/expositions`, …).
 2. Take links that go deeper into the site on an exhibition-shaped path. A site that files exhibitions under `/exhibition/` and talks under `/event/` is trusted to mean it — and the *path segments* decide, never the slug, or the Royal Academy's `/event/summer-exhibition-friday-lates-djs` reads as an exhibition.
 3. Read the title from `aria-label`, then `title`, then an inner heading, then the flattened link text. Cards wrap an image, a type label, the venue and the dates in one link, so the flattened text is a poor title. Where the link is a "Find out more" button, the title comes from the URL slug.
 4. Read dates from the link and its immediate card — never a larger ancestor, or sibling cards contribute each other's dates.
 5. Drop anything already closed, and anything labelled a tour, workshop, concert or lecture.
+
+An entry with no readable dates is dropped: that rule is what separates an exhibition from the hundreds of other links on a listing page. Permanent displays are the exception, and have to be named one to be kept — by their own text, their URL, or the heading of the page listing them. A site that lists nothing at all is recorded once as itself, from the page describing what it holds, which is the only entry most small museums will ever have.
 
 Museums sharing a website are scraped once: institutions nest, and the Musée Charles X carries `louvre.fr` as its site.
 

@@ -12,11 +12,58 @@ import (
 type DateRange struct {
 	Start *time.Time
 	End   *time.Time
+
+	// Permanent is set when the display is always on rather than running to a
+	// closing date. The opening date may still be known and is kept; the
+	// closing date is absent because there is not one.
+	//
+	// Reading "Permanent" as a start date of today, which is what this
+	// replaced, re-dated every such display to the day the scrape happened to
+	// run: the Zeppelin Museum's technical tour and the Technisches Museum's
+	// "Wissenschaft im Wandel" were both recorded as having opened this
+	// morning, every morning.
+	Permanent bool
 }
+
+// farFutureYears is how far ahead a closing date may be before it stops being
+// a date and starts being a way of writing "no end".
+//
+// Ten years matches the horizon the catalogue audit already calls implausible,
+// so the two agree on what a real closing date looks like.
+const farFutureYears = 10
+
+// resolveOpenEnd turns a closing date too distant to be meant literally into
+// permanence.
+//
+// A content system needs something in the end-date field, so a permanent
+// exhibition is given one. The Technisches Museum Wien's schema.org data
+// closes medien.welten on 1 September 3000 and its energy hall on 31 December
+// 3000. Read literally those are exhibitions running for a thousand years,
+// which sorts them in front of everything that genuinely closes next month —
+// the exact opposite of what a visitor deciding what to catch needs.
+//
+// The convention costs nothing to read and holds in every language, because
+// the year is a number wherever the page is written.
+func (r DateRange) resolveOpenEnd(now time.Time) DateRange {
+	if r.Permanent || r.End == nil {
+		return r
+	}
+	if r.End.Sub(now).Hours()/24/365.25 <= farFutureYears {
+		return r
+	}
+	return DateRange{Start: r.Start, Permanent: true}
+}
+
+// Known reports whether anything at all could be read about when the display
+// is on, whether that is a date or the fact that it has none.
+func (r DateRange) Known() bool { return !r.IsZero() || r.Permanent }
 
 // Runs reports whether the range covers the given day. A missing bound is
 // treated as open — "Until 3 Jan 2027" runs from now until then.
 func (r DateRange) Runs(on time.Time) bool {
+	if r.Permanent {
+		return true
+	}
 	day := time.Date(on.Year(), on.Month(), on.Day(), 0, 0, 0, 0, time.UTC)
 	if r.Start != nil && day.Before(*r.Start) {
 		return false
@@ -107,9 +154,7 @@ func ParseDateRange(text string, now time.Time) DateRange {
 	}
 
 	if ongoing.MatchString(text) {
-		// A permanent display is running today and has no end.
-		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-		return DateRange{Start: &start}
+		return DateRange{Permanent: true}
 	}
 
 	dates := findDates(text, now)
