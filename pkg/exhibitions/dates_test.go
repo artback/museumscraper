@@ -18,6 +18,9 @@ func TestParseDateRange(t *testing.T) {
 		wantStart *time.Time
 		wantEnd   *time.Time
 		wantZero  bool
+		// wantPermanent expects a range that says the display is always on
+		// rather than giving it dates.
+		wantPermanent bool
 	}{
 		{
 			name:      "explicit range with shared year",
@@ -73,14 +76,16 @@ func TestParseDateRange(t *testing.T) {
 			wantStart: nil,
 		},
 		{
-			name:      "ongoing is running with no end",
-			text:      "Ongoing",
-			wantStart: ptr(date(2026, time.July, 27)),
+			// Not "starts today": a permanent display carries no dates, so
+			// that reading re-dated it on every scrape.
+			name:          "ongoing carries no dates",
+			text:          "Ongoing",
+			wantPermanent: true,
 		},
 		{
-			name:      "permanent display",
-			text:      "Permanent collection",
-			wantStart: ptr(date(2026, time.July, 27)),
+			name:          "permanent display",
+			text:          "Permanent collection",
+			wantPermanent: true,
 		},
 		{
 			name:     "no dates at all",
@@ -98,6 +103,18 @@ func TestParseDateRange(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ParseDateRange(tc.text, now)
 
+			if got.Permanent != tc.wantPermanent {
+				t.Fatalf("Permanent = %v, want %v", got.Permanent, tc.wantPermanent)
+			}
+			if tc.wantPermanent {
+				if !got.IsZero() {
+					t.Fatalf("a permanent range should carry no dates, got start=%v end=%v", got.Start, got.End)
+				}
+				if !got.Runs(now) {
+					t.Error("a permanent range should be running")
+				}
+				return
+			}
 			if tc.wantZero {
 				if !got.IsZero() {
 					t.Fatalf("expected no dates, got start=%v end=%v", got.Start, got.End)

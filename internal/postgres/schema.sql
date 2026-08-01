@@ -196,3 +196,13 @@ CREATE INDEX IF NOT EXISTS museums_aliases_normalized_idx
 -- honest, because a caller drawing pins on a map must be able to tell a
 -- surveyed position from a town centre.
 ALTER TABLE museums ADD COLUMN IF NOT EXISTS location_approximate boolean NOT NULL DEFAULT false;
+
+-- Whether a display is on show indefinitely.
+--
+-- A permanent exhibition has no closing date, which is indistinguishable in the
+-- date columns from a listing whose dates could not be read — and the scraper
+-- discards the latter, so the columns alone could not carry the difference. It
+-- matters at both ends: "what closes soon" must exclude these, and "what can I
+-- see today" is wrong without them. For a small museum with no temporary
+-- programme it is the only row there will ever be.
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS permanent boolean NOT NULL DEFAULT false;

@@ -752,16 +752,17 @@ func (s *Store) execBatch(ctx context.Context, batch *pgx.Batch) (int64, error) 
 // SaveExhibitions upserts scraped listings, keyed by URL.
 func (s *Store) SaveExhibitions(ctx context.Context, found []exhibitions.Exhibition) (int64, error) {
 	const stmt = `
-INSERT INTO exhibitions (url, title, museum, museum_wikidata_id, starts_on, ends_on, location, source_page, scraped_at)
+INSERT INTO exhibitions (url, title, museum, museum_wikidata_id, starts_on, ends_on, location, source_page, scraped_at, permanent)
 VALUES ($1, $2, $3, $4, $5, $6,
         CASE WHEN $7::double precision IS NULL THEN NULL
              ELSE ST_SetSRID(ST_MakePoint($8::double precision, $7::double precision), 4326)::geography END,
-        $9, $10)
+        $9, $10, $11)
 ON CONFLICT (url) DO UPDATE SET
     title      = EXCLUDED.title,
     museum     = EXCLUDED.museum,
     starts_on  = EXCLUDED.starts_on,
     ends_on    = EXCLUDED.ends_on,
+    permanent  = EXCLUDED.permanent,
     location   = coalesce(EXCLUDED.location, exhibitions.location),
     scraped_at = EXCLUDED.scraped_at`
 
@@ -790,7 +791,7 @@ ON CONFLICT (url) DO UPDATE SET
 		// replacing them.
 		args := []any{validUTF8(e.URL), validUTF8(e.Title), validUTF8(e.Museum),
 			validUTF8(e.MuseumWikidataID),
-			e.Start, e.End, lat, lon, validUTF8(e.SourcePage), scraped}
+			e.Start, e.End, lat, lon, validUTF8(e.SourcePage), scraped, e.Permanent}
 
 		queries = append(queries, args)
 		batch.Queue(stmt, args...)
@@ -841,7 +842,7 @@ type ExhibitionHit struct {
 func (s *Store) ExhibitionsNearby(ctx context.Context, lat, lon, radiusKm float64, includeUpcoming bool, limit int) ([]ExhibitionHit, error) {
 	const stmt = `
 SELECT url, title, coalesce(museum,''), coalesce(museum_wikidata_id,''),
-       starts_on, ends_on, coalesce(source_page,''), scraped_at,
+       starts_on, ends_on, coalesce(source_page,''), scraped_at, permanent,
        ST_Y(location::geometry), ST_X(location::geometry),
        ST_Distance(location, $1::geography) / 1000.0 AS distance_km
 FROM exhibitions
@@ -849,6 +850,9 @@ WHERE location IS NOT NULL
   AND ST_DWithin(location, $1::geography, $2)
   AND (ends_on IS NULL OR ends_on >= current_date)
   AND ($3 OR starts_on IS NULL OR starts_on <= current_date)
+-- Soonest to close leads, so a permanent display — which has no closing date
+-- and will still be there next year — sorts behind everything a visitor could
+-- miss, and gives way first when the limit is reached.
 ORDER BY ends_on NULLS LAST, distance_km
 LIMIT $4`
 
@@ -868,15 +872,17 @@ LIMIT $4`
 			lat, lon *float64
 		)
 		if err := rows.Scan(&hit.URL, &hit.Title, &hit.Museum, &hit.MuseumWikidataID,
-			&hit.Start, &hit.End, &hit.SourcePage, &hit.ScrapedAt,
+			&hit.Start, &hit.End, &hit.SourcePage, &hit.ScrapedAt, &hit.Permanent,
 			&lat, &lon, &hit.DistanceKm); err != nil {
 			return nil, fmt.Errorf("scan exhibition: %w", err)
 		}
 		if lat != nil && lon != nil {
 			hit.Latitude, hit.Longitude = *lat, *lon
 		}
-		hit.Running = hit.Start == nil || !hit.Start.After(now)
-		hit.Upcoming = hit.Start != nil && hit.Start.After(now)
+		// A permanent display is on today whatever its dates say, and cannot be
+		// upcoming: there is nothing for it to be waiting for.
+		hit.Running = hit.Permanent || hit.Start == nil || !hit.Start.After(now)
+		hit.Upcoming = !hit.Permanent && hit.Start != nil && hit.Start.After(now)
 		hits = append(hits, hit)
 	}
 	return hits, rows.Err()
@@ -1205,9 +1211,15 @@ WHERE e.museum = g.museum
 //
 // The test is the scraper's own, applied to the URL against the page it was
 // found on, so the two cannot drift apart on what counts as navigation.
+//
+// Permanent displays are exempt. A museum with no programme is recorded from
+// the page that describes it, so its URL and its source page are the same page
+// — which is exactly the shape the navigation test rejects, and here means the
+// opposite of a paging control.
 func (s *Store) PruneNavigationListings(ctx context.Context) (int64, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT url, source_page FROM exhibitions WHERE source_page IS NOT NULL AND source_page <> ''`)
+		`SELECT url, source_page FROM exhibitions
+          WHERE source_page IS NOT NULL AND source_page <> '' AND NOT permanent`)
 	if err != nil {
 		return 0, fmt.Errorf("prune navigation: %w", err)
 	}

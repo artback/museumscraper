@@ -66,6 +66,7 @@ const (
 	CheckImplausibleDates   = "exhibition-dates-implausible"
 	CheckBoilerplateTitle   = "exhibition-title-is-boilerplate"
 	CheckStaleScrape        = "exhibition-scrape-stale"
+	CheckPermanentWithEnd   = "exhibition-permanent-but-ends"
 )
 
 // Finding is one problem with one record.
@@ -403,6 +404,19 @@ func CheckExhibitions(found []exhibitions.Exhibition, now time.Time) Report {
 					Reference: e.URL,
 				})
 			}
+		}
+
+		// A permanent display is one that does not close, so a closing date on
+		// one means the two were read from different places and one of them is
+		// wrong. Left in, it puts the exhibition in both answers at once: the
+		// list of what is always on, and the list of what to catch before it
+		// goes.
+		if e.Permanent && e.End != nil {
+			report.add(Finding{
+				Check: CheckPermanentWithEnd, Severity: Error, Subject: e.Title,
+				Detail:    fmt.Sprintf("marked permanent but closes on %s", e.End.Format("2006-01-02")),
+				Reference: e.URL,
+			})
 		}
 
 		if isBoilerplate(e.Title) {
