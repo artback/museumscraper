@@ -39,6 +39,22 @@ const (
 	scrapeMinZoomRadiu = 60.0 // km; wider than a city is not a scrape target
 )
 
+// scrapeMinRadiusKm is the smallest area a scrape may read: the circle that
+// covers one whole dedup cell.
+//
+// A scrape marks its entire cell scraped for a day, but reads only the circle
+// it was asked for. Those have to agree. They did not: someone zoomed in on a
+// single museum asked for a 3 km circle, one website was read, and the other
+// forty-odd museums sharing that cell were locked out for the next 24 hours
+// without ever having been looked at. Reading at least the cell means the
+// cooldown never covers ground the scrape did not.
+//
+// Half a cell's diagonal, in kilometres. Derived from the cell rather than
+// picked, so the two cannot drift apart. A degree of latitude is taken as
+// 111.32 km, and latitude is the worst case — a degree of longitude only
+// shrinks as you leave the equator.
+const scrapeMinRadiusKm = scrapeCellDegrees * math.Sqrt2 / 2 * 111.32
+
 // scrapeState is what a caller is told about an area.
 type scrapeState string
 
@@ -90,11 +106,18 @@ func newScrapeQueue(store Harvester) *scrapeQueue {
 	return q
 }
 
-// cellFor rounds an area to a grid so two people looking at the same city ask
-// for the same thing, and the second is told it is already happening.
-func cellFor(lat, lon float64) string {
+// cellCentre rounds a point to the centre of its grid cell.
+func cellCentre(lat, lon float64) (float64, float64) {
 	round := func(v float64) float64 { return math.Round(v/scrapeCellDegrees) * scrapeCellDegrees }
-	return fmt.Sprintf("%.2f,%.2f", round(lat), round(lon))
+	return round(lat), round(lon)
+}
+
+// cellFor names the grid cell a point falls in, so two people looking at the
+// same city ask for the same thing and the second is told it is already
+// happening.
+func cellFor(lat, lon float64) string {
+	lat, lon = cellCentre(lat, lon)
+	return fmt.Sprintf("%.2f,%.2f", lat, lon)
 }
 
 // enqueue asks for an area to be scraped, reporting what will happen.
@@ -102,7 +125,14 @@ func (q *scrapeQueue) enqueue(lat, lon, radiusKm float64) (scrapeState, error) {
 	if radiusKm <= 0 || radiusKm > scrapeMinZoomRadiu {
 		return scrapeIdle, fmt.Errorf("an area of %.0f km is too wide to scrape; zoom in first", radiusKm)
 	}
+	// Read the cell this is about to claim, not the caller's own circle. The
+	// centre moves to the cell's centre and the radius is widened to reach its
+	// corners, so the ground read always contains the ground the cooldown then
+	// covers. The caller is still told about the area it asked for, which stays
+	// true: this only ever reads more.
 	cell := cellFor(lat, lon)
+	lat, lon = cellCentre(lat, lon)
+	radiusKm = math.Max(radiusKm, scrapeMinRadiusKm)
 
 	q.mu.Lock()
 	if at, ok := q.done[cell]; ok && time.Since(at) < scrapeCooldown {
