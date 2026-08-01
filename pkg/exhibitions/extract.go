@@ -37,6 +37,14 @@ var listingLinkWords = []string{
 var strongPathHints = []string{
 	"exhibition", "ausstellung", "exposition", "mostra", "mostre",
 	"exposicion", "exposicao", "tentoonstelling", "on-view", "utstilling",
+	// Norwegian "utstilling" was here and Swedish "utstallning" was not, so
+	// Göteborgs stadsmuseum — which files every exhibition under
+	// /utstallningar/ — scored zero and its programme was never read. Both
+	// spellings of each word, because a site may or may not fold the accent
+	// out of its URLs.
+	"utstallning", "utställning", "udstilling", "nayttely", "näyttely",
+	"wystawa", "vystava", "výstava", "kiallitas", "kiállítás", "sergi",
+	"izlozba", "izložba", "razstava", "naroda", "vystavka", "выставка",
 }
 
 // weakPathHints name a URL as some kind of programme entry, which may or may
@@ -236,11 +244,32 @@ func IsNavigationLink(candidate string, base *url.URL) bool {
 	return true
 }
 
+// repeatedLinkTexts returns the anchor texts a page uses more than once.
+func repeatedLinkTexts(root *html.Node) map[string]bool {
+	counts := make(map[string]int)
+	forEachAnchor(root, func(_, text string) {
+		cleaned := strings.ToLower(strings.TrimSpace(cleanTitle(text)))
+		if cleaned != "" {
+			counts[cleaned]++
+		}
+	})
+
+	repeated := make(map[string]bool, len(counts))
+	for text, n := range counts {
+		if n > 1 {
+			repeated[text] = true
+		}
+	}
+	return repeated
+}
+
 func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
 	doc, err := html.Parse(strings.NewReader(pageHTML))
 	if err != nil {
 		return nil
 	}
+
+	repeated := repeatedLinkTexts(doc)
 
 	var strong, weak []Candidate
 	seen := make(map[string]struct{})
@@ -248,7 +277,7 @@ func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "a" {
-			if candidate, isStrong, ok := candidateFrom(n, base); ok {
+			if candidate, isStrong, ok := candidateFrom(n, base, repeated); ok {
 				// Paging and view-switching links are calendar chrome,
 				// whatever their text says.
 				if IsNavigationLink(candidate.URL, base) {
@@ -280,7 +309,7 @@ func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
 }
 
 // candidateFrom decides whether an anchor names an exhibition.
-func candidateFrom(anchor *html.Node, base *url.URL) (Candidate, bool, bool) {
+func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool) (Candidate, bool, bool) {
 	href := attr(anchor, "href")
 	if href == "" {
 		return Candidate{}, false, false
@@ -334,7 +363,24 @@ func candidateFrom(anchor *html.Node, base *url.URL) (Candidate, bool, bool) {
 	title := cleanTitle(text)
 	// Some cards link out through a "Find out more" button rather than from the
 	// title itself, so the anchor carries no title at all. The URL slug does.
-	if title == "" || isCallToAction(title) {
+	// When the link's text is a button rather than a name, the name is
+	// elsewhere in the card.
+	//
+	// A button's label cannot be recognised from a list of phrases: there is
+	// one per language and per site — "Läs mer", "Upptäck mer", "En savoir
+	// plus", "詳細を見る" — and the list is never finished. What gives it away
+	// without knowing any of them is that a listing page repeats it on every
+	// card, while an exhibition's name appears once.
+	//
+	// The URL slug is what the title falls back to.
+	isButton := title == "" ||
+		isCallToAction(title) ||
+		repeated[strings.ToLower(strings.TrimSpace(title))]
+
+	if isButton {
+		// The slug, not the card's heading: a card's heading is as often the
+		// section it sits in ("Flowers for you") as the thing it names, and the
+		// slug names the entry by construction.
 		title = titleFromSlug(parsed.Path)
 	}
 	if title == "" {

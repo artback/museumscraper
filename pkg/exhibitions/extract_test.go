@@ -410,3 +410,49 @@ func TestIsNavigationLink(t *testing.T) {
 		}
 	}
 }
+
+// Göteborgs stadsmuseum publishes eleven exhibitions under /utstallningar/ and
+// labels every one of them "Läs mer". Both halves of that defeated extraction:
+// the path hint list knew Norwegian "utstilling" but not Swedish
+// "utstallning", so the links scored zero; and the anchor text was taken as the
+// title, so all of them would have become one exhibition called "Läs mer".
+func TestExtractCandidates_SwedishListingWithReadMoreLinks(t *testing.T) {
+	const page = `<html><body>
+	  <div class="card"><h3>Vikingr</h3>
+	    <a href="/utstallningar/vikingr/">Läs mer</a></div>
+	  <div class="card"><h3>Urbanum</h3>
+	    <a href="/utstallningar/urbanum/">Läs mer</a></div>
+	  <div class="card"><h3>Spåren talar</h3>
+	    <a href="/utstallningar/sparen-talar/">Upptäck mer</a></div>
+	  <div class="card"><h3>En värld i miniatyr</h3>
+	    <a href="/utstallningar/en-varld-i-miniatyr/">Upptäck mer</a></div>
+	  <a href="/besok-oss/">Besök oss</a>
+	</body></html>`
+
+	base, err := url.Parse("https://goteborgsstadsmuseum.se/utstallningar/")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := ExtractCandidates(page, base)
+
+	titles := make(map[string]string, len(got))
+	for _, c := range got {
+		titles[c.Title] = c.URL
+	}
+	if len(got) < 3 {
+		t.Fatalf("found %d candidates, want the three exhibitions: %+v", len(got), got)
+	}
+	// Derived from the slug, which is what a button link falls back to.
+	for _, want := range []string{"Vikingr", "Urbanum", "Sparen Talar", "En Varld I Miniatyr"} {
+		if _, ok := titles[want]; !ok {
+			t.Errorf("missing %q; got %v", want, titles)
+		}
+	}
+	// The button text must never survive as a title, however many cards use it.
+	for title := range titles {
+		if strings.EqualFold(title, "Läs mer") || strings.EqualFold(title, "Upptäck mer") {
+			t.Errorf("%q was kept as an exhibition title", title)
+		}
+	}
+}
