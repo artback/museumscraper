@@ -2,9 +2,7 @@
 # happens to sit. Compose derives it from the directory otherwise, which named
 # these volumes after a temporary git worktree — delete the worktree, or run
 # compose from the main checkout, and 1.3 GB of crawled catalogue appears to
-# vanish because a different, empty volume is mounted instead. The orphaned
-# "ica_scraper_postgres_data" volume on this machine is that having already
-# happened once, under the repository's previous name.
+# vanish because a different, empty volume is mounted instead.
 name: museum
 
 services:
@@ -195,6 +193,39 @@ services:
         source: ./create_event.sh
         target: /create_event.sh
 
+  # Takes a dump on a schedule, without anyone having to remember to.
+  #
+  # Runs by default rather than behind a profile: a backup that depends on
+  # someone typing a command is not protection, and this is the only thing
+  # standing between four hours of crawling and a mistyped "down -v".
+  #
+  # BACKUP_DIR decides where dumps land, and defaults to ./backups beside the
+  # repository. That is the same physical disk as the Docker volumes it
+  # protects, so it survives Docker but not the drive — point it at a synced or
+  # external location to fix that:
+  #
+  #   BACKUP_DIR=~/Library/Mobile\ Documents/com~apple~CloudDocs/museum-backups
+  backups:
+    image: postgis/postgis:16-3.4
+    container_name: museum-backups
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: museum
+      PGPASSWORD: museum
+      PGDATABASE: museum
+      BACKUP_INTERVAL_HOURS: "${BACKUP_INTERVAL_HOURS:-24}"
+      BACKUP_KEEP: "${BACKUP_KEEP:-7}"
+    volumes:
+      - ${BACKUP_DIR:-./backups}:/backups
+      - type: bind
+        source: ./backup.sh
+        target: /backup.sh
+    entrypoint: ["sh", "/backup.sh"]
+
   # Dumps the catalogue to ./backups on the host, outside Docker entirely.
   #
   # The named volumes below survive "docker compose down", restarts and image
@@ -218,7 +249,7 @@ services:
     environment:
       PGPASSWORD: museum
     volumes:
-      - ./backups:/backups
+      - ${BACKUP_DIR:-./backups}:/backups
     entrypoint: ["sh", "-c"]
     command:
       - >-

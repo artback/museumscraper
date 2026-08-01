@@ -529,6 +529,11 @@ same repository checked out twice — or worked on in a git worktree — mounts
 two different, empty databases and the data appears to have vanished. Do not
 remove the `name:` key.
 
+The same reasoning applies to `BACKUP_DIR`: the compose default is `./backups`,
+which is correct for an ordinary checkout and wrong inside a git worktree,
+where it would put the backups in a directory meant to be deleted. Set it to an
+absolute path outside the checkout.
+
 Object storage is not covered by the dump. It holds the raw crawl output and
 is rebuildable by re-crawling, whereas Postgres also holds the enrichment,
 geocoding and scraped exhibitions that took much longer to produce. Copy the
