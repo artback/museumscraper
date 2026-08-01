@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -1145,4 +1146,137 @@ LIMIT $6`
 		points = append(points, p)
 	}
 	return points, rows.Err()
+}
+
+// MergeDuplicateExhibitions folds repeated listings of one event into a single
+// row spanning all of its dates, and reports how many rows it removed.
+//
+// Museums publish recurring events as one entry per occurrence, each with its
+// own URL — Hasselblad Center listed one exhibition's guided tours eight times,
+// Kalmar konstmuseum listed "Konstparken" four times. The scraper now merges
+// them as it reads, but rows already stored were keyed on URL and need folding
+// together after the fact.
+//
+// The surviving row keeps the earliest start and the latest end, so the entry
+// covers the whole run rather than whichever occurrence happened to be kept.
+func (s *Store) MergeDuplicateExhibitions(ctx context.Context) (int64, error) {
+	const stmt = `
+WITH grouped AS (
+    SELECT museum,
+           lower(btrim(title)) AS title_key,
+           min(starts_on) AS first_start,
+           max(ends_on)   AS last_end,
+           -- The earliest occurrence is kept, so its URL is the one a visitor
+           -- following the link arrives at first.
+           (array_agg(url ORDER BY coalesce(starts_on, DATE '0001-01-01'), url))[1] AS keep_url
+    FROM exhibitions
+    WHERE museum IS NOT NULL AND museum <> ''
+    GROUP BY museum, lower(btrim(title))
+    HAVING count(*) > 1
+),
+widened AS (
+    UPDATE exhibitions e
+    SET starts_on = g.first_start,
+        ends_on   = g.last_end
+    FROM grouped g
+    WHERE e.url = g.keep_url
+    RETURNING e.url
+)
+DELETE FROM exhibitions e
+USING grouped g
+WHERE e.museum = g.museum
+  AND lower(btrim(e.title)) = g.title_key
+  AND e.url <> g.keep_url`
+
+	tag, err := s.pool.Exec(ctx, stmt)
+	if err != nil {
+		return 0, fmt.Errorf("merge duplicate exhibitions: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// PruneNavigationListings removes stored rows that are a listing's own paging
+// controls rather than anything on show, and reports how many it removed.
+//
+// The scraper rejects these as it reads now, but rows gathered before it could
+// are still in the table: "Föregående Evenemang", "Nästa Evenemang", "Evenemang
+// in Lista View" — a calendar plugin's previous, next and view-switch buttons,
+// stored as though they were exhibitions.
+//
+// The test is the scraper's own, applied to the URL against the page it was
+// found on, so the two cannot drift apart on what counts as navigation.
+func (s *Store) PruneNavigationListings(ctx context.Context) (int64, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT url, source_page FROM exhibitions WHERE source_page IS NOT NULL AND source_page <> ''`)
+	if err != nil {
+		return 0, fmt.Errorf("prune navigation: %w", err)
+	}
+
+	var doomed []string
+	for rows.Next() {
+		var link, source string
+		if err := rows.Scan(&link, &source); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan listing: %w", err)
+		}
+		base, err := url.Parse(source)
+		if err != nil {
+			continue
+		}
+		if exhibitions.IsNavigationLink(link, base) {
+			doomed = append(doomed, link)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("prune navigation: %w", err)
+	}
+	if len(doomed) == 0 {
+		return 0, nil
+	}
+
+	tag, err := s.pool.Exec(ctx, `DELETE FROM exhibitions WHERE url = ANY($1)`, doomed)
+	if err != nil {
+		return 0, fmt.Errorf("prune navigation: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// MuseumsWithWebsitesNear returns the museums around a point whose sites are
+// worth reading for exhibitions, most prominent first.
+func (s *Store) MuseumsWithWebsitesNear(ctx context.Context, lat, lon, radiusKm float64, limit int) ([]models.Museum, error) {
+	const stmt = `
+SELECT name, coalesce(country,''), coalesce(locality,''), coalesce(website,''),
+       coalesce(wikidata_id,''), ST_Y(location::geometry), ST_X(location::geometry)
+FROM museums
+WHERE website IS NOT NULL AND website <> ''
+  AND location IS NOT NULL
+  AND ST_DWithin(location, $1::geography, $2)
+ORDER BY sitelinks DESC, id
+LIMIT $3`
+
+	point := fmt.Sprintf("SRID=4326;POINT(%v %v)", lon, lat)
+
+	rows, err := s.pool.Query(ctx, stmt, point, radiusKm*1000, limit)
+	if err != nil {
+		return nil, fmt.Errorf("museums with websites near: %w", err)
+	}
+	defer rows.Close()
+
+	var museums []models.Museum
+	for rows.Next() {
+		var (
+			m        models.Museum
+			lat, lon *float64
+		)
+		if err := rows.Scan(&m.Name, &m.Country, &m.Locality, &m.Website,
+			&m.WikidataID, &lat, &lon); err != nil {
+			return nil, fmt.Errorf("scan museum: %w", err)
+		}
+		if lat != nil && lon != nil {
+			m.Latitude, m.Longitude = *lat, *lon
+		}
+		museums = append(museums, m)
+	}
+	return museums, rows.Err()
 }

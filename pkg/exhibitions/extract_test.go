@@ -372,3 +372,41 @@ func TestTitleFromSlug(t *testing.T) {
 		}
 	}
 }
+
+// Calendar plugins publish their own paging controls as links. They are not
+// exhibitions, and the words on them differ per language, so the test is that
+// the shape is recognised rather than the vocabulary.
+func TestIsNavigationLink(t *testing.T) {
+	base, err := url.Parse("https://www.kalmarkonstmuseum.se/event/")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	navigation := []string{
+		"https://www.kalmarkonstmuseum.se/event/",                      // the page itself
+		"https://www.kalmarkonstmuseum.se/event/?eventDisplay=list",    // a view switch
+		"https://www.kalmarkonstmuseum.se/event/lista/",                // "Evenemang in Lista View"
+		"https://www.kalmarkonstmuseum.se/event/lista/?eventDisplay=1", // "Föregående Evenemang"
+		"https://www.kalmarkonstmuseum.se/event/lista/sida/2/",         // "Nästa Evenemang"
+		"/event/lista/sida/3/",                                         // relative form
+		"https://www.kalmarkonstmuseum.se/event/month/",
+		"https://www.kalmarkonstmuseum.se/event/page/4/",
+	}
+	for _, link := range navigation {
+		if !IsNavigationLink(link, base) {
+			t.Errorf("%q should be treated as navigation", link)
+		}
+	}
+
+	entries := []string{
+		"https://www.kalmarkonstmuseum.se/event/konstparken/",
+		"https://www.kalmarkonstmuseum.se/event/lista/where-is-my-mind/", // a view path then a name
+		"https://www.kalmarkonstmuseum.se/utstallningar/grief-trails/",   // elsewhere on the site
+		"https://example.org/event/lista/",                               // another site entirely
+	}
+	for _, link := range entries {
+		if IsNavigationLink(link, base) {
+			t.Errorf("%q is an entry, not navigation", link)
+		}
+	}
+}

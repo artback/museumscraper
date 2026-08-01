@@ -50,15 +50,21 @@ func runServe(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
+	// The resolver is what lets a caller ask for "Paris" instead of a
+	// coordinate pair. It geocodes through the shared rate-limited client and
+	// caches into the same database, so a name costs one upstream call ever
+	// rather than one per request.
+	//
+	// Scraping on demand is what makes a city nobody has looked at fill in when
+	// someone does, rather than simply reading as empty.
+	apiServer := api.NewServer(db).
+		WithPlaces(api.NewPlaceResolver(db, location.Geocode)).
+		WithScraping(db)
+	defer apiServer.Close()
+
 	server := &http.Server{
-		Addr: *addr,
-		// The resolver is what lets a caller ask for "Paris" instead of a
-		// coordinate pair. It geocodes through the shared rate-limited client
-		// and caches into the same database, so a name costs one upstream call
-		// ever rather than one per request.
-		Handler: api.NewServer(db).
-			WithPlaces(api.NewPlaceResolver(db, location.Geocode)).
-			Routes(),
+		Addr:              *addr,
+		Handler:           apiServer.Routes(),
 		ReadHeaderTimeout: *readTimeout,
 		ReadTimeout:       *readTimeout,
 		IdleTimeout:       *idleTimeout,

@@ -4,423 +4,479 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Museum catalogue</title>
+<link rel="stylesheet" href="/map/vendor/maplibre-gl.css">
 <style>
   :root {
-    --bg: #06080d;
-    --ink: #e8edf5;
-    --dim: #8b97ab;
-    --line: #1d2634;
-    --panel: #0d121b;
-    --accent: #ffb454;
-    --sea: #0b1220;
+    --ink: #e9eef6; --dim: #93a0b4; --line: #223047;
+    --panel: #0e1420f2; --accent: #ffb454;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; }
   body {
-    background: var(--bg); color: var(--ink);
+    background: #05070c; color: var(--ink);
     font: 14px/1.45 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  canvas { display: block; cursor: grab; }
-  canvas.dragging { cursor: grabbing; }
+  #map { position: absolute; inset: 0; }
 
   .panel {
     position: absolute; background: var(--panel);
+    backdrop-filter: blur(10px);
     border: 1px solid var(--line); border-radius: 10px;
-    box-shadow: 0 12px 40px rgba(0,0,0,.55);
+    box-shadow: 0 14px 44px rgba(0,0,0,.6);
   }
 
-  /* Search, top left, as asked. */
-  #search { top: 16px; left: 16px; width: 330px; overflow: hidden; }
+  /* Search, top left. */
+  #search { top: 14px; left: 14px; width: 330px; overflow: hidden; z-index: 5; }
   #search input {
     width: 100%; padding: 12px 14px; border: 0; outline: 0;
     background: transparent; color: var(--ink); font-size: 15px;
   }
   #search input::placeholder { color: var(--dim); }
-  #results { max-height: 46vh; overflow-y: auto; border-top: 1px solid var(--line); }
-  #results:empty { border-top: 0; }
+  #results { max-height: 44vh; overflow-y: auto; }
+  #results:not(:empty) { border-top: 1px solid var(--line); }
   .hit { padding: 9px 14px; cursor: pointer; border-bottom: 1px solid var(--line); }
   .hit:last-child { border-bottom: 0; }
-  .hit:hover, .hit[aria-selected="true"] { background: #151d2a; }
+  .hit:hover, .hit.active { background: #1a2434; }
   .hit b { font-weight: 600; }
   .hit small { color: var(--dim); display: block; }
 
-  /* The pop-up window for a museum. */
-  #detail { top: 16px; right: 16px; width: 340px; padding: 16px; display: none; }
+  /* The museum window. */
+  #detail { top: 14px; right: 14px; width: 340px; padding: 16px; display: none;
+            max-height: calc(100vh - 28px); overflow-y: auto; z-index: 5; }
   #detail h2 { margin: 0 26px 4px 0; font-size: 17px; line-height: 1.25; }
   #detail .where { color: var(--dim); margin-bottom: 10px; }
   #detail .desc { margin-bottom: 12px; }
   #detail a { color: var(--accent); }
-  #close {
-    position: absolute; top: 10px; right: 12px; cursor: pointer;
-    color: var(--dim); background: 0; border: 0; font-size: 20px; line-height: 1;
-  }
-  #close:hover { color: var(--ink); }
-  .tag {
-    display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 99px;
-    border: 1px solid var(--line); color: var(--dim); margin: 0 4px 6px 0;
-  }
+  .closer { position: absolute; top: 10px; right: 12px; cursor: pointer;
+            color: var(--dim); background: 0; border: 0; font-size: 20px; line-height: 1; }
+  .closer:hover { color: var(--ink); }
+
+  /* Everything in the area you just searched for. */
+  #list { top: 14px; right: 14px; width: 300px; display: none; z-index: 4;
+          max-height: calc(100vh - 28px); overflow-y: auto; padding: 14px; }
+  #list h2 { margin: 0 26px 2px 0; font-size: 15px; }
+  #list .count { color: var(--dim); margin-bottom: 10px; font-size: 12px; }
+  #list .row { padding: 7px 0; border-top: 1px solid var(--line); cursor: pointer; }
+  #list .row:hover { color: var(--accent); }
+  #list .row small { color: var(--dim); display: block; }
+  /* When a museum is open, the list steps aside rather than stacking on it. */
+  #detail:not([style*="none"]) ~ #list { display: none !important; }
+  .tag { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 99px;
+         border: 1px solid var(--line); color: var(--dim); margin: 0 4px 6px 0; }
   .shows { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 10px; }
   .shows h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em;
               color: var(--dim); margin: 0 0 8px; }
   .show { margin-bottom: 9px; }
   .show .when { color: var(--dim); font-size: 12px; }
 
-  #hud {
-    position: absolute; left: 16px; bottom: 14px;
-    color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums;
+  #hud { position: absolute; left: 14px; bottom: 34px; z-index: 5; max-width: 46vw;
+         color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums;
+         text-shadow: 0 1px 3px #000; }
+  #hud b { color: var(--ink); font-weight: 600; }
+
+  /* MapLibre's own popup, restyled to match. */
+  .maplibregl-popup-content {
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 11px; font: inherit;
   }
-  #hud kbd {
-    border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
-    color: var(--ink); font: inherit;
-  }
-  #tip {
-    position: absolute; pointer-events: none; display: none;
-    background: #0d121bee; border: 1px solid var(--line); border-radius: 6px;
-    padding: 4px 9px; font-size: 12px; white-space: nowrap;
-  }
+  .maplibregl-popup-tip { border-top-color: var(--panel) !important;
+                          border-bottom-color: var(--panel) !important; }
+  .maplibregl-ctrl-group { background: var(--panel); }
 </style>
 </head>
 <body>
-<canvas id="globe"></canvas>
+<div id="map"></div>
 
 <div class="panel" id="search">
   <input id="q" type="search" placeholder="Search museums…" autocomplete="off" spellcheck="false">
   <div id="results"></div>
 </div>
 
+<div class="panel" id="list">
+  <button class="closer" id="listClose" title="Close">&times;</button>
+  <div id="listBody"></div>
+</div>
+
 <div class="panel" id="detail">
-  <button id="close" title="Close">&times;</button>
+  <button class="closer" id="close" title="Close">&times;</button>
   <div id="detailBody"></div>
 </div>
 
 <div id="hud"></div>
-<div id="tip"></div>
 
+<script src="/map/vendor/maplibre-gl.js"></script>
 <script>
 "use strict";
 
-const canvas = document.getElementById("globe");
-const ctx = canvas.getContext("2d", { alpha: false });
+// Raster OpenStreetMap tiles, which carry the thing a hand-drawn globe cannot:
+// city names, roads, coastlines at every scale, in the local language.
+//
+// The style is defined here rather than fetched so the application depends on
+// exactly one external thing — the tiles — and that one is swappable. A
+// deployment with a MapTiler or Stadia key should point TILES at it; the OSM
+// community servers are fine for a desktop tool but are not a CDN and their
+// usage policy is explicit about that.
+const TILES = (window.MUSEUM_TILES || [
+  "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+  "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+  "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+  "https://d.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+]);
+
+const TILE_ATTRIBUTION = window.MUSEUM_TILE_ATTRIBUTION ||
+  '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, ' +
+  '© <a href="https://carto.com/attributions">CARTO</a>';
+
+// Glyphs are what lets the map draw text — without them any layer with a
+// text-field is rejected outright, which is what silently stopped the cluster
+// labels and every layer declared after them.
+const GLYPHS = window.MUSEUM_GLYPHS ||
+  "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf";
+
+const map = new maplibregl.Map({
+  container: "map",
+  style: {
+    version: 8,
+    glyphs: GLYPHS,
+    sources: {
+      osm: {
+        type: "raster",
+        tiles: TILES,
+        // 512 to match the @2x tiles: telling MapLibre the wrong size makes
+        // every label render at half the intended scale.
+        tileSize: 512,
+        maxzoom: 19,
+        attribution: TILE_ATTRIBUTION,
+      },
+    },
+    layers: [
+      { id: "background", type: "background", paint: { "background-color": "#081020" } },
+      { id: "osm", type: "raster", source: "osm" },
+    ],
+    // Declared in the style rather than set afterwards. Calling
+    // map.setProjection() straight after the constructor throws, because the
+    // style has not loaded yet — and since function declarations hoist, the
+    // rest of this file still *looked* defined while the script had in fact
+    // stopped at that line, leaving a black page with no error to see.
+    projection: { type: "globe" },
+    sky: {
+      "sky-color": "#0a1a33",
+      "horizon-color": "#12233d",
+      "fog-color": "#05070c",
+      "sky-horizon-blend": 0.6,
+      "horizon-fog-blend": 0.6,
+      "fog-ground-blend": 0.1,
+      "atmosphere-blend": ["interpolate", ["linear"], ["zoom"], 0, 0.9, 6, 0.3, 9, 0],
+    },
+  },
+  center: [10, 30],
+  // Not lower: at zoom 1.4 the globe is smaller than the window and sits in a
+  // black void while the first tiles arrive, which reads as a broken page.
+  zoom: 2.2,
+  minZoom: 1.4,
+  hash: true,          // the view lives in the URL, so a view can be shared
+  attributionControl: { compact: true },
+});
+
+// Anything the map itself reports — a refused tile, a bad style — should be
+// visible rather than swallowed, since a map that fails silently is just a
+// black rectangle.
+map.on("error", e => console.error("map:", e && e.error ? e.error.message : e));
+
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
+map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
+// Geolocation needs a secure context and a permission; where it is
+// unavailable MapLibre disables the control itself rather than failing.
+map.addControl(new maplibregl.GeolocateControl({
+  positionOptions: { enableHighAccuracy: true },
+  trackUserLocation: true,
+  showUserLocation: true,
+}), "bottom-right");
+
 const hud = document.getElementById("hud");
-const tip = document.getElementById("tip");
 
-// View state. Rotation is where the globe is spun to; zoom scales the sphere.
-const view = { lon: 10, lat: 25, zoom: 1, points: [], truncated: false };
-const RAD = Math.PI / 180;
-
-let width = 0, height = 0, radius = 0, dpr = 1;
-
-function resize() {
-  dpr = Math.min(window.devicePixelRatio || 1, 2);
-  width = window.innerWidth;
-  height = window.innerHeight;
-  canvas.width = width * dpr;
-  canvas.height = height * dpr;
-  canvas.style.width = width + "px";
-  canvas.style.height = height + "px";
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  radius = Math.min(width, height) * 0.42;
-  draw();
-}
-window.addEventListener("resize", resize);
-
-// Orthographic projection: the view you get looking at a sphere from far away.
-// Returns null for anything on the far side, which is what makes it a globe
-// rather than a flat map with the back showing through.
-function project(lat, lon) {
-  const phi = lat * RAD, lambda = (lon - view.lon) * RAD;
-  const phi0 = view.lat * RAD;
-  const cosc = Math.sin(phi0) * Math.sin(phi) +
-               Math.cos(phi0) * Math.cos(phi) * Math.cos(lambda);
-  if (cosc < 0) return null;
-  const r = radius * view.zoom;
-  return {
-    x: width / 2 + r * Math.cos(phi) * Math.sin(lambda),
-    y: height / 2 - r * (Math.cos(phi0) * Math.sin(phi) -
-                         Math.sin(phi0) * Math.cos(phi) * Math.cos(lambda)),
-    depth: cosc,
-  };
-}
-
-// The inverse, for turning a click back into a position on the globe.
-function unproject(x, y) {
-  const r = radius * view.zoom;
-  const dx = x - width / 2, dy = height / 2 - y;
-  const rho = Math.hypot(dx, dy);
-  if (rho > r) return null;
-  const c = Math.asin(Math.min(rho / r, 1));
-  const phi0 = view.lat * RAD;
-  const lat = Math.asin(Math.cos(c) * Math.sin(phi0) +
-                        (rho ? dy * Math.sin(c) * Math.cos(phi0) / rho : 0)) / RAD;
-  const lon = view.lon + Math.atan2(
-    dx * Math.sin(c),
-    rho * Math.cos(c) * Math.cos(phi0) - dy * Math.sin(c) * Math.sin(phi0)) / RAD;
-  return { lat, lon: ((lon + 540) % 360) - 180 };
-}
-
-function drawGraticule() {
-  const r = radius * view.zoom;
-  ctx.strokeStyle = "#141c28";
-  ctx.lineWidth = 1;
-  for (let lat = -60; lat <= 60; lat += 30) {
-    ctx.beginPath();
-    let started = false;
-    for (let lon = -180; lon <= 180; lon += 3) {
-      const p = project(lat, lon);
-      if (!p) { started = false; continue; }
-      started ? ctx.lineTo(p.x, p.y) : (ctx.moveTo(p.x, p.y), started = true);
-    }
-    ctx.stroke();
+// Adding layers one at a time and reporting failures individually. Declared as
+// a list rather than a run of statements because a throw partway through a
+// setup function leaves the map half-built with nothing to say so.
+function addLayerSafely(spec) {
+  try {
+    map.addLayer(spec);
+  } catch (err) {
+    console.error("map: could not add layer " + spec.id + ": " + err.message);
   }
-  for (let lon = -180; lon < 180; lon += 30) {
-    ctx.beginPath();
-    let started = false;
-    for (let lat = -90; lat <= 90; lat += 3) {
-      const p = project(lat, lon);
-      if (!p) { started = false; continue; }
-      started ? ctx.lineTo(p.x, p.y) : (ctx.moveTo(p.x, p.y), started = true);
-    }
-    ctx.stroke();
-  }
-  ctx.beginPath();
-  ctx.arc(width / 2, height / 2, r, 0, Math.PI * 2);
-  ctx.strokeStyle = "#223047";
-  ctx.stroke();
 }
 
-let selected = null;
+map.on("load", () => {
+  map.addSource("museums", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+    // Not clustered. Clustering replaced the map with a few dozen large discs
+    // and hid the thing worth looking at — that the museums themselves trace
+    // the cities. Forty thousand small circles is a shape the GPU draws in one
+    // pass and a person reads at a glance.
+  });
 
-function draw() {
-  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue("--bg");
-  ctx.fillRect(0, 0, width, height);
+  addLayerSafely({
+    id: "museum-points", type: "circle", source: "museums",
+    paint: {
+      "circle-color": "#ffb454",
+      "circle-radius": [
+        "interpolate", ["linear"], ["zoom"],
+        1.5, 1.4, 4, 2.2, 8, 3.5, 12, 5.5, 16, 8,
+      ],
+      // No outline until the dots are big enough for one to be a border rather
+      // than most of the dot.
+      "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 6, 0, 9, 1],
+      "circle-stroke-color": "#2a1b06",
+      "circle-opacity": ["interpolate", ["linear"], ["zoom"], 1.5, 0.85, 6, 1],
+    },
+  });
+  // A halo for whichever museum is open, so it is findable among its neighbours.
+  addLayerSafely({
+    id: "museum-selected", type: "circle", source: "museums",
+    filter: ["==", ["get", "id"], -1],
+    paint: {
+      "circle-color": "transparent", "circle-radius": 13,
+      "circle-stroke-width": 3, "circle-stroke-color": "#ffffff",
+    },
+  });
 
-  const r = radius * view.zoom;
-  ctx.beginPath();
-  ctx.arc(width / 2, height / 2, r, 0, Math.PI * 2);
-  ctx.fillStyle = "#0a101a";
-  ctx.fill();
+  loadPoints();
+  map.on("moveend", onMoved);
 
-  drawGraticule();
+  map.on("click", "museum-points", e => showMuseum(e.features[0].properties.id));
 
-  // No basemap and no tiles: at 154,000 museums the points draw the coastlines
-  // themselves, which is both the honest picture of the data and the reason
-  // this page needs nothing from the network but its own API.
-  const size = view.zoom < 2 ? 1.1 : view.zoom < 6 ? 1.6 : 2.4;
-  ctx.fillStyle = "#5ec8ff";
-  ctx.globalAlpha = view.zoom < 2 ? 0.72 : 0.9;
-  for (const p of view.points) {
-    const q = project(p[1], p[2]);
-    if (!q) continue;
-    ctx.beginPath();
-    ctx.arc(q.x, q.y, size, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-
-  if (selected && Number.isFinite(selected.latitude)) {
-    const q = project(selected.latitude, selected.longitude);
-    if (q) {
-      ctx.beginPath();
-      ctx.arc(q.x, q.y, 7, 0, Math.PI * 2);
-      ctx.strokeStyle = "#ffb454";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
+  for (const layer of ["museum-points"]) {
+    map.on("mouseenter", layer, () => map.getCanvas().style.cursor = "pointer");
+    map.on("mouseleave", layer, () => map.getCanvas().style.cursor = "");
   }
 
-  hud.innerHTML =
-    view.points.length.toLocaleString() + " museums shown" +
-    (view.truncated ? " (most notable — zoom in for the rest)" : "") +
-    " &nbsp;·&nbsp; drag to spin &nbsp;·&nbsp; scroll to zoom &nbsp;·&nbsp; " +
-    "<kbd>click</kbd> a point";
+  // A name on hover, without a request per pixel.
+  const hoverPopup = new maplibregl.Popup({
+    closeButton: false, closeOnClick: false, offset: 12,
+  });
+  map.on("mousemove", "museum-points", e => {
+    const name = e.features[0].properties.name;
+    if (!name) return;
+    hoverPopup.setLngLat(e.features[0].geometry.coordinates).setText(name).addTo(map);
+  });
+  map.on("mouseleave", "museum-points", () => hoverPopup.remove());
+});
+
+/* ---- points ------------------------------------------------------------- */
+
+let loadToken = 0, moveTimer = null;
+
+// One handler for "the view settled", debounced. Zooming fires moveend for
+// every notch of the wheel; asking the server on each one made the map stutter
+// and put dozens of requests in flight that nothing would ever read.
+function onMoved() {
+  clearTimeout(moveTimer);
+  moveTimer = setTimeout(() => {
+    loadPoints();
+    considerScrape();
+  }, 260);
 }
 
-// Loading is debounced and keyed to the visible box, so spinning the globe does
-// not queue a request per frame.
-let loadTimer = null, loadToken = 0;
-
+// The visible box, or nothing when the whole globe is in view.
 function visibleBox() {
-  if (view.zoom < 1.6) return null;
-  const corners = [
-    unproject(0, 0), unproject(width, 0),
-    unproject(0, height), unproject(width, height),
-    unproject(width / 2, height / 2),
-  ].filter(Boolean);
-  if (corners.length < 3) return null;
-
-  const lats = corners.map(c => c.lat), lons = corners.map(c => c.lon);
-  // A box spanning the wrap-around would be inside out; fall back to the world.
-  if (Math.max(...lons) - Math.min(...lons) > 180) return null;
-  const pad = 0.15;
-  return [
-    Math.min(...lons) - pad, Math.min(...lats) - pad,
-    Math.max(...lons) + pad, Math.max(...lats) + pad,
-  ];
-}
-
-function scheduleLoad() {
-  clearTimeout(loadTimer);
-  loadTimer = setTimeout(loadPoints, 220);
+  if (map.getZoom() < 2.5) return null;
+  try {
+    const b = map.getBounds();
+    const w = b.getWest(), s = b.getSouth(), e = b.getEast(), n = b.getNorth();
+    if (![w, s, e, n].every(Number.isFinite)) return null;
+    if (e - w >= 355) return null; // effectively the whole world
+    return [w, s, e, n];
+  } catch (_) { return null; }
 }
 
 async function loadPoints() {
   const token = ++loadToken;
   const box = visibleBox();
-  const url = "/v1/points?limit=40000" + (box ? "&bbox=" + box.join(",") : "");
+  const url = "/v1/points?limit=40000" + (box ? "&bbox=" + box.map(v => v.toFixed(4)).join(",") : "");
+
   try {
     const res = await fetch(url);
     if (!res.ok) return;
     const data = await res.json();
-    if (token !== loadToken) return; // a newer view has already been requested
-    view.points = data.points;
-    view.truncated = data.truncated;
-    draw();
-  } catch (_) { /* a failed refresh leaves the previous points on screen */ }
+    if (token !== loadToken) return;      // a newer view is already in flight
+
+    const source = map.getSource("museums");
+    if (!source) return;
+    source.setData({
+      type: "FeatureCollection",
+      features: data.points.map(p => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [p[2], p[1]] },
+        properties: { id: p[0] },
+      })),
+    });
+
+    hud.innerHTML = "<b>" + data.count.toLocaleString() + "</b> museums shown" +
+      (data.truncated ? " — most notable at this scale, zoom in for the rest" : "");
+  } catch (_) { /* keep whatever is already drawn */ }
 }
 
-/* ---- interaction ------------------------------------------------------- */
+/* ---- filling in an area nobody has looked at ---------------------------- */
 
-let dragging = false, moved = false, last = null;
+// Asking the server to read the museums' own websites for whatever is on show
+// here. Bounded on the server — one area at a time, a cap per area, a day's
+// cooldown — because this turns panning a map into traffic on other people's
+// sites.
+let scrapeAsked = new Set(), scrapeTimer = null;
 
-canvas.addEventListener("pointerdown", e => {
-  dragging = true; moved = false;
-  last = { x: e.clientX, y: e.clientY };
-  canvas.classList.add("dragging");
-  canvas.setPointerCapture(e.pointerId);
-});
-
-canvas.addEventListener("pointermove", e => {
-  if (!dragging) { hover(e); return; }
-  const dx = e.clientX - last.x, dy = e.clientY - last.y;
-  if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
-  last = { x: e.clientX, y: e.clientY };
-
-  // Slower rotation when zoomed in, or the globe becomes unusable up close.
-  const k = 0.35 / view.zoom;
-  view.lon -= dx * k;
-  view.lat = Math.max(-89, Math.min(89, view.lat + dy * k));
-  draw();
-  scheduleLoad();
-});
-
-function endDrag(e) {
-  if (!dragging) return;
-  dragging = false;
-  canvas.classList.remove("dragging");
-  if (!moved) pick(e);
-}
-canvas.addEventListener("pointerup", endDrag);
-canvas.addEventListener("pointercancel", () => { dragging = false; canvas.classList.remove("dragging"); });
-
-canvas.addEventListener("wheel", e => {
-  e.preventDefault();
-  const factor = Math.exp(-e.deltaY * 0.0016);
-  view.zoom = Math.max(1, Math.min(220, view.zoom * factor));
-  draw();
-  scheduleLoad();
-}, { passive: false });
-
-// Finding what was clicked: nearest drawn point within a few pixels.
-function nearest(x, y, maxPx) {
-  let best = null, bestDist = maxPx * maxPx;
-  for (const p of view.points) {
-    const q = project(p[1], p[2]);
-    if (!q) continue;
-    const d = (q.x - x) ** 2 + (q.y - y) ** 2;
-    if (d < bestDist) { bestDist = d; best = p; }
-  }
-  return best;
+function areaOf() {
+  const c = map.getCenter();
+  const b = map.getBounds();
+  // Half the diagonal, which is the radius that covers the visible rectangle.
+  const km = Math.max(
+    haversine(c.lat, c.lng, b.getNorth(), b.getEast()),
+    haversine(c.lat, c.lng, b.getSouth(), b.getWest()));
+  return { lat: c.lat, lon: c.lng, radiusKm: km };
 }
 
-async function pick(e) {
-  const hit = nearest(e.clientX, e.clientY, 9);
-  if (!hit) return;
-  await showMuseum(hit[0]);
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371, r = Math.PI / 180;
+  const dLat = (lat2 - lat1) * r, dLon = (lon2 - lon1) * r;
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
-let hoverTimer = null;
-function hover(e) {
-  clearTimeout(hoverTimer);
-  hoverTimer = setTimeout(async () => {
-    const hit = nearest(e.clientX, e.clientY, 7);
-    if (!hit) { tip.style.display = "none"; return; }
+async function considerScrape() {
+  // Only when the view is a place rather than a continent: scraping "Europe"
+  // is neither useful nor polite.
+  const area = areaOf();
+  if (!Number.isFinite(area.radiusKm) || area.radiusKm > 60 || map.getZoom() < 8) return;
+
+  const key = area.lat.toFixed(1) + "," + area.lon.toFixed(1);
+  if (scrapeAsked.has(key)) return;
+  scrapeAsked.add(key);
+
+  try {
+    const params = new URLSearchParams({
+      lat: area.lat.toFixed(5), lon: area.lon.toFixed(5),
+      radius_km: Math.max(1, Math.min(area.radiusKm, 60)).toFixed(1),
+    });
+    const res = await fetch("/v1/scrape?" + params, { method: "POST" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.state === "queued" || data.state === "running") {
+      note("Looking for exhibitions here…");
+      watchScrape(area);
+    }
+  } catch (_) {}
+}
+
+// Polls until the area is done, then reloads whatever is open so the new
+// listings appear without the visitor doing anything.
+function watchScrape(area) {
+  clearTimeout(scrapeTimer);
+  scrapeTimer = setTimeout(async () => {
     try {
-      const res = await fetch("/v1/museums/" + hit[0]);
-      if (!res.ok) return;
-      const m = await res.json();
-      tip.textContent = m.name;
-      tip.style.display = "block";
-      tip.style.left = (e.clientX + 14) + "px";
-      tip.style.top = (e.clientY + 14) + "px";
-    } catch (_) {}
-  }, 90);
+      const params = new URLSearchParams({
+        lat: area.lat.toFixed(5), lon: area.lon.toFixed(5),
+        radius_km: Math.max(1, Math.min(area.radiusKm, 60)).toFixed(1),
+      });
+      const res = await fetch("/v1/scrape?" + params);
+      const data = await res.json();
+      if (data.state === "queued" || data.state === "running") {
+        watchScrape(area);
+        return;
+      }
+      note("");
+      if (openMuseum) loadShows(openMuseum);
+    } catch (_) { note(""); }
+  }, 4000);
+}
+
+const noteEl = document.createElement("span");
+function note(text) {
+  noteEl.textContent = text ? "  ·  " + text : "";
+  if (!noteEl.parentNode) hud.appendChild(noteEl);
 }
 
 /* ---- the museum window -------------------------------------------------- */
 
 const detail = document.getElementById("detail");
 const detailBody = document.getElementById("detailBody");
-document.getElementById("close").onclick = () => {
+
+document.getElementById("close").onclick = closeDetail;
+function closeDetail() {
   detail.style.display = "none";
-  selected = null;
-  draw();
-};
+  openMuseum = null;
+  if (map.getLayer("museum-selected")) {
+    map.setFilter("museum-selected", ["==", ["get", "id"], -1]);
+  }
+}
 
 function escape(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-async function showMuseum(id) {
-  const res = await fetch("/v1/museums/" + encodeURIComponent(id));
-  if (!res.ok) return;
-  const m = await res.json();
-  selected = m;
+let openMuseum = null;
 
-  const where = [m.locality, m.country].filter(Boolean).join(", ");
+async function showMuseum(id) {
+  let museum;
+  try {
+    const res = await fetch("/v1/museums/" + encodeURIComponent(id));
+    if (!res.ok) return;
+    museum = await res.json();
+  } catch (_) { return; }
+
+  const where = [museum.locality, museum.country].filter(Boolean).join(", ");
   const tags = [];
-  if (m.verified) tags.push("Wikipedia article");
-  if (m.approximate_location) tags.push("position approximate — town centre");
+  if (museum.verified) tags.push("Wikipedia article");
+  if (museum.approximate_location) tags.push("position approximate — town centre");
 
   detailBody.innerHTML =
-    "<h2>" + escape(m.name) + "</h2>" +
+    "<h2>" + escape(museum.name) + "</h2>" +
     (where ? '<div class="where">' + escape(where) + "</div>" : "") +
     tags.map(t => '<span class="tag">' + escape(t) + "</span>").join("") +
-    (m.description ? '<div class="desc">' + escape(m.description) + "</div>" : "") +
-    (m.website ? '<div><a href="' + escape(m.website) + '" target="_blank" rel="noopener">Website</a></div>' : "") +
-    (m.wikipedia_url ? '<div><a href="' + escape(m.wikipedia_url) + '" target="_blank" rel="noopener">Wikipedia</a></div>' : "") +
+    (museum.description ? '<div class="desc">' + escape(museum.description) + "</div>" : "") +
+    (museum.website ? '<div><a href="' + escape(museum.website) + '" target="_blank" rel="noopener">Website</a></div>' : "") +
+    (museum.wikipedia_url ? '<div><a href="' + escape(museum.wikipedia_url) + '" target="_blank" rel="noopener">Wikipedia</a></div>' : "") +
     '<div class="shows" id="shows"><h3>What\'s on</h3><div class="where">Looking…</div></div>';
 
   detail.style.display = "block";
+  listPanel.style.display = "none";
+  openMuseum = museum;
 
-  // Centre the globe on it, so a search result is actually shown.
-  if (Number.isFinite(m.latitude) && (m.latitude !== 0 || m.longitude !== 0)) {
-    view.lat = m.latitude;
-    view.lon = m.longitude;
-    view.zoom = Math.max(view.zoom, 28);
-    scheduleLoad();
+  if (Number.isFinite(museum.latitude) && (museum.latitude || museum.longitude)) {
+    map.flyTo({
+      center: [museum.longitude, museum.latitude],
+      zoom: Math.max(map.getZoom(), 14),
+      speed: 1.4,
+    });
+    if (map.getLayer("museum-selected")) {
+      map.setFilter("museum-selected", ["==", ["get", "id"], Number(museum.id)]);
+    }
   }
-  draw();
-  loadShows(m);
+  loadShows(museum);
 }
 
-async function loadShows(m) {
+async function loadShows(museum) {
   const box = document.getElementById("shows");
-  if (!Number.isFinite(m.latitude)) { box.innerHTML = ""; return; }
+  if (!box) return;
+  if (!Number.isFinite(museum.latitude)) { box.innerHTML = ""; return; }
+
   try {
-    const res = await fetch("/v1/exhibitions?lat=" + m.latitude + "&lon=" + m.longitude +
-                            "&radius_km=1&upcoming=true&limit=25");
+    const res = await fetch("/v1/exhibitions?lat=" + museum.latitude + "&lon=" + museum.longitude +
+                            "&radius_km=1&upcoming=true&limit=40");
     const data = await res.json();
-    // Exhibitions are held per venue, so the ones at this museum are those
-    // whose museum name matches; the radius is only how they are found.
-    const mine = data.exhibitions.filter(e => e.museum === m.name);
+    // Exhibitions are stored per venue; the radius is only how they are found,
+    // so the ones belonging to this museum are those naming it.
+    const mine = data.exhibitions.filter(e => e.museum === museum.name);
+
     if (!mine.length) {
       const note = data.coverage && data.coverage.last_scraped
         ? "Nothing listed for this museum."
-        : "This area has not been scraped yet.";
+        : "This area has not been scraped for exhibitions yet.";
       box.innerHTML = "<h3>What's on</h3><div class=\"where\">" + note + "</div>";
       return;
     }
+
     box.innerHTML = "<h3>What's on</h3>" + mine.map(e => {
       const when = [e.start ? "from " + e.start.slice(0, 10) : "",
                     e.end ? "until " + e.end.slice(0, 10) : ""].filter(Boolean).join(" ");
@@ -439,41 +495,137 @@ async function loadShows(m) {
 
 const q = document.getElementById("q");
 const results = document.getElementById("results");
-let searchTimer = null, searchToken = 0;
+let searchTimer = null, searchToken = 0, hits = [], cursor = -1;
 
 q.addEventListener("input", () => {
   clearTimeout(searchTimer);
   const term = q.value.trim();
-  if (!term) { results.innerHTML = ""; return; }
+  if (!term) { results.innerHTML = ""; hits = []; cursor = -1; return; }
   searchTimer = setTimeout(() => runSearch(term), 180);
 });
 
+// Arrow keys and Enter, because a search box that only takes the mouse is a
+// half-finished search box.
+q.addEventListener("keydown", e => {
+  if (e.key === "Escape") { results.innerHTML = ""; hits = []; cursor = -1; q.blur(); return; }
+  if (!hits.length) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    cursor = (cursor + (e.key === "ArrowDown" ? 1 : hits.length - 1)) % hits.length;
+    for (const [i, el] of [...results.children].entries()) el.classList.toggle("active", i === cursor);
+    results.children[cursor]?.scrollIntoView({ block: "nearest" });
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    choose(hits[Math.max(cursor, 0)]);
+  }
+});
+
+// Places and museums together, because "Gothenburg" and "Röhsska Museum" are
+// the same question asked at different scales, and a box that only knows one of
+// them sends you away to find the other.
 async function runSearch(term) {
   const token = ++searchToken;
-  try {
-    const res = await fetch("/v1/search?q=" + encodeURIComponent(term) + "&limit=12");
-    if (!res.ok) return;
-    const data = await res.json();
-    if (token !== searchToken) return;
 
-    if (!data.museums.length) {
-      results.innerHTML = '<div class="hit"><small>Nothing found</small></div>';
-      return;
-    }
-    results.innerHTML = data.museums.map(m =>
-      '<div class="hit" data-id="' + m.id + '">' +
-      "<b>" + escape(m.name) + "</b>" +
-      "<small>" + escape([m.locality, m.country].filter(Boolean).join(", ")) +
-      (m.locatable ? "" : " · position unknown") + "</small></div>").join("");
+  const [museums, places] = await Promise.all([
+    fetchJSON("/v1/search?q=" + encodeURIComponent(term) + "&limit=10"),
+    fetchJSON("/v1/places?q=" + encodeURIComponent(term)),
+  ]);
+  if (token !== searchToken) return;
 
-    for (const el of results.querySelectorAll(".hit[data-id]")) {
-      el.onclick = () => showMuseum(el.dataset.id);
-    }
-  } catch (_) {}
+  // Places lead: someone typing a city name wants to go there, and the museums
+  // in it are what they will see when they arrive.
+  hits = [
+    ...(places?.places || []).map(p => ({ kind: "place", ...p })),
+    ...(museums?.museums || []).map(m => ({ kind: "museum", ...m })),
+  ];
+  cursor = -1;
+
+  if (!hits.length) {
+    results.innerHTML = '<div class="hit"><small>Nothing found</small></div>';
+    return;
+  }
+
+  results.innerHTML = hits.map((h, i) => h.kind === "place"
+    ? '<div class="hit" data-i="' + i + '"><b>◎ ' + escape(h.name) + "</b>" +
+      '<small>place · ' + h.radius_km.toFixed(0) + " km across</small></div>"
+    : '<div class="hit" data-i="' + i + '"><b>' + escape(h.name) + "</b><small>" +
+      escape([h.locality, h.country].filter(Boolean).join(", ")) +
+      (h.locatable ? "" : " · position unknown") + "</small></div>").join("");
+
+  for (const el of results.querySelectorAll(".hit[data-i]")) {
+    el.onclick = () => choose(hits[Number(el.dataset.i)]);
+  }
 }
 
-resize();
-loadPoints();
+async function fetchJSON(url) {
+  try {
+    const res = await fetch(url);
+    return res.ok ? await res.json() : null;
+  } catch (_) { return null; }
+}
+
+// A place flies the map there and lets the arrival trigger a scrape; a museum
+// opens its window.
+function choose(hit) {
+  if (hit.kind === "place") {
+    results.innerHTML = ""; hits = []; cursor = -1;
+    closeDetail();
+    map.flyTo({
+      center: [hit.longitude, hit.latitude],
+      zoom: zoomForRadius(hit.radius_km),
+      speed: 1.3,
+    });
+    showArea(hit);
+    return;
+  }
+  showMuseum(hit.id);
+}
+
+/* ---- what is in the place you searched for ------------------------------ */
+
+const listPanel = document.getElementById("list");
+const listBody = document.getElementById("listBody");
+document.getElementById("listClose").onclick = () => listPanel.style.display = "none";
+
+// Searching a city should answer "what is here", not just move the camera and
+// leave you to find the dots yourself.
+async function showArea(place) {
+  listPanel.style.display = "block";
+  listBody.innerHTML = '<h2>' + escape(place.name.split(",")[0]) + "</h2>" +
+                       '<div class="count">Looking…</div>';
+
+  const params = new URLSearchParams({
+    lat: place.latitude, lon: place.longitude,
+    radius_km: Math.min(place.radius_km || 15, 50), limit: "200",
+  });
+
+  const data = await fetchJSON("/v1/museums?" + params);
+  if (!data) { listBody.innerHTML = '<h2>' + escape(place.name.split(",")[0]) +
+                                    "</h2><div class=\"count\">Could not load.</div>"; return; }
+
+  const shown = data.museums.length;
+  const total = data.total;
+  listBody.innerHTML =
+    "<h2>" + escape(place.name.split(",")[0]) + "</h2>" +
+    '<div class="count">' + total.toLocaleString() + " museum" + (total === 1 ? "" : "s") +
+    " within " + Math.round(Number(params.get("radius_km"))) + " km" +
+    (shown < total ? " · showing the nearest " + shown : "") + "</div>" +
+    data.museums.map(m =>
+      '<div class="row" data-id="' + m.id + '">' + escape(m.name) +
+      "<small>" + m.distance_km.toFixed(1) + " km" +
+      (m.locality ? " · " + escape(m.locality) : "") + "</small></div>").join("");
+
+  for (const row of listBody.querySelectorAll(".row[data-id]")) {
+    row.onclick = () => showMuseum(row.dataset.id);
+  }
+}
+
+// A radius in kilometres as a zoom level: each level halves the span, and
+// level 9 is roughly a 40 km view at the equator.
+function zoomForRadius(km) {
+  const z = 9 - Math.log2(Math.max(km, 1) / 20);
+  return Math.max(3, Math.min(15, z));
+}
 </script>
 </body>
 </html>

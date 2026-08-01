@@ -788,3 +788,73 @@ func TestPlaceAtTownCentres(t *testing.T) {
 		t.Errorf("second run placed %d (err %v), want 0", again, err)
 	}
 }
+
+// Museums publish recurring events as one row per occurrence. Eight listings of
+// one exhibition's guided tours are not eight exhibitions.
+func TestMergeDuplicateExhibitions(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	day := func(s string) *time.Time {
+		d, err := time.Parse("2006-01-02", s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &d
+	}
+
+	if _, err := store.SaveExhibitions(ctx, []exhibitions.Exhibition{
+		{URL: "https://h.example/t/1", Title: "Introduction To The Exhibition",
+			Museum: "Hasselblad Center", Latitude: 57.70, Longitude: 11.97, Start: day("2026-08-15"), End: day("2026-08-15")},
+		{URL: "https://h.example/t/2", Title: "introduction to the exhibition ",
+			Museum: "Hasselblad Center", Latitude: 57.70, Longitude: 11.97, Start: day("2026-09-26"), End: day("2026-09-26")},
+		{URL: "https://h.example/t/3", Title: "Introduction To The Exhibition",
+			Museum: "Hasselblad Center", Latitude: 57.70, Longitude: 11.97, Start: day("2026-08-22"), End: day("2026-08-22")},
+		// A different exhibition at the same museum must survive untouched.
+		{URL: "https://h.example/show", Title: "Women Behind the Camera",
+			Museum: "Hasselblad Center", Latitude: 57.70, Longitude: 11.97, Start: day("2026-08-08"), End: day("2026-12-01")},
+		// The same title at a different museum is a different event.
+		{URL: "https://other.example/x", Title: "Introduction To The Exhibition",
+			Museum: "Other Museum", Latitude: 57.70, Longitude: 11.97, Start: day("2026-08-15")},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	removed, err := store.MergeDuplicateExhibitions(ctx)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2 of the 3 occurrences", removed)
+	}
+
+	hits, err := store.ExhibitionsNearby(ctx, 57.70, 11.97, 5, true, 50)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	byTitle := map[string]int{}
+	for _, h := range hits {
+		byTitle[strings.ToLower(strings.TrimSpace(h.Title))+"|"+h.Museum]++
+	}
+	if got := byTitle["introduction to the exhibition|Hasselblad Center"]; got != 1 {
+		t.Errorf("occurrences kept = %d, want 1", got)
+	}
+	if got := byTitle["women behind the camera|Hasselblad Center"]; got != 1 {
+		t.Error("a distinct exhibition at the same museum was merged away")
+	}
+	if got := byTitle["introduction to the exhibition|Other Museum"]; got != 1 {
+		t.Error("the same title at another museum was merged away")
+	}
+
+	// The survivor must span the whole run, not just its own occurrence.
+	for _, h := range hits {
+		if h.Museum == "Hasselblad Center" && strings.EqualFold(strings.TrimSpace(h.Title), "Introduction To The Exhibition") {
+			if h.Start == nil || h.Start.Format("2006-01-02") != "2026-08-15" {
+				t.Errorf("start = %v, want the earliest occurrence", h.Start)
+			}
+			if h.End == nil || h.End.Format("2006-01-02") != "2026-09-26" {
+				t.Errorf("end = %v, want the latest occurrence", h.End)
+			}
+		}
+	}
+}

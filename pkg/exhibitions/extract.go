@@ -3,6 +3,7 @@ package exhibitions
 import (
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -146,6 +147,95 @@ func FindListingLinks(pageHTML string, base *url.URL) []string {
 // event data, so the signal used here is structural: a link that goes deeper
 // into the site on an exhibition-shaped path, whose own text is long enough to
 // be a title, with date text on or near it.
+// viewSegments name a way of looking at a listing rather than a thing in it.
+//
+// Short and mostly language-neutral by design. The alternative — rejecting
+// titles like "Nästa Evenemang", "Föregående Evenemang", "Evenemang in Lista
+// View" — is a list of phrases that has to grow with every country the
+// catalogue covers and is always behind. These are the paths calendar plugins
+// use, and they are far fewer than the words their buttons are labelled with.
+var viewSegments = map[string]bool{
+	"list": true, "lista": true, "liste": true, "listing": true,
+	"page": true, "sida": true, "seite": true, "pagina": true, "paged": true,
+	"month": true, "week": true, "day": true, "today": true,
+	"upcoming": true, "past": true, "archive": true, "all": true,
+	"calendar": true, "kalender": true, "grid": true, "map": true, "photo": true,
+	"elenco": true, "liste-view": true, "agenda": true,
+}
+
+// containerSegments name the section a programme lives in, rather than
+// anything in it. A path made only of these and viewSegments is a listing;
+// one that adds a name is an entry — "/events/list/" against
+// "/events/women-behind-the-camera/".
+var containerSegments = map[string]bool{
+	"event": true, "events": true, "evenemang": true, "eventi": true,
+	"veranstaltungen": true, "evenementen": true, "evenements": true,
+	"exhibition": true, "exhibitions": true, "utstallningar": true,
+	"ausstellungen": true, "mostre": true, "expositions": true,
+	"whats-on": true, "what-s-on": true, "programme": true, "program": true,
+	"programs": true, "programmes": true, "kalendarium": true,
+}
+
+// IsNavigationLink reports whether a link is a way of paging through a listing
+// rather than an entry in it.
+//
+// A real exhibition link goes deeper than the page it sits on: it adds a
+// segment naming the exhibition. Paging and view-switching links add nothing
+// but a page number or a view name, or only a query string. Testing that shape
+// catches "Nästa Evenemang", "/event/lista/", "/events/lista/sida/2/" and
+// "?eventDisplay=list" together, in any language, without knowing what any of
+// the words mean.
+func IsNavigationLink(candidate string, base *url.URL) bool {
+	if base == nil {
+		return false
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil {
+		return false
+	}
+	if parsed.Host != "" && base.Host != "" && !strings.EqualFold(parsed.Host, base.Host) {
+		return false
+	}
+
+	basePath := strings.Trim(base.Path, "/")
+	linkPath := strings.Trim(parsed.Path, "/")
+
+	// The same page, differing only by query or fragment.
+	if linkPath == basePath {
+		return true
+	}
+	// Somewhere else entirely: not this listing's navigation.
+	if basePath != "" && !strings.HasPrefix(linkPath, basePath+"/") {
+		return false
+	}
+
+	rest := linkPath
+	if basePath != "" && strings.HasPrefix(linkPath, basePath+"/") {
+		rest = strings.TrimPrefix(linkPath, basePath)
+	} else if basePath != "" {
+		// A different section of the same site. Judged on its own path below:
+		// museums commonly link "/whats-on/" to a calendar living at
+		// "/events/list/", which is still a listing and still not an entry.
+		rest = linkPath
+	}
+
+	segments := strings.FieldsFunc(rest, func(r rune) bool { return r == '/' })
+	if len(segments) == 0 {
+		return true
+	}
+	for _, segment := range segments {
+		lower := strings.ToLower(segment)
+		if viewSegments[lower] || containerSegments[lower] {
+			continue
+		}
+		if _, err := strconv.Atoi(segment); err == nil {
+			continue // a page number
+		}
+		return false // names something, so it is a candidate
+	}
+	return true
+}
+
 func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
 	doc, err := html.Parse(strings.NewReader(pageHTML))
 	if err != nil {
@@ -159,6 +249,11 @@ func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "a" {
 			if candidate, isStrong, ok := candidateFrom(n, base); ok {
+				// Paging and view-switching links are calendar chrome,
+				// whatever their text says.
+				if IsNavigationLink(candidate.URL, base) {
+					return
+				}
 				if _, dup := seen[candidate.URL]; !dup {
 					seen[candidate.URL] = struct{}{}
 					if isStrong {

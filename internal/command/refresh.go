@@ -124,6 +124,24 @@ func runRefresh(ctx context.Context, args []string) error {
 	})
 	flush()
 
+	// Occurrences of one recurring event arrive from different listing pages
+	// and different runs, so folding them together belongs here as well as in
+	// the scraper.
+	mergeCtx, cancelMerge := context.WithTimeout(context.WithoutCancel(ctx), checkpointTimeout)
+	defer cancelMerge()
+
+	if pruned, err := db.PruneNavigationListings(mergeCtx); err != nil {
+		log.Printf("Could not prune navigation links: %v", err)
+	} else if pruned > 0 {
+		log.Printf("Removed %d listing navigation links stored as exhibitions", pruned)
+	}
+
+	if merged, err := db.MergeDuplicateExhibitions(mergeCtx); err != nil {
+		log.Printf("Could not merge repeated listings: %v", err)
+	} else if merged > 0 {
+		log.Printf("Merged %d repeated listings of the same event", merged)
+	}
+
 	log.Printf("Refresh finished in %s: found %d exhibitions, stored %d, lost %d",
 		time.Since(start).Round(time.Second), found, written, failed)
 	return nil

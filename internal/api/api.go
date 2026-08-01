@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"museum/internal/postgres"
 )
@@ -72,6 +73,7 @@ type placeLookup interface {
 type Server struct {
 	catalogue Catalogue
 	places    placeLookup
+	scrapes   *scrapeQueue
 }
 
 // NewServer returns a Server backed by the catalogue. Without a resolver the
@@ -79,6 +81,22 @@ type Server struct {
 // told where Paris is.
 func NewServer(catalogue Catalogue) *Server {
 	return &Server{catalogue: catalogue}
+}
+
+// WithScraping returns a Server that can read museum websites on demand, so a
+// visitor arriving somewhere nobody has looked yet does not simply find it
+// empty.
+func (s *Server) WithScraping(store Harvester) *Server {
+	s.scrapes = newScrapeQueue(store)
+	return s
+}
+
+// Close releases what the server started. Safe on a server that started
+// nothing.
+func (s *Server) Close() {
+	if s.scrapes != nil {
+		s.scrapes.close()
+	}
 }
 
 // WithPlaces returns a Server that can resolve place names.
@@ -103,7 +121,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/museums", s.handleMuseums)
 	mux.HandleFunc("GET /v1/museums/{id}", s.handleMuseum)
 	mux.HandleFunc("GET /v1/points", s.handlePoints)
+	mux.HandleFunc("GET /v1/places", s.handlePlaces)
+	mux.HandleFunc("GET /v1/scrape", s.handleScrape)
+	mux.HandleFunc("POST /v1/scrape", s.handleScrape)
 	mux.HandleFunc("GET /map", s.handleMap)
+	mux.HandleFunc("GET /map/vendor/{file}", s.handleVendor)
 	mux.HandleFunc("GET /{$}", s.handleMap)
 	mux.HandleFunc("GET /v1/exhibitions", s.handleExhibitions)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
@@ -480,6 +502,49 @@ func (s *Server) handleMuseums(w http.ResponseWriter, r *http.Request) {
 // dense enough that at this count they trace the coastlines themselves — while
 // keeping the response to a few megabytes on a local connection.
 const maxPoints = 40_000
+
+// handlePlaces resolves a place name to somewhere on the map.
+//
+// The catalogue answers "which museum is this?"; this answers "where is this?".
+// Without it a search box can only find things the catalogue already holds, so
+// typing a city name that has no museum of its own finds nothing at all.
+func (s *Server) handlePlaces(w http.ResponseWriter, r *http.Request) {
+	if s.places == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("place lookup is not enabled"))
+		return
+	}
+
+	name := strings.TrimSpace(r.URL.Query().Get("q"))
+	if name == "" {
+		writeError(w, http.StatusBadRequest, errors.New("q is required"))
+		return
+	}
+	if utf8.RuneCountInString(name) > maxPlaceNameChars {
+		writeError(w, http.StatusBadRequest,
+			fmt.Errorf("q must be %d characters or fewer", maxPlaceNameChars))
+		return
+	}
+
+	place, err := s.places.Resolve(r.Context(), name)
+	if errors.Is(err, postgres.ErrPlaceUnknown) {
+		writeJSON(w, http.StatusOK, map[string]any{"count": 0, "places": []any{}})
+		return
+	}
+	if err != nil {
+		writeServerError(w, r, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": 1,
+		"places": []map[string]any{{
+			"name":      place.DisplayName,
+			"latitude":  place.Latitude,
+			"longitude": place.Longitude,
+			"radius_km": place.RadiusKm,
+		}},
+	})
+}
 
 // handlePoints returns museum positions for drawing.
 func (s *Server) handlePoints(w http.ResponseWriter, r *http.Request) {

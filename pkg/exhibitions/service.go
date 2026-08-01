@@ -168,6 +168,17 @@ func (s *Scraper) ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibi
 	return dedupe(found), nil
 }
 
+// widen stretches a kept entry to cover another occurrence of the same event,
+// so four one-day listings become one entry spanning all four days.
+func widen(kept *Exhibition, other Exhibition) {
+	if other.Start != nil && (kept.Start == nil || other.Start.Before(*kept.Start)) {
+		kept.Start = other.Start
+	}
+	if other.End != nil && (kept.End == nil || other.End.After(*kept.End)) {
+		kept.End = other.End
+	}
+}
+
 // listingURLs returns the pages worth trying for a site's programme, the links
 // its home page offers first and the conventional paths after.
 func (s *Scraper) listingURLs(ctx context.Context, base *url.URL) []string {
@@ -190,15 +201,24 @@ func (s *Scraper) listingURLs(ctx context.Context, base *url.URL) []string {
 // dedupe removes repeated entries and orders them: running first, then by
 // closing date so the ones about to end come first.
 func dedupe(exhibitions []Exhibition) []Exhibition {
-	seen := make(map[string]struct{}, len(exhibitions))
+	// Keyed on the title alone, not the title and URL.
+	//
+	// Museums publish recurring events as one entry per occurrence, each with
+	// its own URL: Kalmar konstmuseum listed "Konstparken" four times across
+	// four days, and Hasselblad Center listed one exhibition's guided tours
+	// seven times. Keying on the URL treated every occurrence as a separate
+	// exhibition. Merging them keeps one entry spanning the whole run, which is
+	// what a visitor is actually asking about.
+	index := make(map[string]int, len(exhibitions))
 	unique := exhibitions[:0:0]
 
 	for _, e := range exhibitions {
-		key := strings.ToLower(e.Title) + "\x00" + e.URL
-		if _, dup := seen[key]; dup {
+		key := strings.ToLower(strings.TrimSpace(e.Title))
+		if at, dup := index[key]; dup {
+			widen(&unique[at], e)
 			continue
 		}
-		seen[key] = struct{}{}
+		index[key] = len(unique)
 		unique = append(unique, e)
 	}
 
