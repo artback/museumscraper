@@ -62,6 +62,29 @@ func runLocate(ctx context.Context, args []string) error {
 
 	start := time.Now()
 
+	// Town-centre placement runs before the unplaced-museum check, because it
+	// is also the repair for positions an earlier run got wrong. Those museums
+	// are not unplaced — they are placed badly — so gating this on the count of
+	// museums without coordinates would make the damage unfixable.
+	if *townOnly {
+		if *dryRun {
+			log.Println("Would recompute every town-centre position (no geocoder calls)")
+			return nil
+		}
+		placed, discarded, err := db.PlaceAtTownCentres(ctx)
+		if err != nil {
+			return err
+		}
+		// The second number is reported because it would otherwise be
+		// invisible: this recomputes every approximate position rather than
+		// only filling empty ones, so a museum an earlier run put in the wrong
+		// place is either moved or left with none, and "placed N" alone would
+		// not say that anything had been taken away.
+		log.Printf("Placed %d museums at their town centres in %s, having discarded %d earlier approximate positions",
+			placed, time.Since(start).Round(time.Second), discarded)
+		return nil
+	}
+
 	pending, err := db.UnplacedMuseums(ctx, *locality, *country, *limit)
 	if err != nil {
 		return err
@@ -76,19 +99,6 @@ func runLocate(ctx context.Context, args []string) error {
 	// kept refusing and the backoff kept widening. Saying so up front matters,
 	// because the honest estimate for tens of thousands is weeks rather than
 	// hours, and -town-centres exists precisely to avoid that.
-	if *townOnly {
-		if *dryRun {
-			log.Printf("Would place %d museums at their town centres (no geocoder calls)", len(pending))
-			return nil
-		}
-		placed, err := db.PlaceAtTownCentres(ctx)
-		if err != nil {
-			return err
-		}
-		log.Printf("Placed %d museums at their town centres in %s",
-			placed, time.Since(start).Round(time.Second))
-		return nil
-	}
 	log.Printf("Locating %d museums (at least %s, and in practice far longer if the geocoder throttles)",
 		len(pending), (time.Duration(len(pending)) * 1100 * time.Millisecond).Round(time.Second))
 
