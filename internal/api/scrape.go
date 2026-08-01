@@ -10,15 +10,25 @@ import (
 	"sync"
 	"time"
 
-	"museum/internal/models"
+	"museum/internal/sweep"
 	"museum/pkg/exhibitions"
 )
 
 // Harvester is the part of the store an on-demand scrape needs. It is separate
 // from Catalogue because scraping writes, and most of the API only reads.
+//
+// It embeds the sweep's own store because an on-demand scrape has to leave
+// exactly the trace a scheduled one does. When it did not, the two worked
+// against each other: the sweep re-read sites this had read minutes earlier,
+// none of this work fed the adaptive interval, vanished listings were retired
+// down only one of the two paths, and an area scraped here still reported "no
+// exhibitions have been collected here yet", because the coverage report reads
+// the attempt record and this was not writing one.
 type Harvester interface {
-	MuseumsWithWebsitesNear(ctx context.Context, lat, lon, radiusKm float64, limit int) ([]models.Museum, error)
-	SaveExhibitions(ctx context.Context, found []exhibitions.Exhibition) (int64, error)
+	sweep.Store
+
+	DiscoverSites(ctx context.Context) (int64, error)
+	TargetsNear(ctx context.Context, lat, lon, radiusKm float64, limit int) ([]sweep.Target, error)
 	MergeDuplicateExhibitions(ctx context.Context) (int64, error)
 	PruneNavigationListings(ctx context.Context) (int64, error)
 }
@@ -62,8 +72,8 @@ type scrapeRequest struct {
 // that a page which starts a scrape whenever someone looks at a new city must
 // never turn into many simultaneous crawlers pointed at other people's servers.
 type scrapeQueue struct {
-	store   Harvester
-	scraper *exhibitions.Scraper
+	store  Harvester
+	runner *sweep.Runner
 
 	requests chan scrapeRequest
 
@@ -79,7 +89,7 @@ type scrapeQueue struct {
 func newScrapeQueue(store Harvester) *scrapeQueue {
 	q := &scrapeQueue{
 		store:    store,
-		scraper:  exhibitions.NewScraper(),
+		runner:   sweep.NewRunner(store, exhibitions.NewScraper()),
 		requests: make(chan scrapeRequest, scrapeQueueDepth),
 		state:    make(map[string]scrapeState),
 		done:     make(map[string]time.Time),
@@ -180,42 +190,39 @@ func (q *scrapeQueue) scrape(req scrapeRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), scrapeJobTimeout)
 	defer cancel()
 
-	museums, err := q.store.MuseumsWithWebsitesNear(ctx, req.lat, req.lon, req.radiusKm, scrapeMaxMuseums)
+	// A site is a row, and a museum added by a crawl since the last sweep does
+	// not have one yet. Without this, an area of newly catalogued museums —
+	// exactly the case someone panning a map is most likely to hit — would
+	// return nothing to read.
+	if _, err := q.store.DiscoverSites(ctx); err != nil {
+		log.Printf("scrape %s: discovering sites: %v", req.cell, err)
+	}
+
+	targets, err := q.store.TargetsNear(ctx, req.lat, req.lon, req.radiusKm, scrapeMaxMuseums)
 	if err != nil {
 		log.Printf("scrape %s: %v", req.cell, err)
 		return
 	}
-	if len(museums) == 0 {
+	if len(targets) == 0 {
 		return
 	}
 
 	start := time.Now()
-	var found, stored int
+	var found int
+	var retired int64
 
-	// Stored in batches as they arrive, for the same reason the command-line
-	// refresh does: a scrape that only persists at the end loses everything if
-	// anything goes wrong before it gets there.
-	buffer := make([]exhibitions.Exhibition, 0, 128)
-	flush := func() {
-		if len(buffer) == 0 {
-			return
+	// One site at a time, through the same reader the scheduled sweep uses, so
+	// this run stores, retires and reschedules identically. Sites already
+	// parked for repeated failure are excluded by TargetsNear: someone looking
+	// at a map is not a reason to retry a host that has refused six times.
+	for _, target := range targets {
+		if ctx.Err() != nil {
+			break
 		}
-		n, err := q.store.SaveExhibitions(ctx, buffer)
-		if err != nil {
-			log.Printf("scrape %s: storing: %v", req.cell, err)
-		}
-		stored += int(n)
-		buffer = buffer[:0]
+		report := q.runner.Read(ctx, target)
+		found += report.Found
+		retired += report.Retired
 	}
-
-	q.scraper.Stream(ctx, museums, scrapeConcurrency, func(batch []exhibitions.Exhibition) {
-		found += len(batch)
-		buffer = append(buffer, batch...)
-		if len(buffer) >= 128 {
-			flush()
-		}
-	})
-	flush()
 
 	if _, err := q.store.PruneNavigationListings(ctx); err != nil {
 		log.Printf("scrape %s: pruning: %v", req.cell, err)
@@ -224,8 +231,8 @@ func (q *scrapeQueue) scrape(req scrapeRequest) {
 		log.Printf("scrape %s: merging: %v", req.cell, err)
 	}
 
-	log.Printf("scrape %s: %d sites, %d exhibitions found, %d stored, %s",
-		req.cell, len(museums), found, stored, time.Since(start).Round(time.Second))
+	log.Printf("scrape %s: %d sites, %d exhibitions found, %d retired, %s",
+		req.cell, len(targets), found, retired, time.Since(start).Round(time.Second))
 }
 
 // close stops the worker and waits for the job in flight.
