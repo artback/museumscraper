@@ -113,23 +113,64 @@ func allPathSegments(path string) []string {
 // so it is another index rather than an entry, and reading it as one would list
 // a museum's closed shows as though they were open.
 func EntryUnder(section, entryURL string) bool {
+	name, ok := childOf(section, entryURL)
+	return ok && !containsAny(name, strongPathHints)
+}
+
+// SubIndexUnder reports whether a URL is another index sitting directly under
+// this one — /utstallningar/permanenta-utstallningar/ below /utstallningar/.
+//
+// Such a page is not an exhibition and must not be read as one. Göteborgs
+// naturhistoriska museum lists three of them beside its actual halls, and they
+// were stored as exhibitions called "Permanenta Utstallningar" and "Tillfalliga
+// Utstallningar" — the museum's table of contents, presented to a visitor as
+// things to go and see.
+//
+// Judged only against the page being read, never in general: "permanent" names
+// an index here because /utstallningar/ already established the subject, while
+// a site whose one permanent display lives at /permanent-exhibition/ is naming
+// the exhibition itself and is left alone.
+func SubIndexUnder(section, entryURL string) bool {
+	name, ok := childOf(section, entryURL)
+	return ok && containsAny(name, strongPathHints)
+}
+
+// parentSection returns the section one level above, so that a listing page's
+// siblings can be judged as well as its children. Reading
+// /utstallningar/permanenta-utstallningar/ means /utstallningar/ is the parent,
+// and /utstallningar/tillfalliga-utstallningar/ beside it is another index
+// rather than something to go and see.
+func parentSection(section string) string {
+	segments := allPathSegments(section)
+	if len(segments) < 2 {
+		return ""
+	}
+	return "/" + strings.Join(segments[:len(segments)-1], "/") + "/"
+}
+
+// childOf returns the final segment of a URL that sits exactly one level below
+// section, and whether it does.
+func childOf(section, entryURL string) (string, bool) {
 	if section == "" {
-		return false
+		return "", false
 	}
 	parsed, err := url.Parse(entryURL)
 	if err != nil {
-		return false
+		return "", false
 	}
 	segments := allPathSegments(parsed.Path)
 	if len(segments) == 0 {
-		return false
+		return "", false
 	}
 	path := "/" + strings.Join(segments, "/") + "/"
 	if path == section || !strings.HasPrefix(path, section) {
-		return false
+		return "", false
 	}
 	rest := allPathSegments(strings.TrimPrefix(path, section))
-	return len(rest) == 1 && !containsAny(rest[0], strongPathHints)
+	if len(rest) != 1 {
+		return "", false
+	}
+	return rest[0], true
 }
 
 // skipLinkWords mark navigation, commerce and boilerplate that sits alongside
@@ -157,6 +198,9 @@ type Candidate struct {
 	// ISO-8601 whatever language the page is written in, so where they exist
 	// they are used in place of reading the text.
 	Dates DateRange
+	// Strong is true when the link's own path, or its place below the index,
+	// says it is an exhibition rather than some other kind of programme entry.
+	Strong bool
 }
 
 // FindListingLinks returns the URLs on a page that look like they lead to the
@@ -183,23 +227,34 @@ func FindListingLinks(pageHTML string, base *url.URL) []string {
 			return
 		}
 
+		// A word that names exhibitions outranks one that names a programme in
+		// general, in the text and in the path alike.
+		//
+		// Kalmar konstmuseum offers both: "Kalender" at /event/, its calendar of
+		// guided tours and quizzes, and "Utställningar" at
+		// /aktuella-utstallningar/, its exhibitions. Scored the same, they were
+		// separated by which came first in the navigation, the calendar won, and
+		// because the search stops at the first page that yields anything the
+		// museum's three actual exhibitions were never reached. Its programme
+		// was read as seven guided tours of shows that were themselves missing.
 		lower := strings.ToLower(text)
 		score := 0
-		for _, word := range listingLinkWords {
-			if strings.Contains(lower, word) {
-				score += 2
-				break
-			}
+		switch {
+		case containsAny(lower, strongPathHints):
+			score += 3
+		case containsAny(lower, listingLinkWords):
+			score += 2
 		}
 		parsed, err := url.Parse(resolved)
 		if err != nil {
 			return
 		}
-		for _, hint := range exhibitionPathHints {
-			if strings.Contains(strings.ToLower(parsed.Path), hint) {
-				score++
-				break
-			}
+		path := strings.ToLower(parsed.Path)
+		switch {
+		case containsAny(path, strongPathHints):
+			score += 2
+		case containsAny(path, weakPathHints):
+			score++
 		}
 		if score == 0 {
 			return
@@ -419,6 +474,13 @@ func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool, s
 	// Sitting directly under the index counts as strongly as a recognised word
 	// in the path, and covers the sites whose own spelling no vocabulary has.
 	under := EntryUnder(section, resolved)
+	if SubIndexUnder(section, resolved) || SubIndexUnder(parentSection(section), resolved) {
+		// Another index below this one: a table of contents, not a thing to go
+		// and see. Rejected here rather than left to the path hints, which
+		// happily read /utstallningar/permanenta-utstallningar/ as an entry
+		// because its parent segment names exhibitions.
+		return Candidate{}, false, false
+	}
 
 	sections := pathSections(parsed.Path)
 	if len(sections) == 0 && !under {
@@ -494,6 +556,7 @@ func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool, s
 		URL:     resolved,
 		Context: context,
 		Dates:   machineDates(card),
+		Strong:  isStrong,
 	}, isStrong, true
 }
 

@@ -34,3 +34,22 @@ func TestStreamReportsEverySiteIncludingEmptyOnes(t *testing.T) {
 			calls, sites)
 	}
 }
+
+// One page can name the same entry twice — once as a heading and once as a
+// photograph with no text, whose title is read off the slug. They are one
+// exhibition, and the museum's own spelling is the one to keep.
+func TestDedupeKeepsTheBetterTitleForOneURL(t *testing.T) {
+	const url = "https://www.gnm.se/utstallningar/permanenta-utstallningar/daggdjurssalen/"
+
+	got := dedupe([]Exhibition{
+		{Title: "Daggdjurssalen", URL: url},
+		{Title: "Däggdjurssalen", URL: url},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("got %d entries for one URL, want 1: %+v", len(got), got)
+	}
+	if got[0].Title != "Däggdjurssalen" {
+		t.Errorf("Title = %q, want the museum's own spelling rather than the slug", got[0].Title)
+	}
+}

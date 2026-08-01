@@ -522,3 +522,52 @@ func TestProgrammeSection(t *testing.T) {
 		t.Errorf("section = %q, want the page's own path", got)
 	}
 }
+
+// A museum's table of contents is not a thing to go and see.
+//
+// Göteborgs naturhistoriska museum lists /utstallningar/permanenta-utstallningar/
+// and /utstallningar/tillfalliga-utstallningar/ beside its actual halls, and
+// both were stored as exhibitions — the site's own navigation, offered to a
+// visitor as something on show.
+func TestSubIndexUnder(t *testing.T) {
+	cases := []struct {
+		section, entry string
+		want           bool
+	}{
+		{"/utstallningar/", "https://gnm.se/utstallningar/permanenta-utstallningar/", true},
+		{"/utstallningar/", "https://gnm.se/utstallningar/tillfalliga-utstallningar/", true},
+		{"/utstallningar/", "https://gnm.se/utstallningar/daggdjurssalen/", false},
+		// Judged only against the page being read: a site whose single permanent
+		// display lives at the top level is naming the display, not indexing it.
+		{"/whats-on/", "https://x.org/permanent-exhibition/", false},
+	}
+	for _, c := range cases {
+		if got := SubIndexUnder(c.section, c.entry); got != c.want {
+			t.Errorf("SubIndexUnder(%q, %q) = %v, want %v", c.section, c.entry, got, c.want)
+		}
+	}
+}
+
+// An exhibition word in a link outranks a generic programme word.
+//
+// Kalmar konstmuseum offers "Kalender" at /event/ and "Utställningar" at
+// /aktuella-utstallningar/. Scored the same, the order they appeared in the
+// navigation decided it, the calendar won, and because the search stops at the
+// first page that yields anything the museum's three exhibitions were never
+// reached — its programme was read as seven guided tours of shows that were
+// themselves missing.
+func TestFindListingLinks_PrefersExhibitionsOverTheCalendar(t *testing.T) {
+	const home = `<html><body>
+	  <a href="/event/">Kalender</a>
+	  <a href="/aktuella-utstallningar/">Utställningar</a>
+	</body></html>`
+
+	got := FindListingLinks(home, mustURL(t, "https://www.kalmarkonstmuseum.se/"))
+
+	if len(got) == 0 {
+		t.Fatal("no listing links found")
+	}
+	if got[0] != "https://www.kalmarkonstmuseum.se/aktuella-utstallningar/" {
+		t.Errorf("first link = %q, want the exhibitions index ahead of the calendar", got[0])
+	}
+}

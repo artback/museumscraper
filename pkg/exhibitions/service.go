@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"museum/internal/models"
 )
@@ -224,36 +225,33 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 		// date is what separates the two. A permanent display is the exception,
 		// and has to name itself one to be kept: otherwise the rule that keeps
 		// the noise out is gone.
-		permanent := dates.Permanent
-		// listed says the entry is on the museum's exhibitions index and sits
-		// inside that same section. That is a stronger claim than any date:
-		// the noise the date rule guards against is links to /visit, /tickets
-		// and /support-us, and none of those are filed under /exhibitions.
+		// An entry the museum files as an exhibition, but gives no dates for, is
+		// permanent. That is what a museum means by it: a show with a closing
+		// date says so, and one that says nothing is not going anywhere.
 		//
-		// It has to exist because a great many museums publish no dates at all
-		// on the index. Göteborgs stadsmuseum lists ten exhibitions as linked
-		// photographs, and the dates, where there are any, are prose on the
-		// entry's own page — "Visas tills 2030". Requiring a date discarded
-		// every one of them and the museum came back empty.
-		listed := EntryUnder(section, candidate.URL)
+		// Requiring a date instead discarded them. It is a good rule against
+		// noise — links to /visit and /tickets carry no dates either — but the
+		// noise it guards against is not filed under a museum's exhibitions
+		// section, and an entry that is has already been vouched for. Göteborgs
+		// stadsmuseum lists ten exhibitions with no dates on the index at all,
+		// Kalmar konstmuseum three, and every one was thrown away.
+		//
+		// Calling them permanent rather than merely undated is the honest
+		// reading and also the useful one: it puts them behind everything with
+		// a closing date, where a visitor deciding what to catch first wants
+		// them, and says plainly on the page why they carry no dates.
+		permanent := dates.Permanent
 		if dates.IsZero() && !permanent {
-			switch {
-			case candidateIsPermanent(candidate, pagePermanent):
-				permanent = true
-			case listed:
-				// Kept with no dates rather than guessed at. A museum's index
-				// of what is on is a statement that these are on now; how long
-				// for is simply not recorded there.
-			default:
+			if !candidate.Strong && !EntryUnder(section, candidate.URL) &&
+				!candidateIsPermanent(candidate, pagePermanent) {
 				continue
 			}
+			permanent = true
 		}
 
 		running, upcoming := dates.Runs(now), dates.Upcoming(now)
 		if permanent {
 			running, upcoming = true, false
-		} else if dates.IsZero() && listed {
-			running = true
 		}
 		if !running && !upcoming {
 			continue // already closed
@@ -415,16 +413,34 @@ func dedupe(exhibitions []Exhibition) []Exhibition {
 	// seven times. Keying on the URL treated every occurrence as a separate
 	// exhibition. Merging them keeps one entry spanning the whole run, which is
 	// what a visitor is actually asking about.
+	// Keyed on the URL as well, because one page can name the same entry twice.
+	// Göteborgs naturhistoriska museum links each of its halls from both its
+	// exhibitions index and its permanent-displays page, once as a heading and
+	// once as a photograph with no text at all, so the same URL arrived as
+	// "Däggdjurssalen" and as "Daggdjurssalen" read off the slug. The URL is the
+	// exhibition's identity — it is the primary key in the database — and the
+	// better-written of the two titles is the one to keep.
 	index := make(map[string]int, len(exhibitions))
 	unique := exhibitions[:0:0]
 
 	for _, e := range exhibitions {
-		key := strings.ToLower(strings.TrimSpace(e.Title))
-		if at, dup := index[key]; dup {
+		title := strings.ToLower(strings.TrimSpace(e.Title))
+		at, dup := index[title]
+		if !dup {
+			at, dup = index[e.URL]
+		}
+		if dup {
 			widen(&unique[at], e)
+			if betterTitle(e.Title, unique[at].Title) {
+				unique[at].Title = e.Title
+			}
+			index[strings.ToLower(strings.TrimSpace(unique[at].Title))] = at
 			continue
 		}
-		index[key] = len(unique)
+		index[title] = len(unique)
+		if e.URL != "" {
+			index[e.URL] = len(unique)
+		}
 		unique = append(unique, e)
 	}
 
@@ -579,4 +595,28 @@ func siteKey(website string) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimPrefix(parsed.Host, "www."))
+}
+
+// betterTitle reports whether a is the more informative of two titles for the
+// same exhibition.
+//
+// The comparison that matters is against a title read off a URL slug, which is
+// the fallback when a card carries no text. A slug has had its accents stripped
+// and its capitalisation invented — "Daggdjurssalen" beside the museum's own
+// "Däggdjurssalen" — so a title carrying letters outside ASCII is the museum's
+// own wording, and wins. Otherwise the longer one carries more.
+func betterTitle(a, b string) bool {
+	if nonASCII(a) != nonASCII(b) {
+		return nonASCII(a)
+	}
+	return len(a) > len(b)
+}
+
+func nonASCII(s string) bool {
+	for _, r := range s {
+		if r > unicode.MaxASCII {
+			return true
+		}
+	}
+	return false
 }
