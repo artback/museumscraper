@@ -93,6 +93,16 @@ export function render(shows, { sort = "closing", onPick } = {}) {
 
 	if (temporary.length) {
 		out.push(section(temporary, sort, onPick));
+	} else if (permanent.length) {
+		// Somewhere with nothing time-limited on is a real and common answer —
+		// most of a small city, most of the year. Said plainly, because the
+		// alternative is what this looked like before: a sort control, a count,
+		// and then a gap where the list should be, which reads as a panel that
+		// failed to load rather than a city with nothing closing.
+		out.push(el("div", { class: "empty", "data-glyph": "◎" }, [
+			"Nothing with an end date is on here",
+			el("small", {}, "The permanent collections below are open as usual."),
+		]));
 	}
 
 	if (permanent.length) {

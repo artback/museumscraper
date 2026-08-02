@@ -158,7 +158,7 @@ export function build({ onPick, onPickVenue }) {
 			// merge into one unbroken sheet of light and the shape that makes
 			// the view worth looking at — which cities, and how far apart —
 			// disappears into it.
-			"circle-opacity": ["interpolate", ["linear"], ["zoom"], 1.4, 0.09, 4, 0.06, 5.4, 0],
+			"circle-opacity": ["interpolate", ["linear"], ["zoom"], 1.4, 0.05, 4, 0.035, 5.4, 0],
 		},
 	});
 
@@ -171,11 +171,23 @@ export function build({ onPick, onPickVenue }) {
 			// Exponential rather than linear: apparent size should track the
 			// geometric nature of zoom, or the middle zooms look lumpy.
 			"circle-radius": ["interpolate", ["exponential", 1.35], ["zoom"],
-				1.4, 1.5, 4, 2.3, 8, 3.6, 12, 5.5, 16, 8],
-			// A hair of blur below zoom 6 stops 1.5px dots aliasing into
+				1.4, 0.8, 4, 1.9, 8, 3.6, 12, 5.5, 16, 8],
+			// A hair of blur below zoom 6 stops sub-pixel dots aliasing into
 			// squares, and is what lets overlap read as density rather than mush.
-			"circle-blur": ["interpolate", ["linear"], ["zoom"], 1.4, 0.7, 6, 0.15, 10, 0],
-			"circle-opacity": ["interpolate", ["linear"], ["zoom"], 1.4, 0.55, 3, 0.72, 6, 0.92, 9, 1],
+			"circle-blur": ["interpolate", ["linear"], ["zoom"], 1.4, 0.35, 6, 0.15, 10, 0],
+			// Small and faint at globe scale, so that overlap accumulates into a
+			// gradient instead of a ceiling.
+			//
+			// These are forty thousand marks on a sphere a few hundred pixels
+			// across, and at the opacity a single readable dot wants they stop
+			// being marks at all: western Europe went to a flat sheet of colour
+			// from Ireland to Poland, taking the coastlines, the borders and the
+			// city names under it with it. Saturation has to mean "this is the
+			// densest place there is" — Paris, the Rhine — rather than "more than
+			// a few", or the view says the same thing about a continent that it
+			// says about one street.
+			"circle-opacity": ["interpolate", ["linear"], ["zoom"],
+				1.4, 0.18, 2.5, 0.3, 4, 0.5, 6, 0.9, 9, 1],
 			"circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 7, 0, 10, 1, 14, 1.5],
 			"circle-stroke-color": "#05070c",
 			"circle-stroke-opacity": 0.85,
