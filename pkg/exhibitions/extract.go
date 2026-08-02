@@ -961,11 +961,19 @@ func resolveURL(base *url.URL, href string) (string, bool) {
 
 // candidateListingURLs returns the conventional programme URLs for a site, used
 // when the home page offers no obvious link.
-func candidateListingURLs(base *url.URL) []string {
+//
+// scope confines them to a museum's own section when its website names one, so
+// a venue inside a larger site is offered ".../hem-i-haga/exhibitions" rather
+// than the institution's "/exhibitions". Guessing at the root there would find
+// the parent's programme and file it under the venue.
+func candidateListingURLs(base *url.URL, scope string) []string {
 	urls := make([]string, 0, len(listingPaths))
-	for _, path := range listingPaths {
+	for _, listing := range listingPaths {
 		candidate := *base
-		candidate.Path = path
+		candidate.Path = listing
+		if scope != "" {
+			candidate.Path = strings.TrimSuffix(scope, "/") + listing
+		}
 		candidate.RawQuery = ""
 		candidate.Fragment = ""
 		urls = append(urls, candidate.String())

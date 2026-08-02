@@ -571,3 +571,75 @@ func TestFindListingLinks_PrefersExhibitionsOverTheCalendar(t *testing.T) {
 		t.Errorf("first link = %q, want the exhibitions index ahead of the calendar", got[0])
 	}
 }
+
+func TestVenueScope(t *testing.T) {
+	cases := map[string]string{
+		// A venue inside a larger institution's site. Göteborgs stadsmuseum
+		// publishes one programme at /utstallningar/ and gives Hem i Haga a
+		// page; reading from the root gave Hem i Haga all ten of the museum's
+		// exhibitions, none of which are specifically there.
+		"https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/":        "/besok-oss/hem-i-haga/",
+		"https://goteborgsstadsmuseum.se/besok-oss/lilla-anggarden":    "/besok-oss/lilla-anggarden/",
+		"https://www.glasgowlife.org.uk/museums/gallery-of-modern-art": "/museums/gallery-of-modern-art/",
+		// The site itself, however it is written.
+		"https://www.rijksmuseum.nl":            "",
+		"https://www.rijksmuseum.nl/":           "",
+		"https://www.rijksmuseum.nl/index.html": "",
+		"http://example.org/default.aspx":       "",
+	}
+	for raw, want := range cases {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if got := venueScope(u); got != want {
+			t.Errorf("venueScope(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestWithinScope(t *testing.T) {
+	base, _ := url.Parse("https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/")
+	scope := venueScope(base)
+
+	within := []string{
+		"https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/",
+		"https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/utstallningar",
+	}
+	for _, u := range within {
+		if !withinScope(u, base, scope) {
+			t.Errorf("withinScope(%q) = false, want true", u)
+		}
+	}
+
+	outside := []string{
+		// The institution's own programme — the exact page that was being
+		// attributed to this one venue.
+		"https://goteborgsstadsmuseum.se/utstallningar/",
+		// A sibling venue.
+		"https://goteborgsstadsmuseum.se/besok-oss/lilla-anggarden/",
+		// A path that merely starts with the same letters.
+		"https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga-butiken/",
+		"https://someone-else.example/utstallningar/",
+	}
+	for _, u := range outside {
+		if withinScope(u, base, scope) {
+			t.Errorf("withinScope(%q) = true, want false", u)
+		}
+	}
+
+	// A museum whose website is the site keeps the run of the whole site.
+	root, _ := url.Parse("https://www.rijksmuseum.nl/")
+	if !withinScope("https://www.rijksmuseum.nl/en/whats-on", root, venueScope(root)) {
+		t.Error("an unscoped site should not be restricted")
+	}
+}
+
+func TestCandidateListingURLs_StayInsideTheVenue(t *testing.T) {
+	base, _ := url.Parse("https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/")
+	for _, got := range candidateListingURLs(base, venueScope(base)) {
+		if !strings.Contains(got, "/besok-oss/hem-i-haga/") {
+			t.Errorf("candidate %q escapes the venue", got)
+		}
+	}
+}

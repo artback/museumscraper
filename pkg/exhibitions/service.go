@@ -17,6 +17,7 @@ import (
 	"errors"
 	"log"
 	"net/url"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -193,7 +194,8 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 	}
 
 	now := s.now()
-	home := s.readHome(ctx, base)
+	scope := venueScope(base)
+	home := s.readHome(ctx, base, scope)
 
 	var (
 		result  = Result{Reached: home.reached}
@@ -201,7 +203,10 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 		visited = make(map[string]struct{})
 	)
 
-	for _, listingURL := range slices.Concat(home.listings, candidateListingURLs(base)) {
+	for _, listingURL := range slices.Concat(home.listings, candidateListingURLs(base, scope)) {
+		if !withinScope(listingURL, base, scope) {
+			continue
+		}
 		if ctx.Err() != nil {
 			result.Exhibitions = found
 			return result, ctx.Err()
@@ -237,6 +242,9 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 	// would spend a request per miss on every museum in the catalogue.
 	permanentPages := 0
 	for _, listingURL := range home.permanent {
+		if !withinScope(listingURL, base, scope) {
+			continue
+		}
 		if ctx.Err() != nil {
 			result.Exhibitions = dedupe(found)
 			return result, ctx.Err()
@@ -259,7 +267,7 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 	}
 
 	if len(found) == 0 {
-		if display, ok := s.permanentDisplay(ctx, base, home, museum, now); ok {
+		if display, ok := s.permanentDisplay(ctx, base, scope, home, museum, now); ok {
 			found = append(found, display)
 			result.Reached = true
 			// The page describing the museum is the page whose changing
@@ -373,7 +381,7 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 // and which are the shop, the newsletter and the committee, and there is no
 // signal that survives contact with more than one site. The museum is the thing
 // permanently on show; the page describing it is where a visitor should be sent.
-func (s *Scraper) permanentDisplay(ctx context.Context, base *url.URL, home homePage, museum models.Museum, now time.Time) (Exhibition, bool) {
+func (s *Scraper) permanentDisplay(ctx context.Context, base *url.URL, scope string, home homePage, museum models.Museum, now time.Time) (Exhibition, bool) {
 	tried := make(map[string]struct{}, maxInfoPages)
 
 	// A page the site itself called its permanent exhibition comes first, and
@@ -384,6 +392,12 @@ func (s *Scraper) permanentDisplay(ctx context.Context, base *url.URL, home home
 	// usual case, because a museum with one permanent exhibition writes a page
 	// about it rather than a page of links to it.
 	for _, infoURL := range slices.Concat(home.permanent, home.info, infoURLs(base)) {
+		// The same confinement as the listings: on a shared site the "about"
+		// page describes the institution, and standing in for a single venue's
+		// permanent display it would be wrong about all of them.
+		if !withinScope(infoURL, base, scope) {
+			continue
+		}
 		if ctx.Err() != nil {
 			return Exhibition{}, false
 		}
@@ -462,11 +476,62 @@ type homePage struct {
 	info []string
 }
 
-// readHome fetches a site's front page and sorts its links. A front page that
+// venueScope returns the path a museum occupies when its website points at one
+// venue inside a larger site, and "" when the website is the site itself.
+//
+// Museums share websites far more often than the scraper assumed: 20,724
+// records in the catalogue sit on a host another museum also claims, across
+// 6,761 such hosts. Göteborgs stadsmuseum publishes one programme at
+// /utstallningar/ and gives each of its venues a page — Hem i Haga at
+// /besok-oss/hem-i-haga/, Lilla Änggården beside it. Reading from the site root
+// gave Hem i Haga the whole museum's ten exhibitions, none of which are
+// specifically there. heritageireland.ie does the same for thirteen places,
+// jerseyheritage.org for seven, glasgowlife.org.uk for nine.
+//
+// A path ending in something that looks like a file — /index.html,
+// /default.aspx — is the front page written out longhand, not a venue.
+func venueScope(base *url.URL) string {
+	trimmed := strings.Trim(base.Path, "/")
+	if trimmed == "" || strings.Contains(path.Base(trimmed), ".") {
+		return ""
+	}
+	return "/" + trimmed + "/"
+}
+
+// withinScope reports whether a candidate page may be read on this museum's
+// behalf: the same host, and at or below its own page.
+//
+// There is deliberately no fallback to the site root when a scoped search finds
+// nothing. The programme at the root belongs to the institution, and attributing
+// it to one venue is the fault this exists to fix — for Hem i Haga the honest
+// answer is that nothing is listed for it, which is what its own page says.
+func withinScope(rawURL string, base *url.URL, scope string) bool {
+	if scope == "" {
+		return true
+	}
+	candidate, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if candidate.Host != "" && !strings.EqualFold(candidate.Host, base.Host) {
+		return false
+	}
+	within := candidate.Path
+	if !strings.HasSuffix(within, "/") {
+		within += "/"
+	}
+	return strings.HasPrefix(within, scope)
+}
+
+// readHome fetches the page a site should be read from and sorts its links: the
+// museum's own page when it has one, and the front page otherwise. A page that
 // cannot be read is not an error: the conventional paths are tried regardless.
-func (s *Scraper) readHome(ctx context.Context, base *url.URL) homePage {
+func (s *Scraper) readHome(ctx context.Context, base *url.URL, scope string) homePage {
 	home := *base
 	home.Path = "/"
+	if scope != "" {
+		home.Path = scope
+	}
 	home.RawQuery = ""
 	home.Fragment = ""
 
