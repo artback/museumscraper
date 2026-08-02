@@ -46,7 +46,7 @@ export async function show(id) {
 
 	const museum = result.data;
 	open = museum;
-	card.setTitle(museum.name);
+	card.setTitle(heading(museum));
 	paint(museum);
 	onChange?.(museum);
 
@@ -60,6 +60,20 @@ export async function show(id) {
 	loadShows(museum);
 }
 
+// heading is the museum's name, or its name and its town.
+//
+// Seventy records are named nothing but the word "museum" in some language —
+// "Museo", "Museet", "Muzeum" — because that is all their source recorded. A
+// panel headed "Museo" identifies nothing, so the town joins it in the heading
+// rather than only in the dimmed line beneath. The stored name is untouched;
+// this is a display decision about a name that cannot stand alone.
+const GENERIC_NAME = /^(museum|museo|mus[ée]e|museet|muzeum|muzej|museu)$/i;
+
+function heading(museum) {
+	const name = String(museum.name ?? "").trim();
+	return GENERIC_NAME.test(name) && museum.locality ? name + " — " + museum.locality : name;
+}
+
 function paint(museum) {
 	const where = [museum.locality, museum.country].filter(Boolean).join(", ");
 	const body = clear(card.body);
@@ -67,6 +81,14 @@ function paint(museum) {
 	if (where) body.append(el("div", { class: "meta where" }, where));
 
 	const tags = el("div", { class: "tags" }, [
+		// What the thing is comes before how well it is known. For a record
+		// like "Bohuslän", whose name is also a Swedish province and whose
+		// description says only "working life museum in Gothenburg
+		// Municipality", "steamboat" is the tag that stops it reading as a
+		// mis-scraped region — so it must not sit level with "position
+		// approximate", which is a caveat about the record rather than its
+		// subject.
+		...(museum.classes || []).map(kind => el("span", { class: "tag tag--kind" }, kind)),
 		museum.verified
 			? el("span", { class: "tag tag--ok" }, "Wikipedia article")
 			// The catalogue's unverified tail holds things that are not museums

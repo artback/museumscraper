@@ -1,6 +1,7 @@
 package quality
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -147,6 +148,34 @@ func TestCheckName(t *testing.T) {
 	}
 }
 
+func TestCheckClasses(t *testing.T) {
+	found := findingsFor([]models.Museum{
+		// Classified: nothing to report.
+		{Name: "S/S Bohuslän", Country: "Sweden", Sources: []string{"wikidata"},
+			Classes: []string{"steamboat"}},
+		// From the source that states classes, but carrying none. This is the
+		// one worth counting: a class query failing for a whole country looks
+		// exactly like this, and nothing else would notice.
+		{Name: "Unclassified Museum", Country: "Sweden", Sources: []string{"wikidata"}},
+		// Sources with no notion of class at all. Counting these would report
+		// the pipeline's shape as a fault and bury the signal above.
+		{Name: "From A List", Country: "Sweden", Sources: []string{"lists"}},
+		{Name: "From OpenStreetMap", Country: "Sweden", Sources: []string{"osm"}},
+	}, CheckUnclassified)
+
+	if len(found) != 1 {
+		t.Fatalf("got %d findings, want 1: %+v", len(found), found)
+	}
+	if found[0].Subject != "Unclassified Museum" {
+		t.Errorf("subject = %q", found[0].Subject)
+	}
+	// Info, not Warning: an unclassified museum is not a wrong record, and
+	// -fail-on warning must not start failing because Wikidata is patchy.
+	if found[0].Severity != Info {
+		t.Errorf("severity = %v, want Info", found[0].Severity)
+	}
+}
+
 func TestCheckDuplicates(t *testing.T) {
 	museums := []models.Museum{
 		{Name: "Art 42", Country: "France", Latitude: 48.8, Longitude: 2.3},
@@ -218,5 +247,40 @@ func TestReport_SeverityCounts(t *testing.T) {
 	}
 	if report.Warnings() != 1 {
 		t.Errorf("Warnings = %d, want 1", report.Warnings())
+	}
+}
+
+func TestCheckNotAMuseum(t *testing.T) {
+	found := findingsFor([]models.Museum{
+		// The contamination: hall-of-fame inductees admitted as museums.
+		{Name: "Pat O'Dea", Description: "Australian rules footballer"},
+		{Name: "Clifford", Description: "American-bred Thoroughbred racehorse"},
+		{Name: "Dead Man's Curve", Description: "1963 single by Jan and Dean"},
+		{Name: "Assis", Description: "railway station in Assis, Brazil"},
+		// Real museums that must survive. Each would match a descriptor if the
+		// museum keywords were not checked first: the football museum is about
+		// players, the racing museum about racehorses, and Billy Sunday's house
+		// is described by way of the baseball player who lived in it.
+		{Name: "National Football Museum", Description: "football museum in Manchester"},
+		{Name: "Billy Sunday Historic Home",
+			Description: "historic house of baseball player Billy Sunday in Kosciusko County"},
+		{Name: "National Museum of Racing and Hall of Fame",
+			Description: "Thoroughbred racehorse museum in Saratoga Springs"},
+		// No description is not evidence of anything.
+		{Name: "Palacio Taranco"},
+	}, CheckNotAMuseum)
+
+	var flagged []string
+	for _, f := range found {
+		flagged = append(flagged, f.Subject)
+	}
+	want := []string{"Pat O'Dea", "Clifford", "Dead Man's Curve", "Assis"}
+	if len(flagged) != len(want) {
+		t.Fatalf("flagged %v, want exactly %v", flagged, want)
+	}
+	for _, subject := range want {
+		if !slices.Contains(flagged, subject) {
+			t.Errorf("%q was not flagged; flagged %v", subject, flagged)
+		}
 	}
 }

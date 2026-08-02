@@ -195,6 +195,24 @@ ALTER TABLE museums ADD COLUMN IF NOT EXISTS aliases_normalized text[] NOT NULL 
 CREATE INDEX IF NOT EXISTS museums_aliases_normalized_idx
     ON museums USING gin (aliases_normalized);
 
+-- What kind of thing the museum is, in its source's own vocabulary: Wikidata's
+-- P31 labels, e.g. {steamboat, "passenger ship", "working life museum"}.
+--
+-- The catalogue could say what a record is called and where it stood, but never
+-- what it was, and a name alone is often not enough to tell. "Bohuslän",
+-- described as a "working life museum in Gothenburg Municipality", is also a
+-- Swedish province: on a map it read as a region scraped by mistake rather than
+-- as the preserved 1914 steamship it is. The classes are what distinguish the
+-- two, and they are stored rather than derived because no amount of parsing the
+-- name or the description recovers them.
+--
+-- An array because classification is genuinely multi-valued — a museum ship is a
+-- ship and a museum at once — and GIN-indexed so "which museums are ships" is a
+-- query rather than a scan.
+ALTER TABLE museums ADD COLUMN IF NOT EXISTS classes text[] NOT NULL DEFAULT '{}';
+
+CREATE INDEX IF NOT EXISTS museums_classes_idx ON museums USING gin (classes);
+
 -- Whether a museum's position is its own or its town's.
 --
 -- A fifth of the catalogue arrives with no coordinates, and the geocoder cannot

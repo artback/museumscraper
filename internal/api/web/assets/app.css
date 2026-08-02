@@ -270,6 +270,12 @@ a, .linkish { color: var(--accent); }
 }
 /* A glyph as well as a hue, so the distinction is not carried by colour alone. */
 .tag::before { content: "•"; font-size: 13px; line-height: 0; }
+/* What the thing is, as against how well it is known: the record's subject
+   rather than a caveat about it, so it leads and carries the accent. */
+.tag--kind {
+  background: var(--accent-tint); border-color: transparent; color: var(--accent);
+}
+.tag--kind::before { content: "▣"; font-size: 9px; line-height: 1; }
 .tag--ok { background: #6fdca726; border-color: #6fdca74d; color: var(--ok); }
 .tag--ok::before { content: "✓"; font-size: 10px; line-height: 1; }
 .tag--warn { background: #ffd16626; border-color: #ffd1664d; color: var(--warn); }

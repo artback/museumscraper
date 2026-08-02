@@ -148,11 +148,11 @@ func (s *Store) SaveMuseums(ctx context.Context, museums []models.Museum) (int64
 INSERT INTO museums (
     wikidata_id, name, normalized, search_text, locality_normalized, country, locality, description,
     website, wikipedia_url, page_id, source_page, aliases, aliases_normalized, sources, verified,
-    sitelinks, street, postcode, location, updated_at
+    sitelinks, street, postcode, classes, location, updated_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
-    CASE WHEN $20::double precision IS NULL THEN NULL
-         ELSE ST_SetSRID(ST_MakePoint($21::double precision, $20::double precision), 4326)::geography END,
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+    CASE WHEN $21::double precision IS NULL THEN NULL
+         ELSE ST_SetSRID(ST_MakePoint($22::double precision, $21::double precision), 4326)::geography END,
     now()
 )
 ON CONFLICT (identity) DO UPDATE SET
@@ -186,6 +186,12 @@ ON CONFLICT (identity) DO UPDATE SET
                      FROM unnest(museums.aliases_normalized || EXCLUDED.aliases_normalized) a WHERE a <> ''),
     sources       = (SELECT coalesce(array_agg(DISTINCT s), '{}')
                      FROM unnest(museums.sources || EXCLUDED.sources) s WHERE s <> ''),
+    -- Unioned like the aliases, and for the same reason: a source that does not
+    -- classify a museum knows less about it, not something different. The
+    -- Wikipedia crawls supply no classes at all, so replacing would let
+    -- whichever of them ran last erase what Wikidata established.
+    classes       = (SELECT coalesce(array_agg(DISTINCT c), '{}')
+                     FROM unnest(museums.classes || EXCLUDED.classes) c WHERE c <> ''),
     verified      = museums.verified OR EXCLUDED.verified,
     sitelinks     = greatest(EXCLUDED.sitelinks, museums.sitelinks),
     street        = coalesce(nullif(EXCLUDED.street, ''), museums.street),
@@ -224,7 +230,8 @@ ON CONFLICT (identity) DO UPDATE SET
 			validUTF8(m.SourcePage), validUTF8Each(textArray(m.AlsoKnownAs)),
 			validUTF8Each(normalizedAliases(m.AlsoKnownAs)),
 			validUTF8Each(textArray(m.Sources)), m.Verified,
-			m.Sitelinks, validUTF8(m.Address.Street()), validUTF8(m.Address.Postcode), lat, lon,
+			m.Sitelinks, validUTF8(m.Address.Street()), validUTF8(m.Address.Postcode),
+			validUTF8Each(textArray(m.Classes)), lat, lon,
 		}
 
 		queries = append(queries, args)
@@ -371,6 +378,7 @@ merged AS (
         sitelinks     = greatest(k.sitelinks, d.sitelinks),
         aliases       = (SELECT coalesce(array_agg(DISTINCT a), '{}') FROM unnest(k.aliases || d.aliases) a WHERE a <> ''),
         sources       = (SELECT coalesce(array_agg(DISTINCT s), '{}') FROM unnest(k.sources || d.sources) s WHERE s <> ''),
+        classes       = (SELECT coalesce(array_agg(DISTINCT c), '{}') FROM unnest(k.classes || d.classes) c WHERE c <> ''),
         updated_at    = now()
     FROM museums d JOIN pairs ON pairs.drop_id = d.id
     WHERE k.id = pairs.keep_id
@@ -513,7 +521,7 @@ func (s *Store) NearbyVerified(ctx context.Context, lat, lon, radiusKm float64, 
 	const stmt = `
 SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
-       aliases, sources, verified, street, postcode, location_approximate,
+       aliases, sources, classes, verified, street, postcode, location_approximate,
        ST_Y(location::geometry), ST_X(location::geometry),
        count(*) OVER () AS total,
        ST_Distance(location, $1::geography) / 1000.0 AS distance_km
@@ -564,7 +572,7 @@ func (s *Store) Search(ctx context.Context, query string, limit, offset int) (Pa
 WITH q AS (SELECT $1::text AS term)
 SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
-       aliases, sources, verified, street, postcode, location_approximate,
+       aliases, sources, classes, verified, street, postcode, location_approximate,
        ST_Y(location::geometry), ST_X(location::geometry),
        count(*) OVER () AS total,
        (
@@ -641,7 +649,7 @@ func (s *Store) MuseumByID(ctx context.Context, id string) (Hit, error) {
 	const stmt = `
 SELECT id, name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
-       aliases, sources, verified, street, postcode, location_approximate,
+       aliases, sources, classes, verified, street, postcode, location_approximate,
        ST_Y(location::geometry), ST_X(location::geometry),
        1::bigint AS total, 0::double precision
 FROM museums
@@ -687,6 +695,7 @@ func scanPage(rows pgx.Rows, withDistance bool) (Page, error) {
 			&hit.Museum.Name, &hit.Museum.Country, &hit.Museum.Locality,
 			&hit.Museum.Description, &hit.Museum.Website, &hit.Museum.WikipediaURL,
 			&hit.Museum.WikidataID, &hit.Museum.AlsoKnownAs, &hit.Museum.Sources,
+			&hit.Museum.Classes,
 			&hit.Museum.Verified, &street, &postcode, &hit.ApproximateLocation,
 			&lat, &lon, &total, &last,
 		); err != nil {
@@ -1035,7 +1044,7 @@ func (s *Store) EachMuseum(ctx context.Context, fn func(models.Museum)) error {
 	const stmt = `
 SELECT name, coalesce(country,''), coalesce(locality,''), coalesce(description,''),
        coalesce(website,''), coalesce(wikipedia_url,''), coalesce(wikidata_id,''),
-       aliases, sources, verified, street, postcode,
+       aliases, sources, classes, verified, street, postcode,
        ST_Y(location::geometry), ST_X(location::geometry)
 FROM museums`
 
@@ -1054,7 +1063,7 @@ FROM museums`
 		if err := rows.Scan(
 			&museum.Name, &museum.Country, &museum.Locality, &museum.Description,
 			&museum.Website, &museum.WikipediaURL, &museum.WikidataID,
-			&museum.AlsoKnownAs, &museum.Sources, &museum.Verified,
+			&museum.AlsoKnownAs, &museum.Sources, &museum.Classes, &museum.Verified,
 			&street, &postcode, &lat, &lon,
 		); err != nil {
 			return fmt.Errorf("scan catalogue: %w", err)
@@ -1533,6 +1542,115 @@ LIMIT $3`
 	return museums, rows.Err()
 }
 
+// MergeAliasVariants folds together rows where one row's name is a name the
+// other already answers to, returning how many it removed.
+//
+// This is the duplicate a second language creates. One crawl stores the Vienna
+// museum of applied arts as "MAK – Museum of Applied Arts" and records
+// "Museum für angewandte Kunst Wien" among its aliases; another crawl, or the
+// same museum read off a German page, stores that second name as a row of its
+// own. Neither existing merge sees it: the identity key compares names, and
+// these differ; MergeDuplicates needs the normalised names to be equal, and
+// MergeNameVariants needs a shared word set, which two languages do not have.
+// The in-process merger does match on aliases, so this only ever cleans up
+// across runs — but a catalogue is built by many runs.
+//
+// Three guards, each of which had to be there. Matching on the alias alone
+// found 1,987 pairs and most were not duplicates at all:
+//
+//   - Rows carrying different Wikidata ids are never merged. "Museo Civico" is
+//     Q3867825; "Bassano Civic Museum" is Q18670440 and lists "Museo civico"
+//     among its names. They are different museums 335 km apart, and an explicit
+//     disagreement about identity outranks any similarity of name.
+//   - A name several rows answer to identifies none of them. Italy has dozens
+//     of museums aliased "Museo Civico", so a nameless row called that could be
+//     folded into any of them; requiring the name to be claimed by exactly one
+//     row in the country is what makes the match evidence rather than a guess.
+//   - Two rows that both know where they are must be within a kilometre.
+//     A row with no position is still allowed to merge, because that is the
+//     common case for a name read off a list page — and the first two guards
+//     already establish it is the same institution.
+//
+// Together they take 1,987 candidate pairs down to 229, and the survivors are
+// what they should be: the Vienna pair above, "Museum of Contemporary Art,
+// Marseille" with "Musée d'art contemporain de Marseille", "Museum Hermann
+// Hesse" with "Museo Hermann Hesse", and Czech pairs three metres apart.
+func (s *Store) MergeAliasVariants(ctx context.Context) (int64, error) {
+	const stmt = `
+WITH candidates AS (
+    SELECT a.id AS keeper, b.id AS victim, b.normalized AS matched,
+           coalesce(a.country, '') AS country
+    FROM museums a
+    JOIN museums b
+      ON a.id <> b.id
+     AND coalesce(a.country, '') = coalesce(b.country, '')
+     AND a.aliases_normalized @> ARRAY[b.normalized]
+    WHERE b.normalized <> ''
+      -- Never against an explicit disagreement about identity.
+      AND NOT (coalesce(a.wikidata_id, '') <> '' AND coalesce(b.wikidata_id, '') <> '')
+      -- The row that knows its own Wikidata id is the one every other source
+      -- can be joined to, so it survives.
+      AND coalesce(a.wikidata_id, '') <> ''
+      AND (a.location IS NULL OR b.location IS NULL
+           OR ST_DWithin(a.location, b.location, 1000))
+),
+unambiguous AS (
+    SELECT c.* FROM candidates c
+    WHERE (SELECT count(*) FROM museums m
+           WHERE coalesce(m.country, '') = c.country
+             AND m.aliases_normalized @> ARRAY[c.matched]) = 1
+),
+-- One keeper per victim, and never a row that is itself being merged away, so
+-- a chain collapses onto one row rather than losing the middle of it.
+resolved AS (
+    SELECT victim, min(keeper) AS keeper FROM unambiguous GROUP BY victim
+),
+final AS (
+    SELECT r.victim, r.keeper FROM resolved r
+    WHERE NOT EXISTS (SELECT 1 FROM resolved o WHERE o.victim = r.keeper)
+),
+merged AS (
+    UPDATE museums m SET
+        aliases = (SELECT coalesce(array_agg(DISTINCT a), '{}')
+                     FROM unnest(m.aliases || v.aliases || ARRAY[v.name]) a WHERE a <> ''),
+        aliases_normalized = (SELECT coalesce(array_agg(DISTINCT a), '{}')
+                     FROM unnest(m.aliases_normalized || v.aliases_normalized || ARRAY[v.normalized]) a WHERE a <> ''),
+        sources = (SELECT coalesce(array_agg(DISTINCT s), '{}')
+                     FROM unnest(m.sources || v.sources) s WHERE s <> ''),
+        classes = (SELECT coalesce(array_agg(DISTINCT c), '{}')
+                     FROM unnest(m.classes || v.classes) c WHERE c <> ''),
+        search_text   = m.search_text || ' ' || v.search_text,
+        locality      = coalesce(nullif(m.locality, ''), v.locality),
+        description   = coalesce(nullif(m.description, ''), v.description),
+        website       = coalesce(nullif(m.website, ''), v.website),
+        wikipedia_url = coalesce(nullif(m.wikipedia_url, ''), v.wikipedia_url),
+        page_id       = coalesce(nullif(m.page_id, 0), v.page_id),
+        street        = coalesce(nullif(m.street, ''), v.street),
+        postcode      = coalesce(nullif(m.postcode, ''), v.postcode),
+        location      = coalesce(m.location, v.location),
+        verified      = m.verified OR v.verified,
+        sitelinks     = greatest(m.sitelinks, v.sitelinks),
+        updated_at    = now()
+    FROM final f JOIN museums v ON v.id = f.victim
+    WHERE m.id = f.keeper
+)
+DELETE FROM museums WHERE id IN (SELECT victim FROM final)`
+
+	var removed int64
+	// Repeated because one pass merges one victim per keeper, and a museum
+	// recorded under three names needs two.
+	for {
+		tag, err := s.pool.Exec(ctx, stmt)
+		if err != nil {
+			return removed, fmt.Errorf("merge alias variants: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return removed, nil
+		}
+		removed += tag.RowsAffected()
+	}
+}
+
 // MergeNameVariants folds together museums that are the same place recorded
 // under different names, and reports how many rows it removed.
 //
@@ -1593,6 +1711,8 @@ merged AS (
                      FROM unnest(m.aliases_normalized || v.aliases_normalized || ARRAY[v.normalized]) a WHERE a <> ''),
         sources = (SELECT coalesce(array_agg(DISTINCT s), '{}')
                      FROM unnest(m.sources || v.sources) s WHERE s <> ''),
+        classes = (SELECT coalesce(array_agg(DISTINCT c), '{}')
+                     FROM unnest(m.classes || v.classes) c WHERE c <> ''),
         search_text = m.search_text || ' ' || v.normalized,
         sitelinks = greatest(m.sitelinks, v.sitelinks),
         website = coalesce(nullif(m.website, ''), v.website),

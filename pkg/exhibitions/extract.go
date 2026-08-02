@@ -63,6 +63,20 @@ var strongPathHints = []string{
 var weakPathHints = []string{
 	"whats-on", "what-s-on", "display", "event", "programme", "program",
 	"calendar", "agenda",
+	// Swedish sites file the same mixed programme under "aktivitet", and a
+	// guided tour — "visning" — is what a venue offers when it has no
+	// exhibitions of its own. Hem i Haga is only ever open during them: its
+	// page advertises eleven tours of the museum flats, each linking to
+	// /aktivitet/hem-i-haga-grupp-1/, and with neither word known the venue
+	// looked as though it had nothing on.
+	//
+	// Weak, not strong, and that matters. Strong hints make a page's exhibition
+	// links displace everything else on it, which is the rule that stops a
+	// museum's programme being read as its calendar of tours — the failure
+	// recorded above listingLinkWords, where seven guided tours replaced three
+	// exhibitions. Left weak, these are read only where nothing better exists,
+	// which is exactly Hem i Haga's case.
+	"aktivitet", "visning",
 }
 
 // exhibitionPathHints is every hint, used when scoring links to a programme
@@ -961,11 +975,19 @@ func resolveURL(base *url.URL, href string) (string, bool) {
 
 // candidateListingURLs returns the conventional programme URLs for a site, used
 // when the home page offers no obvious link.
-func candidateListingURLs(base *url.URL) []string {
+//
+// scope confines them to a museum's own section when its website names one, so
+// a venue inside a larger site is offered ".../hem-i-haga/exhibitions" rather
+// than the institution's "/exhibitions". Guessing at the root there would find
+// the parent's programme and file it under the venue.
+func candidateListingURLs(base *url.URL, scope string) []string {
 	urls := make([]string, 0, len(listingPaths))
-	for _, path := range listingPaths {
+	for _, listing := range listingPaths {
 		candidate := *base
-		candidate.Path = path
+		candidate.Path = listing
+		if scope != "" {
+			candidate.Path = strings.TrimSuffix(scope, "/") + listing
+		}
 		candidate.RawQuery = ""
 		candidate.Fragment = ""
 		urls = append(urls, candidate.String())

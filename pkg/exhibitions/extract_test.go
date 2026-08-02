@@ -571,3 +571,134 @@ func TestFindListingLinks_PrefersExhibitionsOverTheCalendar(t *testing.T) {
 		t.Errorf("first link = %q, want the exhibitions index ahead of the calendar", got[0])
 	}
 }
+
+func TestVenueScope(t *testing.T) {
+	cases := map[string]string{
+		// A venue inside a larger institution's site. Göteborgs stadsmuseum
+		// publishes one programme at /utstallningar/ and gives Hem i Haga a
+		// page; reading from the root gave Hem i Haga all ten of the museum's
+		// exhibitions, none of which are specifically there.
+		"https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/":        "/besok-oss/hem-i-haga/",
+		"https://goteborgsstadsmuseum.se/besok-oss/lilla-anggarden":    "/besok-oss/lilla-anggarden/",
+		"https://www.glasgowlife.org.uk/museums/gallery-of-modern-art": "/museums/gallery-of-modern-art/",
+		// The site itself, however it is written.
+		"https://www.rijksmuseum.nl":            "",
+		"https://www.rijksmuseum.nl/":           "",
+		"https://www.rijksmuseum.nl/index.html": "",
+		"http://example.org/default.aspx":       "",
+	}
+	for raw, want := range cases {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if got := venueScope(u); got != want {
+			t.Errorf("venueScope(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestWithinScope(t *testing.T) {
+	base, _ := url.Parse("https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/")
+	scope := venueScope(base)
+
+	within := []string{
+		"https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/",
+		"https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/utstallningar",
+	}
+	for _, u := range within {
+		if !withinScope(u, base, scope) {
+			t.Errorf("withinScope(%q) = false, want true", u)
+		}
+	}
+
+	outside := []string{
+		// The institution's own programme — the exact page that was being
+		// attributed to this one venue.
+		"https://goteborgsstadsmuseum.se/utstallningar/",
+		// A sibling venue.
+		"https://goteborgsstadsmuseum.se/besok-oss/lilla-anggarden/",
+		// A path that merely starts with the same letters.
+		"https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga-butiken/",
+		"https://someone-else.example/utstallningar/",
+	}
+	for _, u := range outside {
+		if withinScope(u, base, scope) {
+			t.Errorf("withinScope(%q) = true, want false", u)
+		}
+	}
+
+	// A museum whose website is the site keeps the run of the whole site.
+	root, _ := url.Parse("https://www.rijksmuseum.nl/")
+	if !withinScope("https://www.rijksmuseum.nl/en/whats-on", root, venueScope(root)) {
+		t.Error("an unscoped site should not be restricted")
+	}
+}
+
+func TestCandidateListingURLs_StayInsideTheVenue(t *testing.T) {
+	base, _ := url.Parse("https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/")
+	for _, got := range candidateListingURLs(base, venueScope(base)) {
+		if !strings.Contains(got, "/besok-oss/hem-i-haga/") {
+			t.Errorf("candidate %q escapes the venue", got)
+		}
+	}
+}
+
+// A venue with no exhibitions of its own still has a programme.
+//
+// Hem i Haga is one of Göteborgs stadsmuseum's houses and is only open during
+// guided tours. Its page advertises eleven of them — "Visningar" — each linking
+// to /aktivitet/hem-i-haga-grupp-1/, while the only exhibition links on the page
+// point at the parent museum's /utstallningar/. Reading the parent's programme
+// gave this venue ten shows it does not hold; reading nothing gave it an empty
+// panel. Its tours are the right answer.
+func TestExtractCandidates_ReadsSwedishActivityEntries(t *testing.T) {
+	const page = `<html><body>
+	  <nav><a href="/utstallningar/">Utställningar</a></nav>
+	  <section class="brix-selected-events">
+	    <h2>Visningar</h2>
+	    <a href="/aktiviteter/">Alla aktiviteter</a>
+	    <a href="/aktivitet/hem-i-haga-grupp-1/?date=202608271800">
+	      <span>Visning</span><span>Hem i Haga</span></a>
+	  </section>
+	</body></html>`
+
+	got := ExtractCandidates(page, mustURL(t, "https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/"))
+
+	var urls []string
+	for _, c := range got {
+		urls = append(urls, c.URL)
+	}
+	if !slices.Contains(urls, "https://goteborgsstadsmuseum.se/aktivitet/hem-i-haga-grupp-1/?date=202608271800") {
+		t.Errorf("the venue's own tour was not read; got %v", urls)
+	}
+	// The parent museum's programme index is not this venue's programme.
+	if slices.Contains(urls, "https://goteborgsstadsmuseum.se/utstallningar/") {
+		t.Errorf("the institution's exhibition index was read as an entry; got %v", urls)
+	}
+}
+
+// Where a site publishes both, the exhibitions win and the tours are dropped.
+//
+// This is why "aktivitet" and "visning" are weak hints. As strong ones they
+// would rank beside the exhibitions and a museum's programme would be read as
+// its calendar — the failure that once replaced three exhibitions with seven
+// guided tours of them.
+func TestExtractCandidates_ExhibitionsOutrankTours(t *testing.T) {
+	const page = `<html><body>
+	  <a href="/utstallningar/vikingr/">Vikingr</a>
+	  <a href="/utstallningar/goteborgs-fodelse/">Göteborgs födelse</a>
+	  <a href="/aktivitet/visning-av-vikingr/">Visning av Vikingr</a>
+	</body></html>`
+
+	got := ExtractCandidates(page, mustURL(t, "https://goteborgsstadsmuseum.se/utstallningar/"))
+
+	for _, c := range got {
+		if strings.Contains(c.URL, "/aktivitet/") {
+			t.Errorf("a tour was kept alongside the exhibitions: %q", c.URL)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d exhibitions, want 2: %+v", len(got), got)
+	}
+}
