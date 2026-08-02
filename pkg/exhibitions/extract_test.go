@@ -643,3 +643,62 @@ func TestCandidateListingURLs_StayInsideTheVenue(t *testing.T) {
 		}
 	}
 }
+
+// A venue with no exhibitions of its own still has a programme.
+//
+// Hem i Haga is one of Göteborgs stadsmuseum's houses and is only open during
+// guided tours. Its page advertises eleven of them — "Visningar" — each linking
+// to /aktivitet/hem-i-haga-grupp-1/, while the only exhibition links on the page
+// point at the parent museum's /utstallningar/. Reading the parent's programme
+// gave this venue ten shows it does not hold; reading nothing gave it an empty
+// panel. Its tours are the right answer.
+func TestExtractCandidates_ReadsSwedishActivityEntries(t *testing.T) {
+	const page = `<html><body>
+	  <nav><a href="/utstallningar/">Utställningar</a></nav>
+	  <section class="brix-selected-events">
+	    <h2>Visningar</h2>
+	    <a href="/aktiviteter/">Alla aktiviteter</a>
+	    <a href="/aktivitet/hem-i-haga-grupp-1/?date=202608271800">
+	      <span>Visning</span><span>Hem i Haga</span></a>
+	  </section>
+	</body></html>`
+
+	got := ExtractCandidates(page, mustURL(t, "https://goteborgsstadsmuseum.se/besok-oss/hem-i-haga/"))
+
+	var urls []string
+	for _, c := range got {
+		urls = append(urls, c.URL)
+	}
+	if !slices.Contains(urls, "https://goteborgsstadsmuseum.se/aktivitet/hem-i-haga-grupp-1/?date=202608271800") {
+		t.Errorf("the venue's own tour was not read; got %v", urls)
+	}
+	// The parent museum's programme index is not this venue's programme.
+	if slices.Contains(urls, "https://goteborgsstadsmuseum.se/utstallningar/") {
+		t.Errorf("the institution's exhibition index was read as an entry; got %v", urls)
+	}
+}
+
+// Where a site publishes both, the exhibitions win and the tours are dropped.
+//
+// This is why "aktivitet" and "visning" are weak hints. As strong ones they
+// would rank beside the exhibitions and a museum's programme would be read as
+// its calendar — the failure that once replaced three exhibitions with seven
+// guided tours of them.
+func TestExtractCandidates_ExhibitionsOutrankTours(t *testing.T) {
+	const page = `<html><body>
+	  <a href="/utstallningar/vikingr/">Vikingr</a>
+	  <a href="/utstallningar/goteborgs-fodelse/">Göteborgs födelse</a>
+	  <a href="/aktivitet/visning-av-vikingr/">Visning av Vikingr</a>
+	</body></html>`
+
+	got := ExtractCandidates(page, mustURL(t, "https://goteborgsstadsmuseum.se/utstallningar/"))
+
+	for _, c := range got {
+		if strings.Contains(c.URL, "/aktivitet/") {
+			t.Errorf("a tour was kept alongside the exhibitions: %q", c.URL)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d exhibitions, want 2: %+v", len(got), got)
+	}
+}

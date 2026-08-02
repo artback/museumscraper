@@ -203,8 +203,26 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 		visited = make(map[string]struct{})
 	)
 
-	for _, listingURL := range slices.Concat(home.listings, candidateListingURLs(base, scope)) {
-		if !withinScope(listingURL, base, scope) {
+	// A venue's own page is itself a listing, and is read before anything is
+	// followed from it. Hem i Haga publishes its programme inline — a
+	// "Visningar" block naming eleven guided tours of the museum flats, which is
+	// what that venue has instead of exhibitions — while linking away only to
+	// the institution's pages. Looking only at where the page points finds the
+	// parent museum's programme and misses the venue's own.
+	candidates := slices.Concat(home.listings, candidateListingURLs(base, scope))
+	if scope != "" {
+		venue := *base
+		venue.RawQuery, venue.Fragment = "", ""
+		candidates = slices.Insert(candidates, 0, venue.String())
+	}
+
+	for _, listingURL := range candidates {
+		// The venue's own page is always allowed; the scope decides only which
+		// *other* pages may be visited on its behalf, so that a link to the
+		// institution's programme is not followed. Entries found on the venue's
+		// page belong to the venue wherever they live — these tours are filed
+		// under a site-wide /aktivitet/ section, and are still Hem i Haga's.
+		if listingURL != base.String() && !withinScope(listingURL, base, scope) {
 			continue
 		}
 		if ctx.Err() != nil {
