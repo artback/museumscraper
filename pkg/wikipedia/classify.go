@@ -73,6 +73,41 @@ var personDescriptors = []string{
 	"businessman", "businesswoman", "explorer", "aviator", "athlete",
 }
 
+// honoureeDescriptors identify the people, animals and works a hall of fame
+// honours, as opposed to the hall of fame itself.
+//
+// A hall of fame is a museum, so its category sits squarely inside the museum
+// tree — and the members of "Category:Australian Football Hall of Fame
+// inductees" are footballers. Nothing in the older rules stopped them: the
+// descriptions carry no lifespan, and "Australian rules footballer" matches no
+// settlement, person or unrelated-topic term, so Classify's default to Accept
+// let them through. That put 5,657 records into the catalogue — 3% of it —
+// every one marked verified, because a footballer does have a Wikipedia
+// article. They carried no coordinates, so they never appeared on the map and
+// nobody noticed, but they answered name searches: "Pat O'Dea" returned the
+// footballer above a real castle.
+//
+// Breadth is safe here in a way it would not be elsewhere, because a positive
+// museum keyword in the title or description is checked first and always wins.
+// A museum named for a sport or a racehorse still matches "museum" and never
+// reaches this list.
+var honoureeDescriptors = []string{
+	// The inductees themselves. " player" is space-prefixed so it matches
+	// "soccer player" and "ice hockey player" without firing inside a word.
+	"footballer", " player", "cricketer", "boxer", "jockey", "wrestler",
+	"swimmer", "golfer", "sprinter", "cyclist", "racing driver", "horse trainer",
+	"gymnast", "rower", "referee", "umpire",
+	// Racing halls of fame induct the horses as well as the people.
+	"racehorse", "thoroughbred", "quarter horse", "stallion", "sire",
+	// Recording halls of fame induct songs, albums and the acts behind them.
+	"rock band", "pop group", "musical group", "single by", "album by",
+	"studio album", "song by",
+	// And the ceremonies and ballots that surround all of it.
+	"induction ceremony", "elections to", "tennis tournament",
+	// Museum-holding categories that are not museums: the objects in them.
+	"cuneiform sign",
+}
+
 // lifespanRe matches the "(1869–1927)" suffix Wikidata puts on descriptions of
 // people, a strong signal on its own.
 var lifespanRe = regexp.MustCompile(`\(\s*\d{3,4}\s*[–—-]\s*\d{0,4}\s*\??\s*\)`)
@@ -88,6 +123,7 @@ const (
 	RejectSettlement     Rejection = "describes a place, not a museum"
 	RejectPerson         Rejection = "describes a person, not a museum"
 	RejectOtherTopic     Rejection = "describes an unrelated topic"
+	RejectHonouree       Rejection = "describes a hall-of-fame honouree, not the hall of fame"
 	RejectUnresolvable   Rejection = "no article and no usable name"
 )
 
@@ -167,6 +203,11 @@ func Classify(meta PageMetadata) (Decision, Rejection) {
 	for _, d := range otherNonMuseumDescriptors {
 		if strings.Contains(description, d) {
 			return Reject, RejectOtherTopic
+		}
+	}
+	for _, d := range honoureeDescriptors {
+		if strings.Contains(description, d) {
+			return Reject, RejectHonouree
 		}
 	}
 	return Accept, ""

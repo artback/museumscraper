@@ -16,9 +16,6 @@ import (
 )
 
 const (
-	// apiPath is the Wikipedia action API endpoint.
-	apiPath = "https://en.wikipedia.org/w/api.php"
-
 	// DefaultUserAgent identifies this client to Wikipedia. Their API policy
 	// asks for a descriptive agent with contact details; replace the URL when
 	// deploying this for real.
@@ -62,15 +59,45 @@ type Client struct {
 	httpClient *http.Client
 	userAgent  string
 	gate       *ratelimit.Gate
+	// lang is the Wikipedia edition this client reads, as a language code
+	// ("en", "es", "de"). Empty means English, so a Client built as a bare
+	// struct literal keeps working.
+	lang string
 }
 
-// NewClient returns a Client with a sane timeout and a descriptive user agent.
-func NewClient() *Client {
+// NewClient returns a Client for English Wikipedia.
+func NewClient() *Client { return NewLanguageClient(DefaultLanguage) }
+
+// DefaultLanguage is the edition crawled when none is named.
+const DefaultLanguage = "en"
+
+// NewLanguageClient returns a Client reading one language edition.
+//
+// The pipeline was English-only, and that was not a small gap: of the museums
+// Wikidata knows, 35,352 have an article in some language and none in English,
+// against 19,802 with an English one. Italy has 3,729 against 1,017, Japan
+// 3,115 against 764. Two of the four sources could not see any of them, and
+// "verified" — defined as "has an English article" — marked them all unproven.
+func NewLanguageClient(lang string) *Client {
 	return &Client{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		userAgent:  DefaultUserAgent,
 		gate:       apiGate,
+		lang:       lang,
 	}
+}
+
+// Language returns the edition this client reads.
+func (c *Client) Language() string {
+	if c.lang == "" {
+		return DefaultLanguage
+	}
+	return c.lang
+}
+
+// endpoint is the action API for this client's edition.
+func (c *Client) endpoint() string {
+	return "https://" + c.Language() + ".wikipedia.org/w/api.php"
 }
 
 // limiter returns the gate this client spaces its requests with, falling back
@@ -91,7 +118,7 @@ func (c *Client) limiter() *ratelimit.Gate {
 // list pages get skipped, which silently loses museums.
 func (c *Client) get(ctx context.Context, params url.Values, out any) error {
 	params.Set("format", "json")
-	return c.getFrom(ctx, apiPath+"?"+params.Encode(), out)
+	return c.getFrom(ctx, c.endpoint()+"?"+params.Encode(), out)
 }
 
 // getFrom is the retry and rate-limiting loop, taking a full URL so it can be

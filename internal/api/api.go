@@ -59,6 +59,7 @@ type Catalogue interface {
 	MuseumByID(ctx context.Context, id string) (postgres.Hit, error)
 	Points(ctx context.Context, west, south, east, north float64, hasBox bool, limit int) ([]postgres.Point, error)
 	ExhibitionsNearby(ctx context.Context, lat, lon, radiusKm float64, includeUpcoming bool, limit int) ([]postgres.ExhibitionHit, error)
+	SearchExhibitions(ctx context.Context, query string, lat, lon, radiusKm float64, near, includeUpcoming bool, limit, offset int) ([]postgres.ExhibitionHit, int64, error)
 	ExhibitionCoverage(ctx context.Context, lat, lon, radiusKm float64) (postgres.Coverage, error)
 	Counts(ctx context.Context) (postgres.Counts, error)
 	Ping(ctx context.Context) error
@@ -126,6 +127,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/scrape", s.handleScrape)
 	mux.HandleFunc("GET /map", s.handleMap)
 	mux.HandleFunc("GET /map/vendor/{file}", s.handleVendor)
+	mux.HandleFunc("GET /map/assets/{file}", s.handleAsset)
 	mux.HandleFunc("GET /{$}", s.handleMap)
 	mux.HandleFunc("GET /v1/exhibitions", s.handleExhibitions)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
@@ -311,6 +313,9 @@ type responseQuery struct {
 	// Place is the geocoder's full name for what a place= query resolved to,
 	// so a caller can see whether "Springfield" meant the one it had in mind.
 	Place string `json:"place,omitempty"`
+	// Text is the search term, echoed so a caller can tell a search apart from
+	// a plain radius query in the reply alone.
+	Text string `json:"q,omitempty"`
 }
 
 func echo(q query) responseQuery {
@@ -360,6 +365,12 @@ type museumHit struct {
 	WikipediaURL string   `json:"wikipedia_url,omitempty"`
 	WikidataID   string   `json:"wikidata_id,omitempty"`
 	Sources      []string `json:"sources,omitempty"`
+	// Classes are what kind of thing the museum is, in the source's own words:
+	// "steamboat", "passenger ship", "working life museum". They are what tells
+	// a caller that "Bohuslän" is a preserved steamship rather than the Swedish
+	// province of the same name — a distinction neither the name nor the
+	// description carries.
+	Classes []string `json:"classes,omitempty"`
 }
 
 type searchResponse struct {
@@ -391,7 +402,11 @@ type searchHit struct {
 }
 
 type exhibitionResponse struct {
-	Count       int             `json:"count"`
+	Count int `json:"count"`
+	// Total is how many matched a text search, as against how many were
+	// returned. Absent for a plain radius query, which does not count beyond
+	// its limit.
+	Total       int64           `json:"total,omitempty"`
 	Exhibitions []exhibitionHit `json:"exhibitions"`
 	Query       responseQuery   `json:"query"`
 	// Coverage says what is known about the area, so an empty result can be
@@ -411,14 +426,21 @@ type coverageReport struct {
 }
 
 type exhibitionHit struct {
-	Title      string     `json:"title"`
-	URL        string     `json:"url"`
-	Museum     string     `json:"museum"`
-	DistanceKm float64    `json:"distance_km"`
-	Start      *time.Time `json:"start,omitempty"`
-	End        *time.Time `json:"end,omitempty"`
-	Running    bool       `json:"running"`
-	Upcoming   bool       `json:"upcoming"`
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+	Museum string `json:"museum"`
+	// MuseumWikidataID is which museum, as opposed to what it was called when
+	// the listing was read. A caller matching exhibitions to museums by name
+	// gets it wrong in three ways that all happen in practice: a re-scrape
+	// rewrites the name, merging name variants renames the museum afterwards,
+	// and a show listed by two venues carries only one of them. The same
+	// identifier is on museumHit, so the two can be joined exactly.
+	MuseumWikidataID string     `json:"museum_wikidata_id,omitempty"`
+	DistanceKm       float64    `json:"distance_km"`
+	Start            *time.Time `json:"start,omitempty"`
+	End              *time.Time `json:"end,omitempty"`
+	Running          bool       `json:"running"`
+	Upcoming         bool       `json:"upcoming"`
 	// Permanent marks a display that is always on, which is why it carries no
 	// dates. Without it a caller reads the empty start and end as a listing the
 	// scraper failed on, and a caller asking what closes soonest would put an
@@ -695,14 +717,43 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExhibitions(w http.ResponseWriter, r *http.Request) {
+	values := r.URL.Query()
+
+	// Upcoming exhibitions are excluded by default: the common question is what
+	// can be seen now.
+	includeUpcoming := values.Get("upcoming") == "true"
+
+	text := strings.TrimSpace(values.Get("q"))
+	// Except when a name was given. Someone searching for a title wants that
+	// title, open yet or not — asking for "hasselblad" and being told nothing
+	// exists, because every one of its shows opens next month, is not an answer
+	// to the question that was asked.
+	if text != "" && values.Get("upcoming") != "false" {
+		includeUpcoming = true
+	}
+	if len([]rune(text)) > maxQueryRunes {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("q must be %d characters or fewer", maxQueryRunes))
+		return
+	}
+
+	// A search may name a place or not. Without one it searches everywhere,
+	// which is the point: someone who knows a show's name rarely knows which
+	// town it is in, and requiring a location made the name useless.
+	located := values.Get("lat") != "" || values.Get("lon") != "" || values.Get("place") != ""
+	if text != "" && !located {
+		s.searchExhibitions(w, r, text, query{limit: defaultLimit}, false, includeUpcoming)
+		return
+	}
+
 	q, err := s.parseQuery(r)
 	if err != nil {
 		writeQueryError(w, r, err)
 		return
 	}
-	// Upcoming exhibitions are excluded by default: the common question is what
-	// can be seen now.
-	includeUpcoming := r.URL.Query().Get("upcoming") == "true"
+	if text != "" {
+		s.searchExhibitions(w, r, text, q, true, includeUpcoming)
+		return
+	}
 
 	hits, err := s.catalogue.ExhibitionsNearby(r.Context(), q.lat, q.lon, q.radiusKm, includeUpcoming, q.limit)
 	if err != nil {
@@ -714,8 +765,9 @@ func (s *Server) handleExhibitions(w http.ResponseWriter, r *http.Request) {
 	for _, hit := range hits {
 		found = append(found, exhibitionHit{
 			Title: hit.Title, URL: hit.URL, Museum: hit.Museum,
-			DistanceKm: round2(hit.DistanceKm),
-			Start:      hit.Start, End: hit.End,
+			MuseumWikidataID: hit.MuseumWikidataID,
+			DistanceKm:       round2(hit.DistanceKm),
+			Start:            hit.Start, End: hit.End,
 			Running: hit.Running, Upcoming: hit.Upcoming,
 			Permanent: hit.Permanent,
 			Latitude:  hit.Latitude, Longitude: hit.Longitude,
@@ -726,6 +778,52 @@ func (s *Server) handleExhibitions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, exhibitionResponse{
 		Count: len(found), Exhibitions: found, Query: echo(q),
 		Coverage: s.coverageFor(r, q, len(found)),
+	})
+}
+
+// searchExhibitions answers a search by name, with or without a place.
+//
+// No coverage report: coverage answers "has anyone looked here yet", which is a
+// question about an area. A search that found nothing means the catalogue holds
+// no such title, and pointing at an area's scrape history would not explain it.
+func (s *Server) searchExhibitions(w http.ResponseWriter, r *http.Request, text string, q query, near, includeUpcoming bool) {
+	limit, err := parseLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		writeQueryError(w, r, err)
+		return
+	}
+	offset, err := parseOffset(r.URL.Query().Get("offset"))
+	if err != nil {
+		writeQueryError(w, r, err)
+		return
+	}
+
+	hits, total, err := s.catalogue.SearchExhibitions(r.Context(), text,
+		q.lat, q.lon, q.radiusKm, near, includeUpcoming, limit, offset)
+	if err != nil {
+		writeServerError(w, r, err)
+		return
+	}
+
+	found := make([]exhibitionHit, 0, len(hits))
+	for _, hit := range hits {
+		found = append(found, exhibitionHit{
+			Title: hit.Title, URL: hit.URL, Museum: hit.Museum,
+			MuseumWikidataID: hit.MuseumWikidataID,
+			DistanceKm:       round2(hit.DistanceKm),
+			Start:            hit.Start, End: hit.End,
+			Running: hit.Running, Upcoming: hit.Upcoming,
+			Permanent: hit.Permanent,
+			Latitude:  hit.Latitude, Longitude: hit.Longitude,
+			ScrapedAt: hit.ScrapedAt,
+		})
+	}
+
+	echoed := echo(q)
+	echoed.Limit, echoed.Offset, echoed.Text = limit, offset, text
+
+	writeJSON(w, http.StatusOK, exhibitionResponse{
+		Count: len(found), Total: total, Exhibitions: found, Query: echoed,
 	})
 }
 
@@ -773,7 +871,7 @@ func museumHitFrom(hit postgres.Hit, distanceKm float64) museumHit {
 		Country:             m.Country, Locality: m.Locality, Description: m.Description,
 		Latitude: m.Latitude, Longitude: m.Longitude,
 		Website: m.Website, WikipediaURL: m.WikipediaURL,
-		WikidataID: m.WikidataID, Sources: m.Sources,
+		WikidataID: m.WikidataID, Sources: m.Sources, Classes: m.Classes,
 	}
 }
 

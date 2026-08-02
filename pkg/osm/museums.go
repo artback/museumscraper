@@ -80,6 +80,23 @@ func (s *Service) Museums(ctx context.Context) <-chan models.Museum {
 // dropped a pin on it and a way or relation when its building outline is
 // mapped. "out center" asks Overpass to compute a representative point for the
 // latter two, which otherwise carry no coordinates of their own.
+//
+// Four tags rather than one. Asking only for tourism=museum was leaving mapped
+// museums behind: El Salvador has 40 tourism=museum, which the crawl already
+// captured almost completely, and around 55 further named features that are
+// museums under another tag — art galleries as tourism=gallery, and museums
+// tagged museum=local or museum=art on a building whose tourism tag was never
+// added. In a country the catalogue holds 52 records for, that is a large
+// fraction.
+//
+// Deliberately excluded: historic=archaeological_site and amenity=arts_centre.
+// Both sit next to museums and are not museums — a site may or may not have a
+// site museum, and an arts centre is a venue. Including them would repeat the
+// mistake the hall-of-fame categories made, admitting a large class of nearly
+// right records that nothing downstream can tell apart from the real ones.
+//
+// museum=no is excluded explicitly: it is the tag mappers use to say a feature
+// is *not* a museum, and matching the key alone would invert its meaning.
 func (s *Service) CountryMuseums(ctx context.Context, country, isoCode string) ([]models.Museum, error) {
 	overpassQL := fmt.Sprintf(`[out:json][timeout:%d];
 area["ISO3166-1"="%s"]->.searchArea;
@@ -87,6 +104,15 @@ area["ISO3166-1"="%s"]->.searchArea;
   node(area.searchArea)["tourism"="museum"];
   way(area.searchArea)["tourism"="museum"];
   relation(area.searchArea)["tourism"="museum"];
+  node(area.searchArea)["tourism"="gallery"];
+  way(area.searchArea)["tourism"="gallery"];
+  relation(area.searchArea)["tourism"="gallery"];
+  node(area.searchArea)["museum"]["museum"!="no"];
+  way(area.searchArea)["museum"]["museum"!="no"];
+  relation(area.searchArea)["museum"]["museum"!="no"];
+  node(area.searchArea)["building"="museum"];
+  way(area.searchArea)["building"="museum"];
+  relation(area.searchArea)["building"="museum"];
 );
 out center tags;`, serverTimeout, isoCode)
 

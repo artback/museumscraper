@@ -75,3 +75,11 @@ func (s *CategoryService) ResolveTitles(ctx context.Context, titles []string) (m
 	}
 	return out, firstErr
 }
+
+// Language returns the Wikipedia edition this service reads.
+func (s *CategoryService) Language() string {
+	if s.client == nil {
+		return DefaultLanguage
+	}
+	return s.client.Language()
+}

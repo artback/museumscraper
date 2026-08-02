@@ -329,3 +329,46 @@ SELECT count(*),
 	}
 	return summary, nil
 }
+
+// MarkAreaScraped records that an area has just been read.
+func (s *Store) MarkAreaScraped(ctx context.Context, cell string, at time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+INSERT INTO area_scrapes (cell, scraped_at) VALUES ($1, $2)
+ON CONFLICT (cell) DO UPDATE SET scraped_at = excluded.scraped_at`, cell, at)
+	if err != nil {
+		return fmt.Errorf("mark area scraped: %w", err)
+	}
+	return nil
+}
+
+// AreasScrapedSince returns the areas read since a moment, and forgets the rest.
+//
+// The pruning is here rather than on a timer because this is the only caller:
+// it runs once at startup to give the queue back the cooldowns it would
+// otherwise have lost, and a row older than the cooldown can never make that
+// answer differ. Doing both in one pass keeps the table the size of a day's
+// browsing rather than a growing record of every area ever looked at.
+func (s *Store) AreasScrapedSince(ctx context.Context, since time.Time) (map[string]time.Time, error) {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM area_scrapes WHERE scraped_at < $1`, since); err != nil {
+		return nil, fmt.Errorf("prune area scrapes: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx, `SELECT cell, scraped_at FROM area_scrapes`)
+	if err != nil {
+		return nil, fmt.Errorf("areas scraped since: %w", err)
+	}
+	defer rows.Close()
+
+	areas := make(map[string]time.Time)
+	for rows.Next() {
+		var (
+			cell string
+			at   time.Time
+		)
+		if err := rows.Scan(&cell, &at); err != nil {
+			return nil, fmt.Errorf("scan area scrape: %w", err)
+		}
+		areas[cell] = at
+	}
+	return areas, rows.Err()
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"net/http"
 	"sync"
@@ -32,6 +33,12 @@ type Harvester interface {
 	// crawled city hits first.
 	DiscoverSites(ctx context.Context) (int64, error)
 	TargetsNear(ctx context.Context, lat, lon, radiusKm float64, limit int) ([]sweep.Target, error)
+
+	// The cooldown, kept where it survives the process. Areas read on a
+	// visitor's behalf are remembered across a restart; without this a deploy
+	// reopened every one of them.
+	MarkAreaScraped(ctx context.Context, cell string, at time.Time) error
+	AreasScrapedSince(ctx context.Context, since time.Time) (map[string]time.Time, error)
 	MergeDuplicateExhibitions(ctx context.Context) (int64, error)
 	PruneNavigationListings(ctx context.Context) (int64, error)
 }
@@ -193,6 +200,7 @@ func newScrapeQueue(store Harvester) *scrapeQueue {
 		progress: make(map[string]*scrapeProgress),
 		stop:     make(chan struct{}),
 	}
+	q.recoverCooldowns()
 
 	q.wg.Add(1)
 	go q.dispatch()
@@ -462,15 +470,56 @@ func (q *scrapeQueue) collect(area *scrapeArea) {
 	q.release(area.cell, true)
 }
 
+// recoverCooldowns gives the queue back the areas that were read before this
+// process started.
+//
+// Failure here is logged and not fatal: an empty cooldown is how this behaved
+// before the table existed, so the map still works and the worst case is that
+// an area read yesterday can be asked for again today.
+func (q *scrapeQueue) recoverCooldowns() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	areas, err := q.store.AreasScrapedSince(ctx, time.Now().Add(-scrapeCooldown))
+	if err != nil {
+		log.Printf("scrape: could not recover cooldowns: %v", err)
+		return
+	}
+	if len(areas) == 0 {
+		return
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	maps.Copy(q.done, areas)
+	log.Printf("scrape: %d area(s) still cooling down from before this start", len(areas))
+}
+
 // release lets go of an area, either recording that it has just been read or
 // leaving it free to be asked for again.
 func (q *scrapeQueue) release(cell string, scraped bool) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	delete(q.state, cell)
 	delete(q.progress, cell)
-	if scraped {
-		q.done[cell] = time.Now()
+	if !scraped {
+		q.mu.Unlock()
+		return
+	}
+	at := time.Now()
+	q.done[cell] = at
+	q.mu.Unlock()
+
+	// Written outside the lock: this is a database round trip, and every
+	// request asking what is happening anywhere takes the same mutex.
+	//
+	// Not the caller's context either. That belongs to whoever asked for the
+	// scrape and is long gone by the time it finishes; cancelling this with it
+	// would drop the record of work that has already been done, and the next
+	// visitor would pay for all of it again.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := q.store.MarkAreaScraped(ctx, cell, at); err != nil {
+		log.Printf("scrape %s: recording the cooldown: %v", cell, err)
 	}
 }
 

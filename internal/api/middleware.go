@@ -1,11 +1,13 @@
 package api
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"log"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -41,7 +43,111 @@ const (
 // timeout context; the timeout is innermost so it covers only the handler.
 func withMiddleware(next http.Handler) http.Handler {
 	limiter := newRateLimiter(requestsPerSecond, burstSize, clientTTL)
-	return recoverPanics(withCORS(withRateLimit(limiter, withTimeout(logRequests(next)))))
+	return recoverPanics(withCORS(withRateLimit(limiter,
+		withTimeout(logRequests(withCompression(next))))))
+}
+
+// withCompression gzips what is worth gzipping.
+//
+// The map asks for every museum in view as a packed array of numbers, which for
+// a continent is well over a megabyte of ASCII digits — sent in full, on every
+// settled pan, to a Raspberry Pi over Tailscale. Digits compress by roughly
+// three quarters. It is innermost so it wraps only handler output, and it skips
+// anything already encoded, which is how the vendored library keeps serving the
+// gzip it was built with rather than being compressed twice.
+func withCompression(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		zipped := &gzipWriter{ResponseWriter: w}
+		defer zipped.Close()
+		next.ServeHTTP(zipped, r)
+	})
+}
+
+// gzipWriter compresses a response, but only once it knows what the response
+// is. The decision needs the Content-Type and the status, and neither exists
+// until the handler writes — so it is made on the first write rather than up
+// front, and a handler that sets its own Content-Encoding is left alone.
+type gzipWriter struct {
+	http.ResponseWriter
+	zip     *gzip.Writer
+	decided bool
+	status  int
+}
+
+// compressible is the set of types worth the CPU. Images and the pre-gzipped
+// library are already compressed, and running them through again spends time to
+// make them very slightly larger.
+func compressible(contentType string) bool {
+	switch {
+	case strings.HasPrefix(contentType, "application/json"),
+		strings.HasPrefix(contentType, "text/"),
+		strings.HasPrefix(contentType, "application/javascript"),
+		strings.HasPrefix(contentType, "image/svg+xml"):
+		return true
+	default:
+		return false
+	}
+}
+
+func (g *gzipWriter) WriteHeader(status int) {
+	g.status = status
+	g.decide()
+	g.ResponseWriter.WriteHeader(status)
+}
+
+func (g *gzipWriter) decide() {
+	if g.decided {
+		return
+	}
+	g.decided = true
+
+	header := g.Header()
+	if header.Get("Content-Encoding") != "" || !compressible(header.Get("Content-Type")) {
+		return
+	}
+
+	// The length is the uncompressed one and would be wrong on the wire;
+	// leaving it set makes a client wait for bytes that never come.
+	header.Del("Content-Length")
+	header.Set("Content-Encoding", "gzip")
+	header.Add("Vary", "Accept-Encoding")
+	g.zip = gzip.NewWriter(g.ResponseWriter)
+}
+
+func (g *gzipWriter) Write(b []byte) (int, error) {
+	if !g.decided {
+		// A handler that writes without WriteHeader has already had its
+		// Content-Type sniffed or set, so this is still the right moment.
+		g.decide()
+	}
+	if g.zip != nil {
+		return g.zip.Write(b)
+	}
+	return g.ResponseWriter.Write(b)
+}
+
+func (g *gzipWriter) Close() error {
+	if g.zip == nil {
+		return nil
+	}
+	return g.zip.Close()
+}
+
+// Flush keeps streaming handlers streaming. Without it the wrapper silently
+// swallows the ResponseWriter's Flusher and a progressive response buffers to
+// the end.
+func (g *gzipWriter) Flush() {
+	if g.zip != nil {
+		g.zip.Flush()
+	}
+	if flusher, ok := g.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // withTimeout gives every request a deadline, and the handler a context that
