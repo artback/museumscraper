@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"maps"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,9 +13,43 @@ import (
 	"museum/pkg/exhibitions"
 )
 
+// areaLedger stands in for the cooldown table: a map a test can seed with
+// areas read before this process started, and read back afterwards to see what
+// the queue recorded. Embedded by the harvesters below so each one does not
+// have to repeat it.
+type areaLedger struct {
+	mu     sync.Mutex
+	before map[string]time.Time
+	marked map[string]time.Time
+}
+
+func (l *areaLedger) MarkAreaScraped(_ context.Context, cell string, at time.Time) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.marked == nil {
+		l.marked = make(map[string]time.Time)
+	}
+	l.marked[cell] = at
+	return nil
+}
+
+func (l *areaLedger) AreasScrapedSince(context.Context, time.Time) (map[string]time.Time, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return maps.Clone(l.before), nil
+}
+
+func (l *areaLedger) wasMarked(cell string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.marked[cell]
+	return ok
+}
+
 // fakeHarvester records the circle a scrape was told to read, so a test can
 // check it against the area the queue then marks as done.
 type fakeHarvester struct {
+	areaLedger
 	asked chan [3]float64
 }
 
@@ -102,6 +138,7 @@ func TestScrapeKeepsAWiderRequest(t *testing.T) {
 // blockingHarvester holds every scrape inside the store call until released, so
 // a test can see how many areas are being read at the same moment.
 type blockingHarvester struct {
+	areaLedger
 	entered chan struct{}
 	release chan struct{}
 }
@@ -235,4 +272,75 @@ func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
 	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
 		math.Cos(lat1*rad)*math.Cos(lat2*rad)*math.Sin(dLon/2)*math.Sin(dLon/2)
 	return 2 * earthKm * math.Asin(math.Min(1, math.Sqrt(a)))
+}
+
+// An area read before this process started is still on cooldown.
+//
+// The cooldown lived only in the queue's memory, so it lasted exactly as long
+// as the process did. Deploys here happen on every push to main, and each one
+// silently reopened every area anyone had looked at that day — quietly undoing
+// the one bound that exists to keep panning a map from becoming traffic on
+// other people's servers.
+func TestScrapeCooldownSurvivesARestart(t *testing.T) {
+	cell := cellFor(57.7, 11.97)
+
+	harvester := &fakeHarvester{asked: make(chan [3]float64, 1)}
+	harvester.before = map[string]time.Time{cell: time.Now().Add(-time.Hour)}
+
+	queue := newScrapeQueue(harvester)
+	defer queue.close()
+
+	state, err := queue.enqueue(57.7, 11.97, 5)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if state != scrapeCooling {
+		t.Errorf("state = %q, want %q — the area was read an hour ago", state, scrapeCooling)
+	}
+
+	// And it is reported as such to someone merely asking, not only to someone
+	// asking for it to be read.
+	if got, _ := queue.status(57.7, 11.97); got != scrapeCooling {
+		t.Errorf("status = %q, want %q", got, scrapeCooling)
+	}
+}
+
+// A cooldown older than the window is not one, so the area is readable again.
+func TestScrapeCooldownExpires(t *testing.T) {
+	cell := cellFor(48.86, 2.35)
+
+	harvester := &fakeHarvester{asked: make(chan [3]float64, 1)}
+	harvester.before = map[string]time.Time{cell: time.Now().Add(-scrapeCooldown - time.Hour)}
+
+	queue := newScrapeQueue(harvester)
+	defer queue.close()
+
+	state, err := queue.enqueue(48.86, 2.35, 5)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if state != scrapeQueued {
+		t.Errorf("state = %q, want %q — the cooldown has run out", state, scrapeQueued)
+	}
+}
+
+// Finishing an area writes the cooldown down, or the next start forgets it.
+func TestScrapeRecordsTheCooldown(t *testing.T) {
+	harvester := &fakeHarvester{asked: make(chan [3]float64, 1)}
+	queue := newScrapeQueue(harvester)
+	defer queue.close()
+
+	if _, err := queue.enqueue(59.33, 18.07, 5); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	<-harvester.asked
+
+	cell := cellFor(59.33, 18.07)
+	deadline := time.Now().Add(2 * time.Second)
+	for !harvester.wasMarked(cell) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the scrape of %s finished without recording a cooldown", cell)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

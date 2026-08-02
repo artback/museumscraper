@@ -348,3 +348,22 @@ CREATE TABLE IF NOT EXISTS site_scrapes (
 -- The sweep's only selection query: what is due, soonest first.
 CREATE INDEX IF NOT EXISTS site_scrapes_due_idx
     ON site_scrapes (next_due_at) WHERE parked_reason IS NULL;
+
+-- Which areas the map has already had read on a visitor's behalf.
+--
+-- Keyed by the same 0.25° cell the on-demand queue dedups on, because the
+-- cooldown is a promise about ground rather than about hosts: an area is left
+-- alone for a day after it has been read, however many sites that turned out
+-- to be, and however few of them had anything to say.
+--
+-- It is a table rather than a map in the queue because the queue's map did not
+-- survive the process. Deploys happen on every push here, and each one silently
+-- reopened every area anyone had looked at that day — the one bound that exists
+-- specifically to keep panning a map from becoming traffic on other people's
+-- servers, reset by an unrelated event several times a week.
+--
+-- Rows outlive their own cooldown only until the next start, which prunes them.
+CREATE TABLE IF NOT EXISTS area_scrapes (
+    cell       text PRIMARY KEY,
+    scraped_at timestamptz NOT NULL
+);
