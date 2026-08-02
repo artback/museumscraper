@@ -56,46 +56,23 @@ func ExtractJSONLDCandidates(pageHTML string, base *url.URL) []Candidate {
 	seen := make(map[string]struct{})
 
 	for _, block := range jsonLDBlocks(doc) {
-		for _, parsed := range jsonValues(block) {
-			walkJSONLD(parsed, func(node map[string]any) {
-				candidate, ok := candidateFromJSONLD(node, base)
-				if !ok {
-					return
-				}
-				if _, dup := seen[candidate.URL]; dup {
-					return
-				}
-				seen[candidate.URL] = struct{}{}
-				found = append(found, candidate)
-			})
+		var parsed any
+		if err := json.Unmarshal([]byte(block), &parsed); err != nil {
+			continue
 		}
+		walkJSONLD(parsed, func(node map[string]any) {
+			candidate, ok := candidateFromJSONLD(node, base)
+			if !ok {
+				return
+			}
+			if _, dup := seen[candidate.URL]; dup {
+				return
+			}
+			seen[candidate.URL] = struct{}{}
+			found = append(found, candidate)
+		})
 	}
 	return found
-}
-
-// jsonValues decodes every JSON value in one script block.
-//
-// A block is supposed to hold exactly one value, and a great many hold more:
-// one object per card, written out by a template with nothing wrapping them.
-// json.Unmarshal refuses the whole block for that, so the Centre de la Vieille
-// Charité declared both its exhibitions — accented titles, real opening and
-// closing dates — and we read none of it, falling back to titles taken from the
-// URL slug with the accents stripped out and no dates at all.
-//
-// A decoder reads values in sequence and stops at the first thing it cannot
-// make sense of, so a block that starts well and ends badly still yields what
-// it got through, and trailing whitespace ends the loop cleanly.
-func jsonValues(block string) []any {
-	decoder := json.NewDecoder(strings.NewReader(block))
-
-	var values []any
-	for {
-		var value any
-		if err := decoder.Decode(&value); err != nil {
-			return values
-		}
-		values = append(values, value)
-	}
 }
 
 // candidatesOn returns everything a listing page offers, from both readers.
@@ -104,7 +81,7 @@ func jsonValues(block string) []any {
 // them has stated what the HTML reader can only infer. The HTML reader still
 // runs on the same page: sites routinely declare a handful of events and list
 // thirty, and reading only the declaration would silently lose the rest.
-func candidatesOn(pageHTML string, base *url.URL, section string) []Candidate {
+func candidatesOn(pageHTML string, base *url.URL) []Candidate {
 	declared := ExtractJSONLDCandidates(pageHTML, base)
 
 	seen := make(map[string]struct{}, len(declared))
@@ -113,7 +90,7 @@ func candidatesOn(pageHTML string, base *url.URL, section string) []Candidate {
 	}
 
 	found := declared
-	for _, candidate := range ExtractCandidatesUnder(pageHTML, base, section) {
+	for _, candidate := range ExtractCandidates(pageHTML, base) {
 		if _, dup := seen[candidate.URL]; dup {
 			continue
 		}
