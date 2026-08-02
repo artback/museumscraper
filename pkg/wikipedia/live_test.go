@@ -161,3 +161,49 @@ func TestResolveLiveMetadata(t *testing.T) {
 		t.Errorf("classifier did not mark red link %q as unverified", redLink)
 	}
 }
+
+// TestRootCategoriesExist checks that every edition's root category is a real
+// category with members.
+//
+// A root title that does not exist fails silently: the API returns an empty
+// member list, the crawler walks nothing, and the edition contributes zero
+// museums to a crawl that otherwise looks healthy. That is exactly what a
+// plausible-looking guess at the Japanese title did, and nothing but a live
+// check can catch it — the titles are data, not logic, and Wikipedia renames
+// categories.
+func TestRootCategoriesExist(t *testing.T) {
+	if testing.Short() {
+		t.Skip("hits the live Wikipedia API")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	for _, lang := range Languages() {
+		root, ok := RootCategoryFor(lang)
+		if !ok {
+			t.Errorf("%s: Languages() offered an edition with no root category", lang)
+			continue
+		}
+
+		svc := NewCategoryService(NewLanguageClient(lang))
+		members, err := svc.GetAllCategoryMembers(ctx, root)
+		if err != nil {
+			t.Errorf("%s: %q: %v", lang, root, err)
+			continue
+		}
+		// Every edition files its museums under per-country subcategories, so a
+		// root with no subcategories is the wrong page whatever else it holds.
+		subcategories := 0
+		for _, m := range members {
+			if m.NS == namespaceCategory {
+				subcategories++
+			}
+		}
+		if subcategories == 0 {
+			t.Errorf("%s: %q has %d members and no subcategories, so it is not the museum tree's root",
+				lang, root, len(members))
+		}
+		t.Logf("%-3s %4d members (%d subcategories) %s", lang, len(members), subcategories, root)
+	}
+}

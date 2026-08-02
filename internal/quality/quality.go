@@ -17,6 +17,7 @@ import (
 	"math"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -61,6 +62,8 @@ const (
 	CheckGeographicOutlier  = "coordinates-far-from-country"
 	CheckDuplicate          = "duplicate-record"
 	CheckSuspiciousName     = "suspicious-name"
+	CheckUnclassified       = "no-classes"
+	CheckNotAMuseum         = "not-a-museum"
 	CheckBadURL             = "unusable-url"
 	CheckEndBeforeStart     = "exhibition-ends-before-it-starts"
 	CheckImplausibleDates   = "exhibition-dates-implausible"
@@ -126,6 +129,8 @@ func CheckMuseums(museums []models.Museum) Report {
 		checkPosition(&report, m)
 		checkCountry(&report, m)
 		checkName(&report, m)
+		checkClasses(&report, m)
+		checkNotAMuseum(&report, m)
 		checkURLs(&report, m)
 
 		if key := identityKey(m); key != "" {
@@ -281,6 +286,105 @@ func checkName(report *Report, m models.Museum) {
 			Detail:    "name contains an HTML tag, so an extractor is leaking raw source",
 			Reference: m.WikidataID,
 		})
+	}
+}
+
+// classAuthority is the source that states what kind of thing a museum is. Only
+// records it supplied can be expected to carry classes, so only they are
+// counted: the Wikipedia and OpenStreetMap crawls have no equivalent statement,
+// and flagging their records would report the pipeline's shape as a fault.
+const classAuthority = "wikidata"
+
+// checkClasses counts the records that do not say what kind of thing they are.
+//
+// This is the check that watches the class crawl itself. Classes are fetched by
+// a second request per page, and that request is allowed to fail without taking
+// the page's museums with it — which means a class query failing for every page
+// of a country degrades the catalogue silently, leaving records that look
+// complete and say nothing about what they are. Nothing else would notice.
+//
+// So the finding is Info rather than Warning: a museum without classes is not
+// wrong, and Wikidata genuinely leaves some entities unclassified. It is the
+// count that carries the meaning. Against a full crawl it should sit low and
+// stay there; a jump between runs means the class query is failing, not that
+// Wikidata changed its mind about 40,000 museums.
+func checkClasses(report *Report, m models.Museum) {
+	if len(m.Classes) > 0 || !slices.Contains(m.Sources, classAuthority) {
+		return
+	}
+	report.add(Finding{
+		Check: CheckUnclassified, Severity: Info, Subject: m.Name,
+		Detail:    "no classes, so the record cannot say what kind of thing it is",
+		Reference: m.WikidataID,
+	})
+}
+
+// notAMuseumDescriptors are what a record's own description says when the thing
+// it describes is not a museum.
+//
+// These are the survivors of the crawlers' own filters, found by grouping the
+// catalogue by the opening phrase of its descriptions. The largest groups were
+// not close calls: 394 Australian rules footballers, 307 Thoroughbred
+// racehorses, 323 Grammy Hall of Fame songs, 89 articles about ballots and 69
+// cuneiform signs — 5,657 records in all, 3% of the catalogue, admitted because
+// a hall of fame is a museum and the crawler walked into the categories listing
+// its inductees.
+//
+// The check earns its place after the crawlers were fixed, not instead of it.
+// The fix stops new ones arriving; this counts what is stored, which is the
+// only way to know whether a re-crawl actually cleared them and whether some
+// other category is quietly doing the same thing again.
+//
+// Deliberately absent: "castle", "church", "building", "palace", "country
+// house". Those are the *premises* of thousands of real museums — Drottningholm
+// Palace is in the catalogue correctly — and flagging them would produce more
+// false positives than the check has true ones.
+var notAMuseumDescriptors = []string{
+	"footballer", " player", "cricketer", "boxer", "jockey", "wrestler",
+	"swimmer", "golfer", "racing driver", "horse trainer",
+	"racehorse", "thoroughbred", "quarter horse",
+	"rock band", "pop group", "single by", "album by", "studio album",
+	"induction ceremony", "elections to", "cuneiform sign",
+	"human settlement", "railway station",
+}
+
+// checkNotAMuseum reports records whose own description says they describe
+// something else entirely.
+func checkNotAMuseum(report *Report, m models.Museum) {
+	description := strings.ToLower(m.Description)
+	if description == "" {
+		return
+	}
+	// A museum named for the thing it is about would otherwise match: "National
+	// Football Museum" is about players, and the Racing Museum about racehorses.
+	// The name settles it before the description is consulted, exactly as the
+	// crawler's own classifier does it.
+	// The keepers are the classifier's museum keywords, and the list has to stay
+	// as generous as that one. Without "historic" this reports "Billy Sunday
+	// Historic Home" — a real historic-house museum whose description happens to
+	// read "historic house of baseball player Billy Sunday" — and a check that
+	// flags real museums as errors is worse than no check.
+	name := strings.ToLower(m.Name)
+	for _, word := range []string{
+		"museum", "museo", "musée", "musee", "museet", "muzeum", "muzej", "museu",
+		"gallery", "galerie", "galleria", "hall of fame", "kunsthal", "pinacoteca",
+		"historic", "heritage", "memorial", "collection",
+		"aquarium", "planetarium", "arboretum", "observatory",
+		"science cent", "visitor cent", "treasury", "armoury", "armory",
+	} {
+		if strings.Contains(name, word) || strings.Contains(description, word) {
+			return
+		}
+	}
+	for _, d := range notAMuseumDescriptors {
+		if strings.Contains(description, d) {
+			report.add(Finding{
+				Check: CheckNotAMuseum, Severity: Error, Subject: m.Name,
+				Detail:    fmt.Sprintf("described as %q, which is not a museum", m.Description),
+				Reference: m.WikidataID,
+			})
+			return
+		}
 	}
 }
 

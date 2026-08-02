@@ -68,6 +68,11 @@
   #detail:not([style*="none"]) ~ #list { display: none !important; }
   .tag { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 99px;
          border: 1px solid var(--line); color: var(--dim); margin: 0 4px 6px 0; }
+  /* What the thing is, as against how well we know it. The existing tags are
+     caveats about the record; these are the record's subject, and a reader
+     scanning "Bohuslän" needs "steamboat" to stand out from "position
+     approximate" rather than sit level with it. */
+  .tag.kind { border-color: transparent; background: #ffb45426; color: var(--accent); }
   .shows { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 10px; }
   .shows h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em;
               color: var(--dim); margin: 0 0 8px; }
@@ -530,14 +535,29 @@ async function showMuseum(id) {
   } catch (_) { return; }
 
   const where = [museum.locality, museum.country].filter(Boolean).join(", ");
-  const tags = [];
-  if (museum.verified) tags.push("Wikipedia article");
-  if (museum.approximate_location) tags.push("position approximate — town centre");
+  // What it is comes before how well we know it: for a record like "Bohuslän",
+  // whose name is also a Swedish province and whose description says only
+  // "working life museum in Gothenburg Municipality", "steamboat" is the tag
+  // that stops it reading as a mis-scraped region.
+  const tags = (museum.classes || []).map(c => ({ text: c, kind: true }));
+  if (museum.verified) tags.push({ text: "Wikipedia article" });
+  if (museum.approximate_location) tags.push({ text: "position approximate — town centre" });
+
+  // Seventy records are named nothing but the word "museum" in some language —
+  // "Museo", "Museet", "Muzeum" — because that is all their source recorded.
+  // A heading reading "Museo" identifies nothing, so the town joins it there
+  // rather than only in the dimmed line below. The stored name is untouched;
+  // this is a display decision about a name that cannot stand alone.
+  const generic = /^(museum|museo|mus[ée]e|museet|muzeum|muzej|museu)$/i.test(museum.name.trim());
+  const heading = generic && museum.locality
+    ? museum.name + " — " + museum.locality
+    : museum.name;
 
   detailBody.innerHTML =
-    "<h2>" + escape(museum.name) + "</h2>" +
+    "<h2>" + escape(heading) + "</h2>" +
     (where ? '<div class="where">' + escape(where) + "</div>" : "") +
-    tags.map(t => '<span class="tag">' + escape(t) + "</span>").join("") +
+    tags.map(t => '<span class="tag' + (t.kind ? " kind" : "") + '">' +
+                  escape(t.text) + "</span>").join("") +
     (museum.description ? '<div class="desc">' + escape(museum.description) + "</div>" : "") +
     (museum.website ? '<div><a href="' + escape(museum.website) + '" target="_blank" rel="noopener">Website</a></div>' : "") +
     (museum.wikipedia_url ? '<div><a href="' + escape(museum.wikipedia_url) + '" target="_blank" rel="noopener">Wikipedia</a></div>' : "") +

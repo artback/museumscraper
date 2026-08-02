@@ -364,6 +364,12 @@ type museumHit struct {
 	WikipediaURL string   `json:"wikipedia_url,omitempty"`
 	WikidataID   string   `json:"wikidata_id,omitempty"`
 	Sources      []string `json:"sources,omitempty"`
+	// Classes are what kind of thing the museum is, in the source's own words:
+	// "steamboat", "passenger ship", "working life museum". They are what tells
+	// a caller that "Bohuslän" is a preserved steamship rather than the Swedish
+	// province of the same name — a distinction neither the name nor the
+	// description carries.
+	Classes []string `json:"classes,omitempty"`
 }
 
 type searchResponse struct {
@@ -855,7 +861,7 @@ func museumHitFrom(hit postgres.Hit, distanceKm float64) museumHit {
 		Country:             m.Country, Locality: m.Locality, Description: m.Description,
 		Latitude: m.Latitude, Longitude: m.Longitude,
 		Website: m.Website, WikipediaURL: m.WikipediaURL,
-		WikidataID: m.WikidataID, Sources: m.Sources,
+		WikidataID: m.WikidataID, Sources: m.Sources, Classes: m.Classes,
 	}
 }
 

@@ -3,6 +3,7 @@ package wikipedia
 import (
 	"context"
 	"log"
+	"sort"
 	"strings"
 
 	"museum/internal/models"
@@ -12,14 +13,84 @@ import (
 // CategorySourceName identifies records discovered by the category crawl.
 const CategorySourceName = "wikipedia-category"
 
+// CategorySourceNameFor names the source for one edition's category crawl:
+// "wikipedia-category" for English, "wikipedia-category-es" for Spanish.
+//
+// Each edition gets its own name so provenance survives the merge. That is not
+// bookkeeping for its own sake — the hall-of-fame contamination was found and
+// sized by grouping the catalogue by source, and an edition that turns out to
+// be noisy needs to be identifiable the same way. English keeps the bare name
+// so existing records, and anything that reads them, are unaffected.
+func CategorySourceNameFor(lang string) string {
+	if lang == "" || lang == DefaultLanguage {
+		return CategorySourceName
+	}
+	return CategorySourceName + "-" + lang
+}
+
 // ListSourceName identifies records read off Wikipedia's "List of museums in …"
 // pages. Records from that source carried no provenance at all, so 8,536
 // museums in the catalogue could not be attributed to anything — and, more to
 // the point, could not be found again when their quality came into question.
 const ListSourceName = "wikipedia-list"
 
-// RootMuseumCategory is the top of Wikipedia's museum category tree.
+// RootMuseumCategory is the top of English Wikipedia's museum category tree.
 const RootMuseumCategory = "Category:Museums by country"
+
+// rootMuseumCategories is where the museum tree starts in each edition the
+// crawl reads. Every edition names both the namespace and the topic in its own
+// language, so none of this can be derived from the English title.
+//
+// The editions listed are the ones with the most museum articles English lacks:
+// Italian, German and Japanese each hold over three thousand museums with no
+// English article at all, and Spanish is what makes Latin America visible —
+// Spanish Wikipedia has two to four times English's coverage there, and for
+// El Salvador the catalogue's thinnest country it is 12 articles against 4.
+// Every title here is Wikipedia's own langlink for the English root rather than
+// a translation of it, and TestRootCategoriesExist checks they still resolve. A
+// guessed title is not a wrong title, it is a silent one: "Category:国別の博物館"
+// is a plausible rendering of "Museums by country", it does not exist, and the
+// Japanese edition simply returned nothing at all.
+var rootMuseumCategories = map[string]string{
+	"en": RootMuseumCategory,
+	"es": "Categoría:Museos por país",
+	"de": "Kategorie:Museum nach Staat",
+	"fr": "Catégorie:Musée par pays",
+	"it": "Categoria:Musei per stato",
+	"pt": "Categoria:Museus por país",
+	"nl": "Categorie:Museum naar land",
+	"pl": "Kategoria:Muzea według państw",
+	"sv": "Kategori:Museer efter land",
+	"ru": "Категория:Музеи по странам",
+	"ja": "Category:各国の博物館",
+	"zh": "Category:各國博物館",
+	"uk": "Категорія:Музеї за країною",
+	"cs": "Kategorie:Muzea podle zemí",
+	"fi": "Luokka:Museot maittain",
+	"da": "Kategori:Museer efter land",
+	"ko": "분류:나라별 박물관",
+	"tr": "Kategori:Ülkelerine göre müzeler",
+}
+
+// RootCategoryFor returns the museum category tree's root in one edition, and
+// whether that edition is one the crawl knows how to walk.
+func RootCategoryFor(lang string) (string, bool) {
+	root, ok := rootMuseumCategories[lang]
+	return root, ok
+}
+
+// Languages returns every edition the crawl can walk, English first and the
+// rest in a stable order so a crawl's logs are comparable between runs.
+func Languages() []string {
+	langs := make([]string, 0, len(rootMuseumCategories))
+	for lang := range rootMuseumCategories {
+		if lang != DefaultLanguage {
+			langs = append(langs, lang)
+		}
+	}
+	sort.Strings(langs)
+	return append([]string{DefaultLanguage}, langs...)
+}
 
 // defaultMaxDepth bounds the recursion. Wikipedia's category graph is not a
 // tree — it has cycles and drifts into loosely related topics after a few
@@ -42,6 +113,29 @@ var skippedCategoryTerms = []string{
 	"navigational boxes", "redirects",
 }
 
+// memberListTerms mark subcategories that list who or what an institution
+// honours, rather than institutions.
+//
+// A hall of fame is a museum, so "Category:Australian Football Hall of Fame
+// inductees" sits legitimately inside the museum tree — but its members are
+// footballers. Walking those categories put 5,657 records into the catalogue,
+// 3% of it: 394 footballers, 307 racehorses, 323 Grammy-winning songs, 89
+// ballot articles and 69 cuneiform signs.
+//
+// Classify now rejects those on their descriptions, which is the safety net and
+// catches them whatever category they arrive from. This list is the other half:
+// it stops the crawler walking into a category whose members cannot be museums,
+// which saves several thousand pointless title resolutions per crawl.
+//
+// The terms match the category's own wording rather than "hall of fame", which
+// must keep working — "Category:Halls of fame in Texas" holds real museums, and
+// the Rodeo and Dirt Modified halls of fame in the catalogue are genuine.
+var memberListTerms = []string{
+	"inductees", "inductee", "honorees", "honourees", "balloting",
+	"award recipients", "award winners", "hall of fame members",
+	"hall of fame players", "hall of fame horses",
+}
+
 // skippedCategoryPrefixes mark subcategories whose members are holdings and
 // works rather than the institutions themselves.
 var skippedCategoryPrefixes = []string{
@@ -59,6 +153,7 @@ var skippedCategoryPrefixes = []string{
 // heavily but neither is a superset of the other, so both are worth running.
 type CategoryCrawler struct {
 	svc       *CategoryService
+	lang      string
 	maxDepth  int
 	visited   map[string]struct{}
 	emitted   map[string]struct{}
@@ -70,6 +165,7 @@ type CategoryCrawler struct {
 func NewCategoryCrawler(svc *CategoryService) *CategoryCrawler {
 	return &CategoryCrawler{
 		svc:       svc,
+		lang:      svc.Language(),
 		maxDepth:  defaultMaxDepth,
 		visited:   make(map[string]struct{}),
 		emitted:   make(map[string]struct{}),
@@ -202,8 +298,13 @@ func (c *CategoryCrawler) emitArticles(ctx context.Context, titles []string, cou
 			Latitude:     meta.Latitude,
 			Longitude:    meta.Longitude,
 			SourcePage:   sourceCategory,
-			Verified:     true,
-			Sources:      []string{CategorySourceName},
+			// Backed by an article in the edition that was crawled. It used to
+			// mean an *English* article specifically, which made the flag a
+			// measure of anglophone coverage rather than of confidence: a museum
+			// in Italy with a full Italian article was "unverified", and two
+			// thirds of the Wikipedia-documented catalogue is in that position.
+			Verified: true,
+			Sources:  []string{CategorySourceNameFor(c.lang)},
 		}
 		if meta.HasCoordinates {
 			c.stats.WithCoordinates++
@@ -223,6 +324,11 @@ func (c *CategoryCrawler) emitArticles(ctx context.Context, titles []string, cou
 func skipCategory(title string) bool {
 	name := strings.ToLower(strings.TrimPrefix(title, "Category:"))
 	for _, term := range skippedCategoryTerms {
+		if strings.Contains(name, term) {
+			return true
+		}
+	}
+	for _, term := range memberListTerms {
 		if strings.Contains(name, term) {
 			return true
 		}

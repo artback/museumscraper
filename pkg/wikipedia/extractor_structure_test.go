@@ -279,3 +279,57 @@ func assertCandidates(t *testing.T, got, want []Candidate) {
 		}
 	}
 }
+
+func TestExtract_EntryNamedInTextWithOnlyTheTownLinked(t *testing.T) {
+	// Every line here is real, from "List of Holocaust memorials and museums".
+	// Taking the first link made the town the museum, so the catalogue held
+	// Jerusalem, Oslo, Bucharest and Riga as museums — each with the town's own
+	// article attached, which is what marked them verified.
+	content := `* Ani Ma'amin Holocaust Museum ([[Jerusalem]])
+* Center for Studies of Holocaust and Religious Minorities ([[Oslo]])
+* Memorial to the Victims of the 1941 Pogrom, [[Bucharest]]
+*[[Riga]] Ghetto and Latvian Holocaust museum
+`
+
+	got := NewMuseumExtractor(nil).Extract(content)
+
+	want := []Candidate{
+		{Title: "Ani Ma'amin Holocaust Museum", Locality: ""},
+		{Title: "Center for Studies of Holocaust and Religious Minorities"},
+		{Title: "Memorial to the Victims of the 1941 Pogrom"},
+		// The town leads the museum's own name here, so the answer is the whole
+		// line rather than either part of it.
+		{Title: "Riga Ghetto and Latvian Holocaust museum"},
+	}
+	assertCandidates(t, got.Candidates, want)
+
+	for _, c := range got.Candidates {
+		for _, town := range []string{"Jerusalem", "Oslo", "Bucharest", "Riga"} {
+			if c.Title == town {
+				t.Errorf("%q was emitted as a museum", town)
+			}
+		}
+	}
+}
+
+func TestEntryTitle(t *testing.T) {
+	cases := map[string]string{
+		// A link followed by a locative phrase or a separator is the whole name.
+		"[[Second Museum#History|Second]] in [[Some City]]": "Second Museum",
+		"[[Louvre]], [[Paris]]":                             "Louvre",
+		"[[Museum of Art]] — [[Berlin]]":                    "Museum of Art",
+		"[[Musée d'Orsay]]":                                 "Musée d'Orsay",
+		// A link the name continues past is only its first words.
+		"[[Riga]] Ghetto and Latvian Holocaust museum": "Riga Ghetto and Latvian Holocaust museum",
+		// Unlinked name, linked town.
+		"National Gallery ([[Oslo]])": "National Gallery",
+		// Unlinked prose with no town is not a museum.
+		"Plain text with an [http://example.com external link]": "",
+		"": "",
+	}
+	for body, want := range cases {
+		if got := entryTitle(body); got != want {
+			t.Errorf("entryTitle(%q) = %q, want %q", body, got, want)
+		}
+	}
+}
