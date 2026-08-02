@@ -390,3 +390,10 @@ UPDATE exhibitions
 -- them at the source.
 DELETE FROM exhibitions
  WHERE title ~ '^[0-9]{4} (0[1-9]|1[0-2]) (0[1-9]|[12][0-9]|3[01])$';
+
+-- And the listings whose title is nothing but a number.
+--
+-- A year read off a card — "2026" — or a site's own record number read off a
+-- numeric URL names nothing a visitor can act on. The reader now declines them
+-- at the source; these are the ones read before it did.
+DELETE FROM exhibitions WHERE title ~ '^[0-9]+$';

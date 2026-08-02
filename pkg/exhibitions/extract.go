@@ -527,7 +527,13 @@ func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool, t
 		// slug names the entry by construction.
 		title = titleFromSlug(parsed.Path)
 	}
-	if title == "" {
+	// A title of nothing but digits names nothing, wherever it was read.
+	//
+	// The slug fallback declines these already, but a card can carry one in its
+	// own text just as easily: the Royal Academy's summer exhibition listing
+	// gave up "2026", and that is what the panel showed a visitor as the name of
+	// something to go and see.
+	if title == "" || onlyDigits(title) {
 		return Candidate{}, false, false
 	}
 
