@@ -1,0 +1,541 @@
+/* The catalogue's own styles. MapLibre's stylesheet loads before this one, so
+   anything here naming a .maplibregl- class is a deliberate override. */
+
+:root {
+  /* ---- surface ---------------------------------------------------------- */
+  --s-0: #05070c;              /* the void behind the globe                  */
+  --s-1: #0e1420;              /* panel base                                 */
+  --s-2: #18202f;              /* hover                                      */
+  --s-3: #202b3d;              /* pressed, keyboard cursor                   */
+  --panel: #0e1420f2;
+  --panel-solid: #0e1420;
+
+  /* ---- ink -------------------------------------------------------------- */
+  --ink: #e9eef6;              /* 15.9:1 on the panel                        */
+  --ink-2: #93a0b4;            /*  7.0:1                                     */
+  --ink-3: #6f7d92;            /*  4.6:1 — on --s-1 only, no headroom below  */
+
+  /* ---- accents ---------------------------------------------------------- */
+  --accent: #ffb454;           /* museums, the primary action — 10.5:1       */
+  --accent-hi: #ffc477;
+  --accent-tint: #ffb4542e;
+  --accent-edge: #ffb4544d;
+
+  /* Cyan for what's on, not a second warm: amber against cyan stays a
+     difference under both common forms of colour blindness, so a venue with
+     something on show is distinguishable on the map itself. */
+  --accent-2: #7fd4e3;
+  --accent-2-tint: #7fd4e32e;
+  --accent-2-edge: #7fd4e34d;
+
+  --ok: #6fdca7;
+  --warn: #ffd166;
+  --bad: #ff9d80;
+
+  /* ---- lines ------------------------------------------------------------ */
+  --line: #223047;
+  --line-2: #2f3d55;
+  /* Translucent, because a panel edge composites over map pixels running from
+     the void to bright motorway fill, and a fixed hex disappears over half of
+     them. Inside a panel the backdrop is known, so --line is used there. */
+  --edge: #ffffff14;
+  --edge-hi: #ffffff0f;
+
+  /* ---- scale ------------------------------------------------------------ */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+
+  --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, "Helvetica Neue", Arial, sans-serif;
+  --t-2xs: 11px; --t-xs: 12px; --t-sm: 13px; --t-base: 14px; --t-md: 15px;
+  --ls-tight: -0.011em; --ls-caps: 0.08em;
+
+  --e-2: 0 4px 16px -4px rgba(0,0,0,.5), 0 1px 2px rgba(0,0,0,.4);
+  --e-3: 0 16px 48px -12px rgba(0,0,0,.7), 0 2px 8px rgba(0,0,0,.45);
+  --e-glass: var(--e-3), inset 0 1px 0 var(--edge-hi);
+
+  --dur-1: 110ms; --dur-2: 180ms; --dur-3: 320ms;
+  --ease: cubic-bezier(.2,.7,.3,1);
+  --ease-io: cubic-bezier(.6,0,.3,1);
+
+  --dock-w: 360px;
+  --ctrl-h: 150px;             /* room kept clear for MapLibre's controls    */
+  --focus: 0 0 0 2px var(--s-1), 0 0 0 4px var(--accent);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
+
+body {
+  background: var(--s-0);
+  color: var(--ink);
+  font: var(--t-base)/1.5 var(--font);
+  /* Light-on-dark text renders heavy without this on macOS. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-size-adjust: 100%;
+}
+
+#map { position: absolute; inset: 0; }
+::selection { background: var(--accent-tint); color: var(--ink); }
+
+/* Visible to a screen reader, and to nothing else. */
+.sr {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
+/* Every focusable thing gets a ring. There was none anywhere: the search input
+   set outline:0 with no replacement, and the rows were divs that could not take
+   focus at all. The double ring — dark inner, amber outer — reads against both
+   the panels and the map. */
+:where(a, button, input, select, summary, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+  border-radius: var(--r-sm);
+}
+
+.panel {
+  position: absolute;
+  background: var(--panel);
+  backdrop-filter: blur(12px) saturate(115%);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-lg);
+  box-shadow: var(--e-glass);
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  .panel, .card, .maplibregl-popup-content, .maplibregl-ctrl-group {
+    background: var(--panel-solid);
+  }
+}
+
+/* ---- search -------------------------------------------------------------- */
+
+#search {
+  top: var(--sp-3); left: var(--sp-3); width: 340px;
+  overflow: hidden; z-index: 6;
+}
+#search:focus-within {
+  border-color: var(--accent-edge);
+  box-shadow: var(--e-glass), var(--focus);
+}
+#search input {
+  width: 100%; padding: var(--sp-3) var(--sp-4);
+  border: 0; outline: 0; background: transparent;
+  color: var(--ink); font: var(--t-md)/1.4 var(--font);
+  caret-color: var(--accent);
+}
+#search input::placeholder { color: var(--ink-2); }
+#search input::-webkit-search-cancel-button { filter: invert(1) opacity(.4); }
+
+#results {
+  list-style: none; margin: 0; padding: 0;
+  max-height: 44vh; overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: var(--line-2) transparent;
+}
+#results:not(:empty) { border-top: 1px solid var(--line); }
+
+.hit {
+  padding: var(--sp-2) var(--sp-4);
+  cursor: pointer; border-bottom: 1px solid var(--line);
+  transition: background var(--dur-1) var(--ease);
+}
+.hit:last-child { border-bottom: 0; }
+.hit:hover { background: var(--s-2); }
+/* The keyboard cursor was a background change of 1.2:1 — the only signal of
+   where Enter would go, and effectively invisible. It carries a second channel
+   now, which is also what 1.4.11 asks for. */
+.hit--on { background: var(--s-3); box-shadow: inset 2px 0 0 var(--accent); }
+.hit--quiet { color: var(--ink-2); cursor: default; }
+.hit b { display: block; font-weight: 600; letter-spacing: var(--ls-tight); }
+.hit small { display: block; color: var(--ink-2); font-size: var(--t-xs); }
+
+/* ---- the first-visit hint ------------------------------------------------ */
+
+.hint {
+  position: absolute; z-index: 5;
+  top: calc(var(--sp-3) + 54px); left: var(--sp-3); width: 340px;
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-4);
+  background: var(--panel); backdrop-filter: blur(10px);
+  border: 1px solid var(--accent-edge); border-radius: var(--r-md);
+  box-shadow: var(--e-2);
+  color: var(--ink-2); font-size: var(--t-xs);
+}
+.hint span { flex: 1; }
+
+/* ---- the dock ------------------------------------------------------------ */
+
+/* One column owning the right edge, rather than panels sharing a corner and
+   settling the collision with a stylesheet rule that read a sibling's inline
+   style attribute. A fourth card is an append. */
+#dock {
+  position: absolute; z-index: 5;
+  top: var(--sp-3); right: var(--sp-3);
+  bottom: calc(var(--sp-3) + var(--ctrl-h));
+  width: var(--dock-w);
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  pointer-events: none;          /* the gaps stay draggable map */
+}
+#dock > .card { pointer-events: auto; }
+
+.card {
+  display: flex; flex-direction: column;
+  flex: 0 1 auto; min-height: 0;  /* the flex-scroll unlock */
+  background: var(--panel);
+  backdrop-filter: blur(12px) saturate(115%);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-lg);
+  box-shadow: var(--e-glass);
+  overflow: hidden;
+  animation: card-in var(--dur-2) var(--ease);
+}
+.card[hidden] { display: none; }
+.card--focus { flex: 1 1 auto; }
+
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.card__head {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+.card__title { flex: 1; min-width: 0; margin: 0; font-size: var(--t-md); }
+.card__toggle {
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%;
+  padding: 0; border: 0; background: transparent;
+  color: var(--ink); font: 600 var(--t-md)/1.25 var(--font);
+  letter-spacing: var(--ls-tight); text-align: left; cursor: pointer;
+}
+.card__toggle::before {
+  content: "›"; flex: 0 0 auto; color: var(--ink-3);
+  transition: transform var(--dur-2) var(--ease);
+}
+.card__toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+
+.card__body {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: var(--sp-4);
+  scrollbar-width: thin; scrollbar-color: var(--line-2) transparent;
+}
+/* Collapsed is header-only. The card stays in the column rather than being
+   destroyed, which is how the list you came from survives opening a museum. */
+.card:has(.card__toggle[aria-expanded="false"]) .card__body { display: none; }
+.card:has(.card__toggle[aria-expanded="false"]) .card__head { border-bottom: 0; }
+
+.icon-btn {
+  flex: 0 0 auto;
+  display: grid; place-items: center;
+  width: 28px; height: 28px; margin: -4px -4px -4px 0;
+  border: 0; border-radius: var(--r-sm); background: transparent;
+  color: var(--ink-2); font-size: 18px; line-height: 1; cursor: pointer;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.icon-btn:hover { background: var(--s-2); color: var(--ink); }
+
+/* ---- content inside a card ----------------------------------------------- */
+
+.meta { color: var(--ink-2); font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
+.where { margin-bottom: var(--sp-2); }
+.desc { margin: 0 0 var(--sp-3); max-width: 60ch; line-height: 1.6; }
+
+.links { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
+a, .linkish { color: var(--accent); }
+.linkish {
+  padding: 0; border: 0; background: transparent;
+  font: inherit; color: var(--accent); text-align: left; cursor: pointer;
+}
+.linkish:hover { color: var(--accent-hi); text-decoration: underline; }
+
+.block { border-top: 1px solid var(--line); margin-top: var(--sp-4); padding-top: var(--sp-3); }
+.block h3 {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--t-2xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: var(--ls-caps); color: var(--ink-3);
+}
+
+.tags { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin-bottom: var(--sp-3); }
+.tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 8px; border-radius: var(--r-pill);
+  background: #ffffff0f; border: 1px solid var(--line-2); color: var(--ink-2);
+  font-size: var(--t-2xs); font-weight: 600; line-height: 1;
+}
+/* A glyph as well as a hue, so the distinction is not carried by colour alone. */
+.tag::before { content: "•"; font-size: 13px; line-height: 0; }
+.tag--ok { background: #6fdca726; border-color: #6fdca74d; color: var(--ok); }
+.tag--ok::before { content: "✓"; font-size: 10px; line-height: 1; }
+.tag--warn { background: #ffd16626; border-color: #ffd1664d; color: var(--warn); }
+.tag--warn::before { content: "~"; font-size: 11px; line-height: 1; }
+
+.badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 18px; padding: 0 6px; margin-left: var(--sp-1);
+  border-radius: var(--r-pill);
+  background: var(--accent-tint); border: 1px solid var(--accent-edge);
+  color: var(--accent);
+  font-size: var(--t-2xs); font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.badge--shows {
+  background: var(--accent-2-tint); border-color: var(--accent-2-edge); color: var(--accent-2);
+}
+
+/* ---- tabs, chips, rows --------------------------------------------------- */
+
+.tabs { display: flex; gap: var(--sp-1); margin-bottom: var(--sp-3); }
+.tab {
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; color: var(--ink-2);
+  font: 600 var(--t-sm)/1 var(--font); cursor: pointer;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.tab:hover { background: var(--s-2); color: var(--ink); }
+.tab--on { background: var(--s-3); border-color: var(--line-2); color: var(--ink); }
+
+.controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2);
+  margin: var(--sp-3) 0; padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--line);
+}
+.controls__sort { display: flex; align-items: center; gap: var(--sp-1); margin-left: auto; }
+.chips { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
+.chip {
+  padding: 5px var(--sp-2);
+  border: 1px solid var(--line-2); border-radius: var(--r-pill);
+  background: transparent; color: var(--ink-2);
+  font: 500 var(--t-2xs)/1 var(--font); cursor: pointer;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.chip:hover { background: var(--s-2); color: var(--ink); }
+.chip--on { background: var(--accent-tint); border-color: var(--accent-edge); color: var(--accent); }
+
+.select {
+  padding: 4px var(--sp-2);
+  border: 1px solid var(--line-2); border-radius: var(--r-sm);
+  background: var(--s-1); color: var(--ink); font: 500 var(--t-xs) var(--font);
+}
+
+.button {
+  margin-top: var(--sp-3); padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--accent-edge); border-radius: var(--r-sm);
+  background: var(--accent-tint); color: var(--accent);
+  font: 600 var(--t-sm)/1 var(--font); cursor: pointer;
+  transition: background var(--dur-1) var(--ease);
+}
+.button:hover { background: var(--accent-edge); }
+
+.rows { list-style: none; margin: 0; padding: 0; }
+/* Real buttons rather than divs with a click handler: focusable, in the tab
+   order, and activated by Enter and Space without any of it being written. */
+.row {
+  display: block; width: 100%;
+  padding: var(--sp-2) 0; border: 0; border-top: 1px solid var(--line);
+  background: transparent; color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer;
+  transition: color var(--dur-1) var(--ease);
+}
+.row:hover { color: var(--accent); }
+.row__name { display: block; }
+.row .meta { display: block; }
+
+/* ---- what's on ----------------------------------------------------------- */
+
+.coverage {
+  margin-bottom: var(--sp-3); padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t-sm); color: var(--ink);
+}
+.coverage .meta { display: inline; }
+.coverage--offer { border-color: var(--accent-edge); }
+
+.shows__list { list-style: none; margin: 0; padding: 0; }
+.show {
+  position: relative;
+  padding: var(--sp-2) 0 var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--line);
+}
+/* The left edge encodes what kind of date this is, alongside the words. */
+.show::before {
+  content: ""; position: absolute; left: 0; top: var(--sp-2); bottom: var(--sp-2);
+  width: 2px; border-radius: var(--r-pill); background: var(--line-2);
+}
+.show--running::before { background: var(--accent-2); }
+.show--closing::before { background: var(--warn); }
+.show--upcoming::before { background: var(--ink-3); }
+
+.show__title { font-size: var(--t-sm); line-height: 1.35; }
+.show__venue { font-size: var(--t-xs); }
+.show__when { color: var(--ink-2); font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
+.show--closing .show__when { color: var(--warn); }
+
+.venue { margin-bottom: var(--sp-3); }
+.venue__head {
+  display: flex; flex-direction: column; width: 100%;
+  padding: var(--sp-2) 0; border: 0; border-top: 1px solid var(--line);
+  background: transparent; color: var(--ink); font: inherit;
+  text-align: left; cursor: pointer;
+}
+.venue__name { font-weight: 600; }
+.venue__head:hover .venue__name { color: var(--accent); }
+
+.fold { margin-top: var(--sp-3); }
+.fold > summary {
+  padding: var(--sp-2) 0; border-top: 1px solid var(--line);
+  color: var(--ink-2); font-size: var(--t-xs); cursor: pointer;
+}
+.fold > summary:hover { color: var(--ink); }
+
+.empty {
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center; color: var(--ink-2); font-size: var(--t-sm);
+}
+.empty::before {
+  content: attr(data-glyph);
+  display: block; margin-bottom: var(--sp-2);
+  font-size: 22px; line-height: 1; color: var(--ink-3);
+}
+.empty small { display: block; margin-top: var(--sp-1); font-size: var(--t-xs); color: var(--ink-3); }
+
+/* ---- progress ------------------------------------------------------------ */
+
+/* Reading a city's websites takes minutes, and a bar that moves is the
+   difference between "working" and "broken" to somebody looking at it. */
+.scrape { margin-bottom: var(--sp-3); }
+.progress {
+  height: 4px; margin: var(--sp-2) 0 7px;
+  border-radius: var(--r-pill); background: var(--line);
+  overflow: hidden; box-shadow: inset 0 0 0 1px #ffffff0a;
+}
+.progress i {
+  display: block; height: 100%; border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  box-shadow: 0 0 8px -2px var(--accent);
+  transition: width var(--dur-3) var(--ease);
+}
+/* Before the site count is known there is no fraction to show, so the bar says
+   "something is happening" rather than inventing a position. Moved on transform
+   rather than margin, which relaid out the panel on every frame. */
+.progress.waiting i { width: 30%; animation: drift 1.3s var(--ease-io) infinite; }
+@keyframes drift {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(430%); }
+}
+
+/* ---- the HUD and the offer ----------------------------------------------- */
+
+/* A chip rather than bare text: --ink-2 over the void is 7.6:1, but the same
+   text over CARTO's motorway casings and urban fill drops below 3:1, and a
+   text-shadow helps the eye while counting for nothing. */
+#hud {
+  position: absolute; left: var(--sp-3); bottom: var(--sp-3); z-index: 5;
+  max-width: min(44vw, 460px);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel); backdrop-filter: blur(10px);
+  border: 1px solid var(--edge); border-radius: var(--r-pill);
+  box-shadow: var(--e-2);
+  color: var(--ink-2); font-size: var(--t-xs);
+  font-variant-numeric: tabular-nums;
+}
+#hud:has(#hudCount:empty):has(#hudNote:empty) { display: none; }
+#hud b { color: var(--ink); font-weight: 600; }
+.hud__bad { color: var(--bad); }
+#hud .linkish { margin-left: var(--sp-2); font-size: var(--t-xs); }
+
+.pill {
+  position: absolute; z-index: 5;
+  left: 50%; transform: translateX(-50%); bottom: var(--sp-5);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--panel); backdrop-filter: blur(10px);
+  border: 1px solid var(--accent-edge); border-radius: var(--r-pill);
+  box-shadow: var(--e-2);
+  color: var(--accent); font: 600 var(--t-sm)/1 var(--font); cursor: pointer;
+  transition: background var(--dur-1) var(--ease);
+}
+.pill:hover { background: var(--accent-tint); }
+.pill[hidden] { display: none; }
+
+/* ---- MapLibre's own chrome ----------------------------------------------- */
+
+.maplibregl-popup-content {
+  background: var(--panel); backdrop-filter: blur(10px);
+  color: var(--ink); border: 1px solid var(--edge);
+  border-radius: var(--r-md); box-shadow: var(--e-2);
+  padding: var(--sp-2) var(--sp-3); font: 500 var(--t-xs)/1.35 var(--font);
+}
+/* A CSS-triangle tip cannot inherit the blur, so it always rendered as a flat
+   opaque wedge hanging off a translucent card. The offset already reads as
+   attachment. */
+.maplibregl-popup-tip { display: none; }
+/* The popup used to be able to slide under the cursor and take the pointer,
+   firing mouseleave on the dot underneath — remove, re-add, a visible strobe. */
+.maplibregl-popup { pointer-events: none; }
+.maplibregl-popup-content { pointer-events: auto; }
+
+.maplibregl-ctrl-group {
+  background: var(--panel); backdrop-filter: blur(10px);
+  border: 1px solid var(--edge) !important;
+  border-radius: var(--r-md); box-shadow: var(--e-2);
+}
+.maplibregl-ctrl-group button + button { border-top-color: var(--line); }
+.maplibregl-ctrl-attrib { font-size: var(--t-2xs); }
+
+/* ---- narrow windows ------------------------------------------------------ */
+
+/* The panels are sized for a desktop; at phone widths a 360 px column beside a
+   full-width search box covers the map entirely. Below 720 px the dock becomes
+   a sheet docked to the bottom, so the map stays visible above it. */
+@media (max-width: 720px) {
+  #search { left: var(--sp-2); right: var(--sp-2); top: var(--sp-2); width: auto; }
+  .hint { left: var(--sp-2); right: var(--sp-2); width: auto; }
+
+  #dock {
+    top: auto; left: 0; right: 0; bottom: 0; width: auto;
+    max-height: 64vh; gap: 0;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+  #dock > .card { border-radius: 0; border-left: 0; border-right: 0; border-bottom: 0; }
+  #dock > .card:first-child { border-radius: var(--r-lg) var(--r-lg) 0 0; }
+
+  /* A grab handle, so the sheet reads as a sheet. */
+  #dock > .card:first-child .card__head { position: relative; padding-top: var(--sp-4); }
+  #dock > .card:first-child .card__head::after {
+    content: ""; position: absolute; top: 6px; left: 50%;
+    width: 36px; height: 4px; margin-left: -18px;
+    border-radius: var(--r-pill); background: var(--line-2);
+  }
+
+  #hud { bottom: auto; top: calc(var(--sp-2) + 54px); left: var(--sp-2); max-width: none; }
+  .pill { bottom: calc(64vh + var(--sp-2)); }
+
+  /* MapLibre's controls sit bottom-right, which the sheet covers entirely — so
+     while a card was open there was no way to zoom. */
+  .maplibregl-ctrl-bottom-right { bottom: 64vh; }
+
+  /* Three translucent surfaces composited over a continuously rendering WebGL
+     globe is a real frame-rate cost on a mid-range phone. */
+  .panel, .card, #hud, .pill { backdrop-filter: none; background: var(--panel-solid); }
+}
+
+/* ---- less motion --------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+  .card { animation: none; }
+  /* Held at full width rather than removed: the indeterminate state still has
+     to be visible, and this composites to 3.7:1 against the panel. */
+  .progress.waiting i { animation: none; width: 100%; opacity: .45; }
+}

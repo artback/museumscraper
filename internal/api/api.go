@@ -126,6 +126,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/scrape", s.handleScrape)
 	mux.HandleFunc("GET /map", s.handleMap)
 	mux.HandleFunc("GET /map/vendor/{file}", s.handleVendor)
+	mux.HandleFunc("GET /map/assets/{file}", s.handleAsset)
 	mux.HandleFunc("GET /{$}", s.handleMap)
 	mux.HandleFunc("GET /v1/exhibitions", s.handleExhibitions)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
@@ -411,14 +412,21 @@ type coverageReport struct {
 }
 
 type exhibitionHit struct {
-	Title      string     `json:"title"`
-	URL        string     `json:"url"`
-	Museum     string     `json:"museum"`
-	DistanceKm float64    `json:"distance_km"`
-	Start      *time.Time `json:"start,omitempty"`
-	End        *time.Time `json:"end,omitempty"`
-	Running    bool       `json:"running"`
-	Upcoming   bool       `json:"upcoming"`
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+	Museum string `json:"museum"`
+	// MuseumWikidataID is which museum, as opposed to what it was called when
+	// the listing was read. A caller matching exhibitions to museums by name
+	// gets it wrong in three ways that all happen in practice: a re-scrape
+	// rewrites the name, merging name variants renames the museum afterwards,
+	// and a show listed by two venues carries only one of them. The same
+	// identifier is on museumHit, so the two can be joined exactly.
+	MuseumWikidataID string     `json:"museum_wikidata_id,omitempty"`
+	DistanceKm       float64    `json:"distance_km"`
+	Start            *time.Time `json:"start,omitempty"`
+	End              *time.Time `json:"end,omitempty"`
+	Running          bool       `json:"running"`
+	Upcoming         bool       `json:"upcoming"`
 	// Permanent marks a display that is always on, which is why it carries no
 	// dates. Without it a caller reads the empty start and end as a listing the
 	// scraper failed on, and a caller asking what closes soonest would put an
@@ -714,8 +722,9 @@ func (s *Server) handleExhibitions(w http.ResponseWriter, r *http.Request) {
 	for _, hit := range hits {
 		found = append(found, exhibitionHit{
 			Title: hit.Title, URL: hit.URL, Museum: hit.Museum,
-			DistanceKm: round2(hit.DistanceKm),
-			Start:      hit.Start, End: hit.End,
+			MuseumWikidataID: hit.MuseumWikidataID,
+			DistanceKm:       round2(hit.DistanceKm),
+			Start:            hit.Start, End: hit.End,
 			Running: hit.Running, Upcoming: hit.Upcoming,
 			Permanent: hit.Permanent,
 			Latitude:  hit.Latitude, Longitude: hit.Longitude,
