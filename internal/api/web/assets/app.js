@@ -30,7 +30,6 @@ globe.map.on("load", () => {
 
 	hud.loading();
 	globe.loadPoints();
-	restoreFromURL();
 
 	// One handler for "the view settled", debounced. Zooming fires moveend for
 	// every notch of the wheel, and asking the server on each one put dozens of
@@ -166,10 +165,20 @@ function setHash(key, value) {
 	history.pushState(null, "", "#" + params.toString());
 }
 
+// A link to a museum opens it straight away, without waiting for the map.
+//
+// This used to run inside the map's load handler, which tied a shared link to
+// the globe finishing: a slow tile host, a refused style, a browser that will
+// not run animation frames for a background tab, and the card never appeared
+// even though the record it names was one request away. Selecting and
+// revealing are both no-ops until the layers exist, so there is nothing here
+// that needs the map to be ready.
 function restoreFromURL() {
 	const id = hashParams().get("m");
 	if (id) museum.show(id);
 }
+
+restoreFromURL();
 
 window.addEventListener("popstate", () => {
 	const id = hashParams().get("m");
