@@ -61,6 +61,12 @@ export function search(term, limit = 10, signal) {
 	return getJSON("/v1/search?q=" + encodeURIComponent(term) + "&limit=" + limit, { signal });
 }
 
+// searchExhibitions finds a show by its name, anywhere. The title is often the
+// only thing somebody knows — not the museum holding it, and not the city.
+export function searchExhibitions(term, limit = 6, signal) {
+	return getJSON("/v1/exhibitions?q=" + encodeURIComponent(term) + "&limit=" + limit, { signal });
+}
+
 // scrapeStatus asks what is happening somewhere without starting anything: a
 // GET, so opening a museum never sets other people's websites being read.
 export function scrapeStatus(spot) {

@@ -160,15 +160,20 @@ function paintShows(box, mine, coverage, museum) {
 		return;
 	}
 
-	box.append(el("div", { class: "meta" }, "Nothing listed for this museum."));
+	// An area nobody has read yet is read now, without being asked.
+	//
+	// Clicking a museum and sitting in front of its panel asks for its
+	// exhibitions far more plainly than panning the map past it does — which is
+	// why the pan no longer starts anything and this does. Reporting "nobody has
+	// looked here yet" and then doing nothing about it is a dead end with no way
+	// out. An area already read, running, or inside its cooldown is left alone
+	// by the server either way.
+	if (coverage && !coverage.last_scraped) {
+		look(museum);
+		return;
+	}
 
-	// Offer to go and look, rather than reporting a state and stopping. The
-	// museum's own area may simply never have been read.
-	if (!coverage || coverage.last_scraped) return;
-	box.append(el("button", {
-		class: "button", type: "button",
-		onclick: () => look(museum),
-	}, "Read this museum's website"));
+	box.append(el("div", { class: "meta" }, "Nothing listed for this museum."));
 }
 
 async function look(museum) {

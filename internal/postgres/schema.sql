@@ -132,6 +132,16 @@ CREATE INDEX IF NOT EXISTS exhibitions_location_idx ON exhibitions USING gist (l
 -- "What is on now" filters on the closing date, so it leads the index.
 CREATE INDEX IF NOT EXISTS exhibitions_ends_idx ON exhibitions (ends_on);
 
+-- Exhibitions were findable only by location: a visitor who knew the name of
+-- the show but not which museum held it had no way to ask. Trigrams rather than
+-- full-text search for the same reason the museums use them — titles arrive in
+-- every language and are often read off a URL slug, so stemming in one language
+-- would not help and near-misses are most of what people type.
+-- On the title alone, matching the query: similarity against the title joined
+-- to the venue drops below the threshold for the near-misses this is for.
+CREATE INDEX IF NOT EXISTS exhibitions_title_trgm_idx
+    ON exhibitions USING gin ((lower(title)) gin_trgm_ops);
+
 -- Resolved place names, so "exhibitions in Paris" costs one geocoder call ever
 -- rather than one per request.
 --
@@ -206,3 +216,117 @@ ALTER TABLE museums ADD COLUMN IF NOT EXISTS location_approximate boolean NOT NU
 -- see today" is wrong without them. For a small museum with no temporary
 -- programme it is the only row there will ever be.
 ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS permanent boolean NOT NULL DEFAULT false;
+
+-- When an exhibition was first and last seen on the museum's own site.
+--
+-- scraped_at said only when the row was last written, which cannot answer
+-- either question a freshness system needs. "What is new near me since
+-- Tuesday" needs the first; retiring a listing that has vanished from the site
+-- needs the second, and without it the table only ever grew — nothing removed
+-- an exhibition that closed early or had its page pulled, and a permanent
+-- display, which carries no closing date at all, leaked permanently.
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS first_seen_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS last_seen_at  timestamptz NOT NULL DEFAULT now();
+
+-- When the listing stopped appearing on the site it was read from. Null while
+-- it is still there.
+--
+-- Retirement is a column rather than a DELETE because a scrape is not
+-- evidence: a site that answers half a page, or blocks us for an afternoon,
+-- would otherwise erase a museum's whole programme irreversibly. Hidden and
+-- recoverable is the right failure mode for a heuristic reader.
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS retired_at timestamptz;
+
+-- Where the row came from. Everything is scraped today; submissions will not
+-- be, and must never be retired, because nothing will ever see them again on a
+-- museum's site.
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'scraped';
+
+-- The host the listing was read from, which is the unit a sweep works in:
+-- museums share websites, so the site is what gets fetched, not the museum.
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS site text NOT NULL DEFAULT '';
+
+-- Backfill the host for rows written before the column existed. Idempotent:
+-- it only touches rows that have not got one.
+UPDATE exhibitions
+   SET site = lower(regexp_replace(
+                  substring(coalesce(source_page, url) from '^https?://([^/:]+)'),
+                  '^www\.', ''))
+ WHERE site = ''
+   AND coalesce(source_page, url) ~ '^https?://';
+
+CREATE INDEX IF NOT EXISTS exhibitions_site_idx ON exhibitions (site) WHERE site <> '';
+
+-- "What is on" must not show what has been taken down, and every such query
+-- filters on this, so it leads the index.
+CREATE INDEX IF NOT EXISTS exhibitions_live_idx ON exhibitions (retired_at, ends_on);
+
+-- The host a museum publishes on, which is the unit a sweep works in.
+--
+-- Generated rather than maintained, because it is a pure function of the
+-- website and there is no state in which the two should disagree. Indexed
+-- because every sweep query joins on it, and deriving it with a regular
+-- expression each time meant scanning 180,000 rows to answer "what is due".
+ALTER TABLE museums ADD COLUMN IF NOT EXISTS site text
+    GENERATED ALWAYS AS (
+        lower(regexp_replace(substring(website from '^https?://([^/:]+)'), '^www\.', ''))
+    ) STORED;
+
+CREATE INDEX IF NOT EXISTS museums_site_idx ON museums (site) WHERE site IS NOT NULL;
+
+-- What each museum website has cost and yielded, and when it is next worth
+-- reading.
+--
+-- Keyed by host rather than by museum because the host is what gets fetched:
+-- institutions nest, and Tate's four galleries share one domain, so a
+-- per-museum record would schedule the same crawl four times.
+--
+-- The table exists mainly to record the attempts that found nothing. Before
+-- it, the only evidence a site had been read was an exhibition row, so a
+-- museum scraped and found empty was indistinguishable from one never tried:
+-- the coverage report told a caller "nobody has looked here yet" about an area
+-- whose every museum had been read that morning, and every dead site was
+-- retried at full cost on every sweep, forever, at the same priority as the
+-- Tate.
+CREATE TABLE IF NOT EXISTS site_scrapes (
+    site text PRIMARY KEY,
+
+    last_attempt_at timestamptz,
+    last_success_at timestamptz,
+    -- When the result last differed from the one before. This is what the
+    -- interval adapts to.
+    last_change_at  timestamptz,
+
+    -- The listing page that produced results, with its cache validators, so
+    -- the next sweep can ask the site whether anything changed instead of
+    -- reading and re-parsing the page to find out.
+    listing_url   text,
+    etag          text,
+    last_modified text,
+
+    found_count          integer NOT NULL DEFAULT 0,
+    consecutive_failures integer NOT NULL DEFAULT 0,
+
+    -- A digest of what the last successful read produced, so "did anything
+    -- change" is answered exactly rather than guessed at from the row count.
+    -- Counting would call a swapped exhibition no change at all, which is the
+    -- case the interval most needs to react to.
+    fingerprint text,
+
+    -- The current gap between reads, in hours, adapted from what the last
+    -- sweeps found. A site that never changes drifts towards months; one that
+    -- changes every time is pulled back towards days.
+    interval_hours double precision NOT NULL DEFAULT 168,
+    next_due_at    timestamptz NOT NULL DEFAULT now(),
+    -- Why this due date was chosen, so a sweep's ordering can be read back
+    -- rather than guessed at.
+    due_reason     text,
+
+    -- Set when a site has failed too often to keep paying for. Null while it
+    -- is still in the rotation.
+    parked_reason text
+);
+
+-- The sweep's only selection query: what is due, soonest first.
+CREATE INDEX IF NOT EXISTS site_scrapes_due_idx
+    ON site_scrapes (next_due_at) WHERE parked_reason IS NULL;

@@ -128,6 +128,19 @@ search.wire({
 		area.show(place);
 	},
 	onMuseum: id => museum.show(id),
+
+	// A show found by name is opened at its venue rather than as a link off the
+	// page: the venue is where its dates, its address and the rest of its
+	// programme are. /v1/museums/{id} takes a Wikidata id as readily as a
+	// numeric one, so the exhibition's own reference is enough to open it; the
+	// name is the fallback for the listings that carry no reference. Either
+	// way the map goes there, so a venue that resolves to no record at all
+	// still leaves you looking at the right place.
+	onShow: show => {
+		globe.reveal(show.longitude, show.latitude, 15);
+		if (show.museum_wikidata_id) museum.show(show.museum_wikidata_id);
+		else area.openVenue({ name: show.museum });
+	},
 });
 
 area.onOpenMuseum(id => museum.show(id));

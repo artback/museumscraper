@@ -456,3 +456,118 @@ func TestExtractCandidates_SwedishListingWithReadMoreLinks(t *testing.T) {
 		}
 	}
 }
+
+// A card that is nothing but a linked photograph still names its exhibition —
+// in the URL.
+//
+// Göteborgs stadsmuseum lists every exhibition this way: an <a> containing an
+// <img alt=""> and an empty div, with no text anywhere inside the link. The
+// minimum-length check rejected those anchors outright, which meant the slug
+// fallback below it could never run for the case it was written for, and the
+// museum yielded nothing at all.
+func TestExtractCandidates_ReadsCardsThatAreOnlyALinkedImage(t *testing.T) {
+	const page = `<html><body>
+	  <a class="hero" href="/utstallningar/vikingr/">
+	    <div class="background"><img src="/img/v.jpg" alt=""/></div>
+	    <div class="content"></div>
+	  </a>
+	</body></html>`
+
+	got := ExtractCandidates(page, mustURL(t, "https://goteborgsstadsmuseum.se/utstallningar/"))
+
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want 1: %+v", len(got), got)
+	}
+	if got[0].Title != "Vikingr" {
+		t.Errorf("Title = %q, want the slug, which is the only name on offer", got[0].Title)
+	}
+}
+
+// An entry one segment below a programme index is an entry, whatever the words
+// in its path.
+//
+// The vocabulary runs out: this museum's own English section is spelled
+// /en/exihibitions/, and no list will ever hold that. What stays true is that
+// the page is the index and the entries sit under it.
+func TestEntryUnder(t *testing.T) {
+	cases := []struct {
+		section, entry string
+		want           bool
+		why            string
+	}{
+		{"/utstallningar/", "https://x.se/utstallningar/vikingr/", true, "an entry below the index"},
+		{"/en/exihibitions/", "https://x.se/en/exihibitions/vikingr/", true, "the museum's own spelling"},
+		{"/utstallningar/", "https://x.se/utstallningar/", false, "the index is not its own entry"},
+		{"/utstallningar/", "https://x.se/utstallningar/tidigare-utstallningar/", false,
+			"a sibling index of closed shows, not an entry"},
+		{"/utstallningar/", "https://x.se/utstallningar/vikingr/bilder/", false, "two levels down"},
+		{"/utstallningar/", "https://x.se/besok-oss/", false, "a different section"},
+		{"", "https://x.se/utstallningar/vikingr/", false, "no index means no claim"},
+	}
+
+	for _, c := range cases {
+		if got := EntryUnder(c.section, c.entry); got != c.want {
+			t.Errorf("EntryUnder(%q, %q) = %v, want %v — %s", c.section, c.entry, got, c.want, c.why)
+		}
+	}
+}
+
+// The front page indexes nothing, so it cannot make entries of everything it
+// links to.
+func TestProgrammeSection(t *testing.T) {
+	if got := ProgrammeSection(mustURL(t, "https://x.se/")); got != "" {
+		t.Errorf("front page section = %q, want none", got)
+	}
+	if got := ProgrammeSection(mustURL(t, "https://x.se/en/exihibitions/")); got != "/en/exihibitions/" {
+		t.Errorf("section = %q, want the page's own path", got)
+	}
+}
+
+// A museum's table of contents is not a thing to go and see.
+//
+// Göteborgs naturhistoriska museum lists /utstallningar/permanenta-utstallningar/
+// and /utstallningar/tillfalliga-utstallningar/ beside its actual halls, and
+// both were stored as exhibitions — the site's own navigation, offered to a
+// visitor as something on show.
+func TestSubIndexUnder(t *testing.T) {
+	cases := []struct {
+		section, entry string
+		want           bool
+	}{
+		{"/utstallningar/", "https://gnm.se/utstallningar/permanenta-utstallningar/", true},
+		{"/utstallningar/", "https://gnm.se/utstallningar/tillfalliga-utstallningar/", true},
+		{"/utstallningar/", "https://gnm.se/utstallningar/daggdjurssalen/", false},
+		// Judged only against the page being read: a site whose single permanent
+		// display lives at the top level is naming the display, not indexing it.
+		{"/whats-on/", "https://x.org/permanent-exhibition/", false},
+	}
+	for _, c := range cases {
+		if got := SubIndexUnder(c.section, c.entry); got != c.want {
+			t.Errorf("SubIndexUnder(%q, %q) = %v, want %v", c.section, c.entry, got, c.want)
+		}
+	}
+}
+
+// An exhibition word in a link outranks a generic programme word.
+//
+// Kalmar konstmuseum offers "Kalender" at /event/ and "Utställningar" at
+// /aktuella-utstallningar/. Scored the same, the order they appeared in the
+// navigation decided it, the calendar won, and because the search stops at the
+// first page that yields anything the museum's three exhibitions were never
+// reached — its programme was read as seven guided tours of shows that were
+// themselves missing.
+func TestFindListingLinks_PrefersExhibitionsOverTheCalendar(t *testing.T) {
+	const home = `<html><body>
+	  <a href="/event/">Kalender</a>
+	  <a href="/aktuella-utstallningar/">Utställningar</a>
+	</body></html>`
+
+	got := FindListingLinks(home, mustURL(t, "https://www.kalmarkonstmuseum.se/"))
+
+	if len(got) == 0 {
+		t.Fatal("no listing links found")
+	}
+	if got[0] != "https://www.kalmarkonstmuseum.se/aktuella-utstallningar/" {
+		t.Errorf("first link = %q, want the exhibitions index ahead of the calendar", got[0])
+	}
+}

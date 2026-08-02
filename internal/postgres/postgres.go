@@ -84,12 +84,48 @@ SET pg_trgm.word_similarity_threshold = 0.55;`)
 		pool.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
+	if err := applySchema(ctx, pool); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
+		return nil, err
 	}
 
 	return &Store{pool: pool}, nil
+}
+
+// schemaLock is an arbitrary constant identifying the schema-application lock.
+// Any process applying the schema takes the same one.
+const schemaLock = 0x6D757365756D01 // "museum" and a version byte
+
+// applySchema runs the schema with a lock held, so processes starting together
+// do not race each other through it.
+//
+// They did. Two sweepers started at the same moment deadlocked on the ALTER
+// TABLE and CREATE INDEX statements — Postgres detected it and failed one of
+// them outright, so the process exited rather than starting. The schema is
+// applied on every start by design, and this stack starts several processes at
+// once, so the race was always there; it only became easy to hit once there
+// was a service someone would sensibly run more than one of.
+//
+// An advisory lock rather than a migration table: the schema is idempotent and
+// the only thing needed is that two of them are not interleaved.
+func applySchema(ctx context.Context, pool *pgxpool.Pool) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("apply schema: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Held until the transaction ends, which is what serialises the appliers.
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", int64(schemaLock)); err != nil {
+		return fmt.Errorf("apply schema: %w", err)
+	}
+	if _, err := tx.Exec(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("apply schema: %w", err)
+	}
+	return nil
 }
 
 // Close releases the pool.
@@ -752,19 +788,28 @@ func (s *Store) execBatch(ctx context.Context, batch *pgx.Batch) (int64, error) 
 // SaveExhibitions upserts scraped listings, keyed by URL.
 func (s *Store) SaveExhibitions(ctx context.Context, found []exhibitions.Exhibition) (int64, error) {
 	const stmt = `
-INSERT INTO exhibitions (url, title, museum, museum_wikidata_id, starts_on, ends_on, location, source_page, scraped_at, permanent)
+INSERT INTO exhibitions (url, title, museum, museum_wikidata_id, starts_on, ends_on, location, source_page, scraped_at, permanent, site, first_seen_at, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6,
         CASE WHEN $7::double precision IS NULL THEN NULL
              ELSE ST_SetSRID(ST_MakePoint($8::double precision, $7::double precision), 4326)::geography END,
-        $9, $10, $11)
+        $9, $10, $11, $12, $10, $10)
 ON CONFLICT (url) DO UPDATE SET
     title      = EXCLUDED.title,
     museum     = EXCLUDED.museum,
     starts_on  = EXCLUDED.starts_on,
     ends_on    = EXCLUDED.ends_on,
     permanent  = EXCLUDED.permanent,
+    site       = EXCLUDED.site,
     location   = coalesce(EXCLUDED.location, exhibitions.location),
-    scraped_at = EXCLUDED.scraped_at`
+    scraped_at = EXCLUDED.scraped_at,
+    -- first_seen_at is never moved forward: it is what "new since Tuesday"
+    -- means, and rewriting it on every sweep would make everything new every
+    -- time.
+    first_seen_at = least(exhibitions.first_seen_at, EXCLUDED.first_seen_at),
+    last_seen_at  = greatest(exhibitions.last_seen_at, EXCLUDED.last_seen_at),
+    -- Seeing it again undoes a retirement: a listing that came back was either
+    -- never gone or has returned, and either way it is on show now.
+    retired_at = NULL`
 
 	// The arguments are kept alongside the batch so a failed batch can be
 	// replayed row by row.
@@ -789,9 +834,17 @@ ON CONFLICT (url) DO UPDATE SET
 		// the cheap half; decoding the declared charset properly, in the
 		// scraper, is the other and preserves the characters rather than
 		// replacing them.
+		// The site is derived by the scraper's own rule rather than by parsing
+		// the URL here, so the key a listing is stored under and the key its
+		// sweep is scheduled under cannot disagree.
+		site := exhibitions.SiteKey(e.SourcePage)
+		if site == "" {
+			site = exhibitions.SiteKey(e.URL)
+		}
+
 		args := []any{validUTF8(e.URL), validUTF8(e.Title), validUTF8(e.Museum),
 			validUTF8(e.MuseumWikidataID),
-			e.Start, e.End, lat, lon, validUTF8(e.SourcePage), scraped, e.Permanent}
+			e.Start, e.End, lat, lon, validUTF8(e.SourcePage), scraped, e.Permanent, site}
 
 		queries = append(queries, args)
 		batch.Queue(stmt, args...)
@@ -847,6 +900,7 @@ SELECT url, title, coalesce(museum,''), coalesce(museum_wikidata_id,''),
        ST_Distance(location, $1::geography) / 1000.0 AS distance_km
 FROM exhibitions
 WHERE location IS NOT NULL
+  AND retired_at IS NULL
   AND ST_DWithin(location, $1::geography, $2)
   AND (ends_on IS NULL OR ends_on >= current_date)
   AND ($3 OR starts_on IS NULL OR starts_on <= current_date)
@@ -886,6 +940,90 @@ LIMIT $4`
 		hits = append(hits, hit)
 	}
 	return hits, rows.Err()
+}
+
+// SearchExhibitions finds what is on show by name, best match first.
+//
+// Exhibitions could only be reached through a location, so someone who knew a
+// show's name but not which museum held it — the ordinary case for anything
+// touring, and for anything a friend mentioned — had no way to ask at all.
+//
+// A location is optional and narrows rather than decides: with one, the match
+// must also be within the radius, and ties break towards the nearer venue.
+//
+// Scored like the museum search, and for the same reasons: an exact title beats
+// a prefix, a prefix beats a substring, and trigram similarity carries the
+// near-misses that are most of what people type. The museum's name is searchable
+// too, so "hasselblad" finds what is on at the Hasselblad Center, but it scores
+// below the title so a show's own name always wins.
+func (s *Store) SearchExhibitions(ctx context.Context, query string, lat, lon, radiusKm float64, near, includeUpcoming bool, limit, offset int) ([]ExhibitionHit, int64, error) {
+	term := strings.ToLower(strings.TrimSpace(query))
+	if term == "" {
+		return nil, 0, nil
+	}
+
+	const stmt = `
+WITH q AS (SELECT $1::text AS term)
+SELECT url, title, coalesce(museum,''), coalesce(museum_wikidata_id,''),
+       starts_on, ends_on, coalesce(source_page,''), scraped_at, permanent,
+       ST_Y(location::geometry), ST_X(location::geometry),
+       CASE WHEN $2::boolean THEN ST_Distance(location, $3::geography) / 1000.0 ELSE 0 END AS distance_km,
+       count(*) OVER () AS total,
+       (CASE WHEN lower(title) = q.term THEN 3.0
+             WHEN lower(title) LIKE q.term || '%' THEN 1.5
+             WHEN position(q.term in lower(title)) > 0 THEN 0.75
+             -- The venue matches too, but never as strongly as the show.
+             WHEN position(q.term in lower(coalesce(museum, ''))) > 0 THEN 0.5
+             ELSE 0 END
+        + similarity(lower(title), q.term)) AS score
+FROM exhibitions, q
+WHERE (ends_on IS NULL OR ends_on >= current_date)
+  AND ($4 OR starts_on IS NULL OR starts_on <= current_date)
+  AND (NOT $2::boolean OR (location IS NOT NULL AND ST_DWithin(location, $3::geography, $5)))
+  -- Similarity is measured against the title alone, never the title and the
+  -- venue joined together. Whole-string similarity falls away as the string
+  -- grows, so the concatenation buries the match: "vikingar" scores 0.55
+  -- against "vikingr" and 0.19 against "vikingr museum of gothenburg", which is
+  -- under the threshold. The venue is matched as a substring instead, which is
+  -- all it needs to be.
+  AND (lower(title) % q.term
+       OR position(q.term in lower(title)) > 0
+       OR position(q.term in lower(coalesce(museum, ''))) > 0)
+ORDER BY score DESC, distance_km, ends_on NULLS LAST
+LIMIT $6 OFFSET $7`
+
+	point := fmt.Sprintf("SRID=4326;POINT(%v %v)", lon, lat)
+
+	rows, err := s.pool.Query(ctx, stmt, term, near, point, includeUpcoming, radiusKm*1000, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("search exhibitions %q: %w", query, err)
+	}
+	defer rows.Close()
+
+	var (
+		hits  []ExhibitionHit
+		total int64
+	)
+	now := time.Now()
+	for rows.Next() {
+		var (
+			hit      ExhibitionHit
+			lat, lon *float64
+			score    float64
+		)
+		if err := rows.Scan(&hit.URL, &hit.Title, &hit.Museum, &hit.MuseumWikidataID,
+			&hit.Start, &hit.End, &hit.SourcePage, &hit.ScrapedAt, &hit.Permanent,
+			&lat, &lon, &hit.DistanceKm, &total, &score); err != nil {
+			return nil, 0, fmt.Errorf("scan exhibition: %w", err)
+		}
+		if lat != nil && lon != nil {
+			hit.Latitude, hit.Longitude = *lat, *lon
+		}
+		hit.Running = hit.Permanent || hit.Start == nil || !hit.Start.After(now)
+		hit.Upcoming = !hit.Permanent && hit.Start != nil && hit.Start.After(now)
+		hits = append(hits, hit)
+	}
+	return hits, total, rows.Err()
 }
 
 // EachMuseum streams the whole catalogue, for the audit.
@@ -951,8 +1089,21 @@ func (s *Store) ExhibitionCoverage(ctx context.Context, lat, lon, radiusKm float
 	const stmt = `
 SELECT count(*),
        count(*) FILTER (WHERE website IS NOT NULL AND website <> ''),
-       (SELECT max(scraped_at) FROM exhibitions
-         WHERE location IS NOT NULL AND ST_DWithin(location, $1::geography, $2))
+       -- Read from the attempt record, not from the results.
+       --
+       -- Taking this from max(scraped_at) over the exhibitions meant an area
+       -- whose every museum had been read that morning and had published
+       -- nothing reported "nobody has looked here yet" — the one answer
+       -- guaranteed to be wrong, and the one that sends a caller off to run a
+       -- refresh that will find nothing again.
+       (SELECT max(ss.last_attempt_at)
+          FROM site_scrapes ss
+         WHERE ss.site IN (
+             SELECT lower(regexp_replace(substring(m2.website from '^https?://([^/:]+)'), '^www\.', ''))
+               FROM museums m2
+              WHERE m2.location IS NOT NULL
+                AND coalesce(m2.website,'') <> ''
+                AND ST_DWithin(m2.location, $1::geography, $2)))
 FROM museums
 WHERE location IS NOT NULL AND ST_DWithin(location, $1::geography, $2)`
 

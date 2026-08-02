@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"museum/internal/models"
+	"museum/internal/postgres"
 	"museum/pkg/exhibitions"
 	"museum/pkg/graceful"
 	"museum/pkg/location"
@@ -113,7 +114,17 @@ func runRefresh(ctx context.Context, args []string) error {
 		buffer = buffer[:0]
 	}
 
+	// The sites this run actually read, so their vanished listings can be
+	// retired once everything found has been written.
+	read := make(map[string]bool)
+
 	exhibitions.NewScraper().Stream(ctx, museums, *concurrency, func(batch []exhibitions.Exhibition) {
+		if len(batch) > 0 {
+			if site := exhibitions.SiteKey(batch[0].SourcePage); site != "" {
+				read[site] = true
+			}
+		}
+
 		found += len(batch)
 		buffer = append(buffer, batch...)
 		if len(buffer) >= checkpointSize {
@@ -123,6 +134,18 @@ func runRefresh(ctx context.Context, args []string) error {
 		}
 	})
 	flush()
+
+	// Retired after the final write, never before it: last_seen_at is stamped
+	// by the save, so retiring first would retire what this very run found.
+	//
+	// Reading a site is a statement about all of it, not only about what is new
+	// on it, so a listing that has stopped appearing has stopped being true.
+	// Without this a scrape only ever adds, and every mistake a past run made
+	// stays in the catalogue for good — nothing would have re-read the pages
+	// that produced it.
+	if retired := retireVanished(ctx, db, read, start); retired > 0 {
+		log.Printf("Retired %d listings the museums' sites no longer show", retired)
+	}
 
 	// Occurrences of one recurring event arrive from different listing pages
 	// and different runs, so folding them together belongs here as well as in
@@ -220,4 +243,33 @@ func nearbyMuseumsWithWebsites(ctx context.Context, lat, lon, radius float64) ([
 		}
 	}
 	return museums, nil
+}
+
+// retireVanished marks the listings each site read by this run no longer shows,
+// and reports how many it marked.
+//
+// Only sites this run actually read something from are considered. A site that
+// was unreachable, or whose shape changed so that nothing was recognised, is not
+// evidence that its programme has ended, and retiring a museum's whole
+// programme because its server was briefly down is not a repair.
+func retireVanished(ctx context.Context, db *postgres.Store, read map[string]bool, since time.Time) int64 {
+	if len(read) == 0 {
+		return 0
+	}
+
+	// Detached from the run's context: these are small writes that should still
+	// happen if the scrape was interrupted.
+	retireCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), checkpointTimeout)
+	defer cancel()
+
+	var retired int64
+	for site := range read {
+		n, err := db.RetireUnseen(retireCtx, site, since)
+		if err != nil {
+			log.Printf("  could not retire vanished listings on %s: %v", site, err)
+			continue
+		}
+		retired += n
+	}
+	return retired
 }

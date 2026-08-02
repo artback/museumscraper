@@ -95,6 +95,10 @@ var months = map[string]time.Month{
 
 	// French
 	"janv": time.January, "fév": time.February, "fev": time.February,
+	// Swedish and Danish "maj" and Norwegian "mai" — the French "mai" below
+	// covers one spelling and left the other unreadable, so a Swedish listing
+	// dated in May parsed no date at all.
+	"maj": time.May,
 	"avr": time.April, "mai": time.May, "juin": time.June,
 	"juil": time.July, "aoû": time.August, "aou": time.August,
 	"déc": time.December,
@@ -109,6 +113,10 @@ var months = map[string]time.Month{
 	"giu": time.June, "lug": time.July, "set": time.September,
 	"ott": time.October, "out": time.October,
 	"mei": time.May, "okt2": time.October,
+	// Dutch "maart" and Finnish "maalis" both begin "maa", which no English or
+	// Romance prefix reaches: the lookup tries four letters then three, and
+	// "maar" and "maa" are neither "mar" nor "mrz".
+	"maa": time.March, "maar": time.March,
 }
 
 var (
@@ -135,10 +143,23 @@ var (
 	openEnded = regexp.MustCompile(`(?i)\b(until|till|through|ends?|bis|jusqu'au|hasta|fino al|t/m|closes)\b`)
 
 	// openStart marks a listing that gives only an opening date.
-	openStart = regexp.MustCompile(`(?i)\b(from|opens?|starting|ab|dès|desde|dal)\b`)
+	//
+	// A missing word here does not merely lose the qualifier: with one date and
+	// nothing to say which end it is, the parser reads it as a single-day event,
+	// so an exhibition opening on 23 May was recorded as opening and closing
+	// that day and vanished from "what is on" the next morning. "À partir du
+	// 23 mai" did exactly that while the English and German phrasings did not.
+	openStart = regexp.MustCompile(`(?i)(\b(from|opens?|starting|ab|dès|des|desde|dal|` +
+		`vanaf|fra|från|fran|alkaen|od)\b|à partir d|a partir d|a partire d)`)
 
 	// ongoing marks permanent or indefinite displays.
-	ongoing = regexp.MustCompile(`(?i)\b(ongoing|permanent|indefinite|long[- ]term|dauerausstellung)\b`)
+	//
+	// The word is allowed to carry an ending, because in most of Europe it does:
+	// exposition permanente, esposizione permanente, colección permanente,
+	// permanente tentoonstelling. A word boundary after "permanent" matched the
+	// English and none of the others.
+	ongoing = regexp.MustCompile(`(?i)(\bpermanent\p{L}*\b|\b(ongoing|indefinite|` +
+		`long[- ]term|dauerausstellung)\b)`)
 )
 
 // ParseDateRange reads the run dates out of a listing's text.

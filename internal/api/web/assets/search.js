@@ -5,7 +5,7 @@
 // them sends you away to find the other.
 
 import * as api from "./api.js";
-import { el, clear, plural } from "./util.js";
+import { el, clear, when } from "./util.js";
 
 const box = document.getElementById("q");
 const results = document.getElementById("results");
@@ -19,11 +19,12 @@ const MUSEUM_DELAY = 180, PLACE_DELAY = 450;
 let museumTimer = null, placeTimer = null;
 let inFlight = null;
 let hits = [], cursor = -1;
-let onPlace = null, onMuseum = null;
+let onPlace = null, onMuseum = null, onShow = null;
 
 export function wire(handlers) {
 	onPlace = handlers.onPlace;
 	onMuseum = handlers.onMuseum;
+	onShow = handlers.onShow;
 
 	box.addEventListener("input", () => {
 		const term = box.value.trim();
@@ -71,7 +72,7 @@ function dismiss() {
 /* ---- asking ------------------------------------------------------------- */
 
 let generation = 0;
-let found = { museums: [], places: [] };
+let found = { museums: [], places: [], shows: [] };
 
 async function run(term, includePlaces) {
 	const mine = ++generation;
@@ -79,21 +80,27 @@ async function run(term, includePlaces) {
 	const controller = new AbortController();
 	inFlight = controller;
 
-	const [museums, places] = await Promise.all([
+	const [museums, shows, places] = await Promise.all([
 		api.search(term, 10, controller.signal),
+		api.searchExhibitions(term, 6, controller.signal),
 		includePlaces ? api.places(term, controller.signal) : Promise.resolve(null),
 	]);
 	if (mine !== generation) return;
 
 	if (museums?.ok) found.museums = museums.data.museums || [];
+	if (shows?.ok) found.shows = shows.data.exhibitions || [];
 	if (places?.ok) found.places = places.data.places || [];
 	else if (places && !places.ok && !places.aborted) found.places = [];
 
 	// Places lead: somebody typing a city name wants to go there, and the
-	// museums in it are what they will see when they arrive.
+	// museums in it are what they will see when they arrive. Exhibitions come
+	// last because a name that is both a town and a show is far more often the
+	// town — but they are here at all because the title is often the only thing
+	// somebody knows.
 	hits = [
 		...found.places.map(place => ({ kind: "place", ...place })),
 		...found.museums.map(museum => ({ kind: "museum", ...museum })),
+		...found.shows.map(show => ({ kind: "show", ...show })),
 	];
 	cursor = -1;
 
@@ -110,12 +117,18 @@ async function run(term, includePlaces) {
 }
 
 function option(hit, i) {
-	const label = hit.kind === "place"
-		? [el("b", {}, "◎ " + hit.name),
-			el("small", {}, "place · " + Math.round(hit.radius_km) + " km around")]
-		: [el("b", {}, hit.name),
+	let label;
+	if (hit.kind === "place") {
+		label = [el("b", {}, "◎ " + hit.name),
+			el("small", {}, "place · " + Math.round(hit.radius_km) + " km around")];
+	} else if (hit.kind === "show") {
+		label = [el("b", {}, "▣ " + hit.title),
+			el("small", {}, (hit.museum || "exhibition") + " · " + when(hit).label.toLowerCase())];
+	} else {
+		label = [el("b", {}, hit.name),
 			el("small", {}, [hit.locality, hit.country].filter(Boolean).join(", ") +
 				(hit.locatable ? "" : " · position unknown"))];
+	}
 
 	return el("li", {
 		class: "hit",
@@ -163,10 +176,13 @@ function moveCursor() {
 	active.scrollIntoView({ block: "nearest" });
 }
 
-// A place flies the map there and lists what is in it; a museum opens its card.
+// A place flies the map there and lists what is in it; a museum opens its card;
+// an exhibition is somewhere before it is anything else, so it goes to its venue
+// and opens that, which is where its entry and its dates are.
 function choose(hit) {
 	if (!hit) return;
 	dismiss();
 	if (hit.kind === "place") onPlace?.(hit);
+	else if (hit.kind === "show") onShow?.(hit);
 	else onMuseum?.(hit.id);
 }

@@ -1013,3 +1013,25 @@ func TestMergeNameVariants(t *testing.T) {
 		t.Fatal("the museum is no longer findable by its merged-away name")
 	}
 }
+
+// storedTitles reads back every stored exhibition's title. Straight SQL rather
+// than a query method: these rows carry no position, so every reader that takes
+// a radius would report them all as missing.
+func storedTitles(t *testing.T, ctx context.Context, store *Store) map[string]bool {
+	t.Helper()
+	rows, err := store.pool.Query(ctx, "SELECT title FROM exhibitions")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	defer rows.Close()
+
+	found := make(map[string]bool)
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		found[title] = true
+	}
+	return found
+}
