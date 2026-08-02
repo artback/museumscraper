@@ -56,23 +56,46 @@ func ExtractJSONLDCandidates(pageHTML string, base *url.URL) []Candidate {
 	seen := make(map[string]struct{})
 
 	for _, block := range jsonLDBlocks(doc) {
-		var parsed any
-		if err := json.Unmarshal([]byte(block), &parsed); err != nil {
-			continue
+		for _, parsed := range jsonValues(block) {
+			walkJSONLD(parsed, func(node map[string]any) {
+				candidate, ok := candidateFromJSONLD(node, base)
+				if !ok {
+					return
+				}
+				if _, dup := seen[candidate.URL]; dup {
+					return
+				}
+				seen[candidate.URL] = struct{}{}
+				found = append(found, candidate)
+			})
 		}
-		walkJSONLD(parsed, func(node map[string]any) {
-			candidate, ok := candidateFromJSONLD(node, base)
-			if !ok {
-				return
-			}
-			if _, dup := seen[candidate.URL]; dup {
-				return
-			}
-			seen[candidate.URL] = struct{}{}
-			found = append(found, candidate)
-		})
 	}
 	return found
+}
+
+// jsonValues decodes every JSON value in one script block.
+//
+// A block is supposed to hold exactly one value, and a great many hold more:
+// one object per card, written out by a template with nothing wrapping them.
+// json.Unmarshal refuses the whole block for that, so the Centre de la Vieille
+// Charité declared both its exhibitions — accented titles, real opening and
+// closing dates — and we read none of it, falling back to titles taken from the
+// URL slug with the accents stripped out and no dates at all.
+//
+// A decoder reads values in sequence and stops at the first thing it cannot
+// make sense of, so a block that starts well and ends badly still yields what
+// it got through, and trailing whitespace ends the loop cleanly.
+func jsonValues(block string) []any {
+	decoder := json.NewDecoder(strings.NewReader(block))
+
+	var values []any
+	for {
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return values
+		}
+		values = append(values, value)
+	}
 }
 
 // candidatesOn returns everything a listing page offers, from both readers.

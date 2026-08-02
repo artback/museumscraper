@@ -152,3 +152,43 @@ func TestCandidatesOn_DeclaredEventsWinButDoNotReplace(t *testing.T) {
 		t.Errorf("the listed-only entry was lost: %+v", got[1])
 	}
 }
+
+// A script block holding more than one JSON value still has to be read.
+//
+// One object per card, written out by a template with nothing wrapping them, is
+// common — and json.Unmarshal refuses the whole block for it. The Centre de la
+// Vieille Charité declared both its exhibitions that way, with accented titles
+// and real opening and closing dates, and we read none of it: the titles came
+// from the URL slug with the accents stripped out, and with no dates at all the
+// entries were filed as permanent.
+func TestExtractJSONLDCandidates_ReadsBlocksHoldingSeveralValues(t *testing.T) {
+	const page = `<html><body>
+	<script type="application/ld+json">
+	  {
+	    "@context": "http://schema.org/",
+	    "@type": "Event",
+	    "name": "Ce que la mer garde : Mémoires de la Méditerranée",
+	    "startDate": "2026-05-23T09:00",
+	    "endDate": "2026-08-30T09:00",
+	    "url": "https://vieille-charite-marseille.com/expositions/ce-que-la-mer-garde"
+	  }
+	  {
+	    "@context": "http://schema.org/",
+	    "@type": "Organization",
+	    "name": "La Vieille Charité"
+	  }
+	</script>
+	</body></html>`
+
+	got := ExtractJSONLDCandidates(page, mustURL(t, "https://vieille-charite-marseille.com/"))
+
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want the one event: %+v", len(got), got)
+	}
+	if got[0].Title != "Ce que la mer garde : Mémoires de la Méditerranée" {
+		t.Errorf("Title = %q, want the declared name with its accents", got[0].Title)
+	}
+	if !got[0].Dates.Known() {
+		t.Error("the declared dates were lost, so the exhibition would be filed as permanent")
+	}
+}

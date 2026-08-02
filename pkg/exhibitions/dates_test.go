@@ -198,3 +198,55 @@ func assertDate(t *testing.T, label string, got, want *time.Time) {
 }
 
 func ptr(t time.Time) *time.Time { return &t }
+
+// The date vocabulary has to reach past English, because a missing word does
+// not merely lose a qualifier — it changes the answer.
+//
+// With one date and nothing saying which end it is, the parser reads a
+// single-day event. "À partir du 23 mai 2026" therefore recorded an exhibition
+// as opening and closing on the same day, and it vanished from "what is on"
+// the next morning, while the English and German phrasings were read correctly.
+func TestParseDateRange_BeyondEnglish(t *testing.T) {
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		text       string
+		start, end string
+		permanent  bool
+		why        string
+	}{
+		{text: "À partir du 23 mai 2026", start: "2026-05-23", why: "French open start"},
+		{text: "Från 23 maj 2026", start: "2026-05-23", why: "Swedish open start, and a Swedish May"},
+		{text: "vanaf 12 maart 2026", start: "2026-03-12", why: "Dutch open start, and a Dutch March"},
+		{text: "Du 23 mai au 30 août 2026", start: "2026-05-23", end: "2026-08-30", why: "French range"},
+		{text: "Jusqu'au 5 octobre 2026", end: "2026-10-05", why: "French open end"},
+		// "permanent" carries most of Europe, but only if it may take an ending.
+		{text: "Exposition permanente", permanent: true, why: "French"},
+		{text: "esposizione permanente", permanent: true, why: "Italian"},
+		{text: "colección permanente", permanent: true, why: "Spanish"},
+		{text: "Permanent exhibition", permanent: true, why: "English, which always worked"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.text, func(t *testing.T) {
+			got := ParseDateRange(tc.text, now)
+			if got.Permanent != tc.permanent {
+				t.Errorf("permanent = %v, want %v (%s)", got.Permanent, tc.permanent, tc.why)
+			}
+			if day(got.Start) != tc.start {
+				t.Errorf("start = %q, want %q (%s)", day(got.Start), tc.start, tc.why)
+			}
+			if day(got.End) != tc.end {
+				t.Errorf("end = %q, want %q (%s)", day(got.End), tc.end, tc.why)
+			}
+		})
+	}
+}
+
+// day formats a bound for comparison, with "" for absent.
+func day(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.Format("2006-01-02")
+}
