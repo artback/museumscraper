@@ -180,7 +180,9 @@ function showList() {
 	if (progressBox) out.append(progressBox);
 
 	if (listings.length) {
-		out.append(controls(kept.length));
+		// Counted without the permanent ones, because they are not what the
+		// count sits above: they are folded away below, under their own number.
+		out.append(controls(kept.filter(show => !show.permanent).length));
 		const list = shows.render(kept, { sort, onPick: pickVenue });
 		out.append(list || el("div", { class: "empty", "data-glyph": "◎" }, [
 			"Nothing matches " + shows.FILTERS[filter].label.toLowerCase(),
@@ -200,7 +202,13 @@ function controls(count) {
 				onclick: () => { filter = key; paint(); },
 			}, spec.label))),
 
-		el("div", { class: "controls__sort" }, [
+		// The count and the ordering describe the list directly beneath them, so
+		// with nothing time-limited on there is nothing for them to describe:
+		// "86 shows, by closing soon" sitting on top of "nothing with an end
+		// date is on here" contradicts itself, and the 86 it means are the
+		// permanent displays, folded below under their own number. The periods
+		// stay — switching them is how something upcoming is found.
+		count > 0 && el("div", { class: "controls__sort" }, [
 			el("label", { class: "meta", for: "sortBy" }, plural(count, "show") + ", by "),
 			el("select", {
 				id: "sortBy", class: "select",
