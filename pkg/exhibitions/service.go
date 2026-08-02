@@ -17,13 +17,11 @@ import (
 	"errors"
 	"log"
 	"net/url"
-	"path"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"museum/internal/models"
 )
@@ -194,8 +192,7 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 	}
 
 	now := s.now()
-	scope := venueScope(base)
-	home := s.readHome(ctx, base, scope)
+	home := s.readHome(ctx, base)
 
 	var (
 		result  = Result{Reached: home.reached}
@@ -203,28 +200,7 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 		visited = make(map[string]struct{})
 	)
 
-	// A venue's own page is itself a listing, and is read before anything is
-	// followed from it. Hem i Haga publishes its programme inline — a
-	// "Visningar" block naming eleven guided tours of the museum flats, which is
-	// what that venue has instead of exhibitions — while linking away only to
-	// the institution's pages. Looking only at where the page points finds the
-	// parent museum's programme and misses the venue's own.
-	candidates := slices.Concat(home.listings, candidateListingURLs(base, scope))
-	if scope != "" {
-		venue := *base
-		venue.RawQuery, venue.Fragment = "", ""
-		candidates = slices.Insert(candidates, 0, venue.String())
-	}
-
-	for _, listingURL := range candidates {
-		// The venue's own page is always allowed; the scope decides only which
-		// *other* pages may be visited on its behalf, so that a link to the
-		// institution's programme is not followed. Entries found on the venue's
-		// page belong to the venue wherever they live — these tours are filed
-		// under a site-wide /aktivitet/ section, and are still Hem i Haga's.
-		if listingURL != base.String() && !withinScope(listingURL, base, scope) {
-			continue
-		}
+	for _, listingURL := range slices.Concat(home.listings, candidateListingURLs(base)) {
 		if ctx.Err() != nil {
 			result.Exhibitions = found
 			return result, ctx.Err()
@@ -237,7 +213,7 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 		}
 		visited[listingURL] = struct{}{}
 
-		page, entries := s.harvest(ctx, listingURL, base, museum, now, false)
+		page, entries := s.harvest(ctx, listingURL, base, museum, now, false, visited)
 		result.Reached = result.Reached || page.URL != ""
 		found = append(found, entries...)
 		if len(found) > 0 {
@@ -260,9 +236,6 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 	// would spend a request per miss on every museum in the catalogue.
 	permanentPages := 0
 	for _, listingURL := range home.permanent {
-		if !withinScope(listingURL, base, scope) {
-			continue
-		}
 		if ctx.Err() != nil {
 			result.Exhibitions = dedupe(found)
 			return result, ctx.Err()
@@ -279,13 +252,13 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 		visited[listingURL] = struct{}{}
 		permanentPages++
 
-		page, entries := s.harvest(ctx, listingURL, base, museum, now, true)
+		page, entries := s.harvest(ctx, listingURL, base, museum, now, true, visited)
 		result.Reached = result.Reached || page.URL != ""
 		found = append(found, entries...)
 	}
 
 	if len(found) == 0 {
-		if display, ok := s.permanentDisplay(ctx, base, scope, home, museum, now); ok {
+		if display, ok := s.permanentDisplay(ctx, base, home, museum, now); ok {
 			found = append(found, display)
 			result.Reached = true
 			// The page describing the museum is the page whose changing
@@ -305,7 +278,7 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 // permanent displays, which is a claim its own markup often does not repeat: a
 // page headed "Fasta utställningar" lists entries that say nothing about their
 // own permanence, because the heading already did.
-func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL, museum models.Museum, now time.Time, assumePermanent bool) (Page, []Exhibition) {
+func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL, museum models.Museum, now time.Time, assumePermanent bool, readAsListing map[string]struct{}) (Page, []Exhibition) {
 	page, err := s.fetcher.Fetch(ctx, listingURL, Validators{})
 	if err != nil {
 		return Page{}, nil
@@ -321,44 +294,70 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 	// the page already gave them.
 	pagePermanent := assumePermanent || isPermanentListing(body, pageBase)
 
-	// The section this page indexes, when it is a museum's exhibitions index
-	// rather than some other page that happens to link to exhibitions.
-	section := ProgrammeSection(pageBase)
+	candidates := candidatesOn(body, pageBase)
+	// A page of exhibitions that dates none of them is a museum that does not
+	// write dates, not a page of noise — but that says nothing about whether
+	// any given entry has an end. See undatedListing.
+	pageUndated := undatedListing(namesExhibitions(body, pageBase), candidates, now)
 
 	var found []Exhibition
-	for _, candidate := range candidatesOn(body, pageBase, section) {
+	for _, candidate := range candidates {
+		// A page already read as a listing is an index, not something on show,
+		// wherever it is linked from. IsNavigationLink only recognises the page
+		// a link was found on, so a listing linking to a sibling listing slips
+		// past it: the Jewish Museum Berlin's permanent-exhibition page links
+		// back to "Ausstellungen", which arrived as a permanent exhibition.
+		//
+		// Pages actually read, not every link that looked like a listing. The
+		// link finder scores deep entry pages too — most of Tate's exhibitions
+		// match it — so excluding everything it returned threw away the
+		// exhibitions along with the indexes.
+		if _, isIndex := readAsListing[candidate.URL]; isIndex {
+			continue
+		}
+
 		dates := datesFor(candidate, now)
 		// An entry with no readable dates cannot be placed in time, and listing
 		// pages are full of links that are not exhibitions at all; requiring a
 		// date is what separates the two. A permanent display is the exception,
 		// and has to name itself one to be kept: otherwise the rule that keeps
 		// the noise out is gone.
-		// An entry the museum files as an exhibition, but gives no dates for, is
-		// permanent. That is what a museum means by it: a show with a closing
-		// date says so, and one that says nothing is not going anywhere.
-		//
-		// Requiring a date instead discarded them. It is a good rule against
-		// noise — links to /visit and /tickets carry no dates either — but the
-		// noise it guards against is not filed under a museum's exhibitions
-		// section, and an entry that is has already been vouched for. Göteborgs
-		// stadsmuseum lists ten exhibitions with no dates on the index at all,
-		// Kalmar konstmuseum three, and every one was thrown away.
-		//
-		// Calling them permanent rather than merely undated is the honest
-		// reading and also the useful one: it puts them behind everything with
-		// a closing date, where a visitor deciding what to catch first wants
-		// them, and says plainly on the page why they carry no dates.
 		permanent := dates.Permanent
+		undated := false
 		if dates.IsZero() && !permanent {
-			if !candidate.Strong && !EntryUnder(section, candidate.URL) &&
-				!candidateIsPermanent(candidate, pagePermanent) {
+			switch {
+			case candidateIsPermanent(candidate, pagePermanent):
+				permanent = true
+			case pageUndated:
+				// On show, with no end the page was willing to state.
+				undated = true
+			default:
 				continue
 			}
-			permanent = true
+		}
+
+		// An entry the page vouched for, rather than its own path, has to look
+		// like an exhibition rather than an event: a run with two ends, or a
+		// display that says it has none.
+		//
+		// Without this the vouching let a listing page's whole navigation
+		// through. The Jewish Museum Berlin's "Aktuelle Ausstellungen" page
+		// yielded "Spenden", "Mitglied werden" and "Schließtage" alongside
+		// three Jewish holidays, and the Mucem was read from one exhibition's
+		// own page, whose only link was "Voir le plan". An exhibition runs for
+		// a period; a single day is an event.
+		// Permanence is no exemption here, because on these pages it is not the
+		// entry's own claim: the words "Dauerausstellung" and "permanent" sit
+		// in the page furniture of most museum sites, and a card's surrounding
+		// text reaches them. That is how "Spenden", "Mitglied werden" and
+		// "Schließtage" arrived as permanent exhibitions of the Jewish Museum
+		// Berlin. A run has two ends and cannot be borrowed from a footer.
+		if candidate.Vouched && !isRun(dates) && !datedPermanent(dates) {
+			continue
 		}
 
 		running, upcoming := dates.Runs(now), dates.Upcoming(now)
-		if permanent {
+		if permanent || undated {
 			running, upcoming = true, false
 		}
 		if !running && !upcoming {
@@ -399,7 +398,7 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 // and which are the shop, the newsletter and the committee, and there is no
 // signal that survives contact with more than one site. The museum is the thing
 // permanently on show; the page describing it is where a visitor should be sent.
-func (s *Scraper) permanentDisplay(ctx context.Context, base *url.URL, scope string, home homePage, museum models.Museum, now time.Time) (Exhibition, bool) {
+func (s *Scraper) permanentDisplay(ctx context.Context, base *url.URL, home homePage, museum models.Museum, now time.Time) (Exhibition, bool) {
 	tried := make(map[string]struct{}, maxInfoPages)
 
 	// A page the site itself called its permanent exhibition comes first, and
@@ -410,12 +409,6 @@ func (s *Scraper) permanentDisplay(ctx context.Context, base *url.URL, scope str
 	// usual case, because a museum with one permanent exhibition writes a page
 	// about it rather than a page of links to it.
 	for _, infoURL := range slices.Concat(home.permanent, home.info, infoURLs(base)) {
-		// The same confinement as the listings: on a shared site the "about"
-		// page describes the institution, and standing in for a single venue's
-		// permanent display it would be wrong about all of them.
-		if !withinScope(infoURL, base, scope) {
-			continue
-		}
 		if ctx.Err() != nil {
 			return Exhibition{}, false
 		}
@@ -459,6 +452,24 @@ func (s *Scraper) permanentDisplay(ctx context.Context, base *url.URL, scope str
 	return Exhibition{}, false
 }
 
+// isRun reports whether a range has two ends and covers more than a day.
+func isRun(dates DateRange) bool {
+	return dates.Start != nil && dates.End != nil && dates.End.After(*dates.Start)
+}
+
+// datedPermanent reports whether a display claims permanence and says when it
+// opened.
+//
+// The opening date is what makes the claim the entry's own. A page's
+// navigation carries the word "Dauerausstellung" on every card it surrounds,
+// and that is how the Jewish Museum Berlin's "Spenden" link became a permanent
+// exhibition; no page furniture also supplies an opening date next to it. The
+// Hasselblad Foundation's "Erna Behind the Camera" says "Permanent exhibition
+// Opens May 23 2026" in its own card, and is exactly what this is for.
+func datedPermanent(dates DateRange) bool {
+	return dates.Permanent && dates.Start != nil
+}
+
 // widen stretches a kept entry to cover another occurrence of the same event,
 // so four one-day listings become one entry spanning all four days.
 //
@@ -494,80 +505,54 @@ type homePage struct {
 	info []string
 }
 
-// venueScope returns the path a museum occupies when its website points at one
-// venue inside a larger site, and "" when the website is the site itself.
-//
-// Museums share websites far more often than the scraper assumed: 20,724
-// records in the catalogue sit on a host another museum also claims, across
-// 6,761 such hosts. Göteborgs stadsmuseum publishes one programme at
-// /utstallningar/ and gives each of its venues a page — Hem i Haga at
-// /besok-oss/hem-i-haga/, Lilla Änggården beside it. Reading from the site root
-// gave Hem i Haga the whole museum's ten exhibitions, none of which are
-// specifically there. heritageireland.ie does the same for thirteen places,
-// jerseyheritage.org for seven, glasgowlife.org.uk for nine.
-//
-// A path ending in something that looks like a file — /index.html,
-// /default.aspx — is the front page written out longhand, not a venue.
-func venueScope(base *url.URL) string {
-	trimmed := strings.Trim(base.Path, "/")
-	if trimmed == "" || strings.Contains(path.Base(trimmed), ".") {
-		return ""
-	}
-	return "/" + trimmed + "/"
-}
-
-// withinScope reports whether a candidate page may be read on this museum's
-// behalf: the same host, and at or below its own page.
-//
-// There is deliberately no fallback to the site root when a scoped search finds
-// nothing. The programme at the root belongs to the institution, and attributing
-// it to one venue is the fault this exists to fix — for Hem i Haga the honest
-// answer is that nothing is listed for it, which is what its own page says.
-func withinScope(rawURL string, base *url.URL, scope string) bool {
-	if scope == "" {
-		return true
-	}
-	candidate, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	if candidate.Host != "" && !strings.EqualFold(candidate.Host, base.Host) {
-		return false
-	}
-	within := candidate.Path
-	if !strings.HasSuffix(within, "/") {
-		within += "/"
-	}
-	return strings.HasPrefix(within, scope)
-}
-
-// readHome fetches the page a site should be read from and sorts its links: the
-// museum's own page when it has one, and the front page otherwise. A page that
+// readHome fetches a site's front page and sorts its links. A front page that
 // cannot be read is not an error: the conventional paths are tried regardless.
-func (s *Scraper) readHome(ctx context.Context, base *url.URL, scope string) homePage {
-	home := *base
-	home.Path = "/"
-	if scope != "" {
-		home.Path = scope
-	}
-	home.RawQuery = ""
-	home.Fragment = ""
+func (s *Scraper) readHome(ctx context.Context, base *url.URL) homePage {
+	for _, candidate := range homeURLs(base) {
+		body, finalURL, err := s.fetcher.Get(ctx, candidate)
+		if err != nil {
+			continue
+		}
 
-	body, finalURL, err := s.fetcher.Get(ctx, home.String())
-	if err != nil {
-		return homePage{}
+		pageBase, err := url.Parse(finalURL)
+		if err != nil {
+			pageBase = base
+		}
+		return homePage{
+			reached:   true,
+			listings:  FindListingLinks(body, pageBase),
+			permanent: FindPermanentLinks(body, pageBase),
+			info:      FindInfoLinks(body, pageBase),
+		}
 	}
+	return homePage{}
+}
 
-	pageBase, err := url.Parse(finalURL)
-	if err != nil {
-		pageBase = base
+// homeURLs returns where to look for a site's front page: the page the
+// catalogue recorded, and then the host's root.
+//
+// Both, because either can be the wrong one. Small museums are very often a
+// section of a larger site — the Medicinhistoriska museet is at
+// vgregion.se/medicinhistoriska, and its own page links straight to its
+// exhibitions, while the host root is a regional health authority's front page
+// with thousands of links and not one about the museum. But a recorded path
+// also goes stale: the Hasselblad Center is catalogued at
+// hasselbladfoundation.org/wp/, a WordPress path that now 404s, and reading
+// only what was recorded found nothing at all on a site that publishes a full
+// programme.
+//
+// Recorded path first, host root second, so the more specific page wins when
+// it works and the site is still reached when it does not.
+func homeURLs(base *url.URL) []string {
+	root := *base
+	root.Path, root.RawQuery, root.Fragment = "/", "", ""
+
+	recorded := *base
+	recorded.RawQuery, recorded.Fragment = "", ""
+	if recorded.Path == "" || recorded.Path == "/" {
+		return []string{root.String()}
 	}
-	return homePage{
-		reached:   true,
-		listings:  FindListingLinks(body, pageBase),
-		permanent: FindPermanentLinks(body, pageBase),
-		info:      FindInfoLinks(body, pageBase),
-	}
+	return []string{recorded.String(), root.String()}
 }
 
 // dedupe removes repeated entries and orders them: running first, then by
@@ -581,34 +566,16 @@ func dedupe(exhibitions []Exhibition) []Exhibition {
 	// seven times. Keying on the URL treated every occurrence as a separate
 	// exhibition. Merging them keeps one entry spanning the whole run, which is
 	// what a visitor is actually asking about.
-	// Keyed on the URL as well, because one page can name the same entry twice.
-	// Göteborgs naturhistoriska museum links each of its halls from both its
-	// exhibitions index and its permanent-displays page, once as a heading and
-	// once as a photograph with no text at all, so the same URL arrived as
-	// "Däggdjurssalen" and as "Daggdjurssalen" read off the slug. The URL is the
-	// exhibition's identity — it is the primary key in the database — and the
-	// better-written of the two titles is the one to keep.
 	index := make(map[string]int, len(exhibitions))
 	unique := exhibitions[:0:0]
 
 	for _, e := range exhibitions {
-		title := strings.ToLower(strings.TrimSpace(e.Title))
-		at, dup := index[title]
-		if !dup {
-			at, dup = index[e.URL]
-		}
-		if dup {
+		key := strings.ToLower(strings.TrimSpace(e.Title))
+		if at, dup := index[key]; dup {
 			widen(&unique[at], e)
-			if betterTitle(e.Title, unique[at].Title) {
-				unique[at].Title = e.Title
-			}
-			index[strings.ToLower(strings.TrimSpace(unique[at].Title))] = at
 			continue
 		}
-		index[title] = len(unique)
-		if e.URL != "" {
-			index[e.URL] = len(unique)
-		}
+		index[key] = len(unique)
 		unique = append(unique, e)
 	}
 
@@ -772,28 +739,4 @@ func siteKey(website string) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimPrefix(parsed.Host, "www."))
-}
-
-// betterTitle reports whether a is the more informative of two titles for the
-// same exhibition.
-//
-// The comparison that matters is against a title read off a URL slug, which is
-// the fallback when a card carries no text. A slug has had its accents stripped
-// and its capitalisation invented — "Daggdjurssalen" beside the museum's own
-// "Däggdjurssalen" — so a title carrying letters outside ASCII is the museum's
-// own wording, and wins. Otherwise the longer one carries more.
-func betterTitle(a, b string) bool {
-	if nonASCII(a) != nonASCII(b) {
-		return nonASCII(a)
-	}
-	return len(a) > len(b)
-}
-
-func nonASCII(s string) bool {
-	for _, r := range s {
-		if r > unicode.MaxASCII {
-			return true
-		}
-	}
-	return false
 }

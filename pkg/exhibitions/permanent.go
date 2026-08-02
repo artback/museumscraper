@@ -3,6 +3,7 @@ package exhibitions
 import (
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -127,6 +128,61 @@ func pageHeadings(pageHTML string) string {
 	walk(doc)
 
 	return title + " " + heading
+}
+
+// undatedListing reports whether a page of exhibitions dates none of them.
+//
+// This is the case that the "no date, no entry" rule gets wrong. Plenty of
+// museums run no temporary programme and simply never write a date: World of
+// Volvo's /sv/utstallning/ lists six exhibitions — the Volvo models, the
+// traffic school, the motorsport hall — with no dates and no use of the word
+// "permanent" anywhere, because to them these are just what the museum has.
+// Every one was discarded, and the museum showed as having nothing on.
+//
+// What separates that from a page of noise is the page as a whole. If a site
+// dates some of its entries and not others, the undated ones are navigation,
+// filters and ticket links, and the rule is right to drop them. If it dates
+// none of them, it is not a site that dates things, and its entries are what
+// it has on show. Only pages whose own path or heading name them exhibition
+// listings are read this way, so a generic events page cannot qualify.
+//
+// What this does NOT establish is permanence. A site can date its exhibitions
+// only on their own pages, and Moderna Museet does: its listing cards carry no
+// dates at all, yet half of what they link to closes within the year. Calling
+// those permanent would put a temporary show in the list of things that will
+// always be there and take it out of the list of things about to close —
+// wrong in both directions. They are recorded as running with no known end,
+// which is exactly what the page said.
+func undatedListing(strongPage bool, candidates []Candidate, now time.Time) bool {
+	if !strongPage || len(candidates) == 0 {
+		return false
+	}
+	for _, c := range candidates {
+		if datesFor(c, now).Known() {
+			return false
+		}
+	}
+	return true
+}
+
+// namesExhibitions reports whether a page says of itself that it lists
+// exhibitions, by the last segment of its path or by its own heading.
+//
+// The last segment, not the whole path, because an exhibition's own page sits
+// under the same word its index does. The Mucem's "/expositions/mossi/" was
+// read as a listing on the strength of "expositions", and the only link on it
+// was "Voir le plan" — so the museum's eight real exhibitions, one directory
+// up, were never reached. An index names itself in its last segment; an entry
+// names the thing.
+func namesExhibitions(pageHTML string, pageURL *url.URL) bool {
+	if pageURL != nil {
+		trimmed := strings.Trim(strings.ToLower(pageURL.Path), "/")
+		last := trimmed[strings.LastIndex(trimmed, "/")+1:]
+		if containsAny(last, strongPathHints) {
+			return true
+		}
+	}
+	return containsAny(strings.ToLower(pageHeadings(pageHTML)), strongPathHints)
 }
 
 // candidateIsPermanent reports whether an undated listing entry is a permanent
