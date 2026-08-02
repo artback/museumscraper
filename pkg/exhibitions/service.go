@@ -213,7 +213,7 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 		}
 		visited[listingURL] = struct{}{}
 
-		page, entries := s.harvest(ctx, listingURL, base, museum, now, false)
+		page, entries := s.harvest(ctx, listingURL, base, museum, now, false, visited)
 		result.Reached = result.Reached || page.URL != ""
 		found = append(found, entries...)
 		if len(found) > 0 {
@@ -252,7 +252,7 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 		visited[listingURL] = struct{}{}
 		permanentPages++
 
-		page, entries := s.harvest(ctx, listingURL, base, museum, now, true)
+		page, entries := s.harvest(ctx, listingURL, base, museum, now, true, visited)
 		result.Reached = result.Reached || page.URL != ""
 		found = append(found, entries...)
 	}
@@ -278,7 +278,7 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 // permanent displays, which is a claim its own markup often does not repeat: a
 // page headed "Fasta utställningar" lists entries that say nothing about their
 // own permanence, because the heading already did.
-func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL, museum models.Museum, now time.Time, assumePermanent bool) (Page, []Exhibition) {
+func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL, museum models.Museum, now time.Time, assumePermanent bool, readAsListing map[string]struct{}) (Page, []Exhibition) {
 	page, err := s.fetcher.Fetch(ctx, listingURL, Validators{})
 	if err != nil {
 		return Page{}, nil
@@ -294,8 +294,28 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 	// the page already gave them.
 	pagePermanent := assumePermanent || isPermanentListing(body, pageBase)
 
+	candidates := candidatesOn(body, pageBase)
+	// A page of exhibitions that dates none of them is a museum that does not
+	// write dates, not a page of noise — but that says nothing about whether
+	// any given entry has an end. See undatedListing.
+	pageUndated := undatedListing(namesExhibitions(body, pageBase), candidates, now)
+
 	var found []Exhibition
-	for _, candidate := range candidatesOn(body, pageBase) {
+	for _, candidate := range candidates {
+		// A page already read as a listing is an index, not something on show,
+		// wherever it is linked from. IsNavigationLink only recognises the page
+		// a link was found on, so a listing linking to a sibling listing slips
+		// past it: the Jewish Museum Berlin's permanent-exhibition page links
+		// back to "Ausstellungen", which arrived as a permanent exhibition.
+		//
+		// Pages actually read, not every link that looked like a listing. The
+		// link finder scores deep entry pages too — most of Tate's exhibitions
+		// match it — so excluding everything it returned threw away the
+		// exhibitions along with the indexes.
+		if _, isIndex := readAsListing[candidate.URL]; isIndex {
+			continue
+		}
+
 		dates := datesFor(candidate, now)
 		// An entry with no readable dates cannot be placed in time, and listing
 		// pages are full of links that are not exhibitions at all; requiring a
@@ -303,15 +323,41 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 		// and has to name itself one to be kept: otherwise the rule that keeps
 		// the noise out is gone.
 		permanent := dates.Permanent
+		undated := false
 		if dates.IsZero() && !permanent {
-			if !candidateIsPermanent(candidate, pagePermanent) {
+			switch {
+			case candidateIsPermanent(candidate, pagePermanent):
+				permanent = true
+			case pageUndated:
+				// On show, with no end the page was willing to state.
+				undated = true
+			default:
 				continue
 			}
-			permanent = true
+		}
+
+		// An entry the page vouched for, rather than its own path, has to look
+		// like an exhibition rather than an event: a run with two ends, or a
+		// display that says it has none.
+		//
+		// Without this the vouching let a listing page's whole navigation
+		// through. The Jewish Museum Berlin's "Aktuelle Ausstellungen" page
+		// yielded "Spenden", "Mitglied werden" and "Schließtage" alongside
+		// three Jewish holidays, and the Mucem was read from one exhibition's
+		// own page, whose only link was "Voir le plan". An exhibition runs for
+		// a period; a single day is an event.
+		// Permanence is no exemption here, because on these pages it is not the
+		// entry's own claim: the words "Dauerausstellung" and "permanent" sit
+		// in the page furniture of most museum sites, and a card's surrounding
+		// text reaches them. That is how "Spenden", "Mitglied werden" and
+		// "Schließtage" arrived as permanent exhibitions of the Jewish Museum
+		// Berlin. A run has two ends and cannot be borrowed from a footer.
+		if candidate.Vouched && !isRun(dates) && !datedPermanent(dates) {
+			continue
 		}
 
 		running, upcoming := dates.Runs(now), dates.Upcoming(now)
-		if permanent {
+		if permanent || undated {
 			running, upcoming = true, false
 		}
 		if !running && !upcoming {
@@ -406,6 +452,24 @@ func (s *Scraper) permanentDisplay(ctx context.Context, base *url.URL, home home
 	return Exhibition{}, false
 }
 
+// isRun reports whether a range has two ends and covers more than a day.
+func isRun(dates DateRange) bool {
+	return dates.Start != nil && dates.End != nil && dates.End.After(*dates.Start)
+}
+
+// datedPermanent reports whether a display claims permanence and says when it
+// opened.
+//
+// The opening date is what makes the claim the entry's own. A page's
+// navigation carries the word "Dauerausstellung" on every card it surrounds,
+// and that is how the Jewish Museum Berlin's "Spenden" link became a permanent
+// exhibition; no page furniture also supplies an opening date next to it. The
+// Hasselblad Foundation's "Erna Behind the Camera" says "Permanent exhibition
+// Opens May 23 2026" in its own card, and is exactly what this is for.
+func datedPermanent(dates DateRange) bool {
+	return dates.Permanent && dates.Start != nil
+}
+
 // widen stretches a kept entry to cover another occurrence of the same event,
 // so four one-day listings become one entry spanning all four days.
 //
@@ -444,26 +508,51 @@ type homePage struct {
 // readHome fetches a site's front page and sorts its links. A front page that
 // cannot be read is not an error: the conventional paths are tried regardless.
 func (s *Scraper) readHome(ctx context.Context, base *url.URL) homePage {
-	home := *base
-	home.Path = "/"
-	home.RawQuery = ""
-	home.Fragment = ""
+	for _, candidate := range homeURLs(base) {
+		body, finalURL, err := s.fetcher.Get(ctx, candidate)
+		if err != nil {
+			continue
+		}
 
-	body, finalURL, err := s.fetcher.Get(ctx, home.String())
-	if err != nil {
-		return homePage{}
+		pageBase, err := url.Parse(finalURL)
+		if err != nil {
+			pageBase = base
+		}
+		return homePage{
+			reached:   true,
+			listings:  FindListingLinks(body, pageBase),
+			permanent: FindPermanentLinks(body, pageBase),
+			info:      FindInfoLinks(body, pageBase),
+		}
 	}
+	return homePage{}
+}
 
-	pageBase, err := url.Parse(finalURL)
-	if err != nil {
-		pageBase = base
+// homeURLs returns where to look for a site's front page: the page the
+// catalogue recorded, and then the host's root.
+//
+// Both, because either can be the wrong one. Small museums are very often a
+// section of a larger site — the Medicinhistoriska museet is at
+// vgregion.se/medicinhistoriska, and its own page links straight to its
+// exhibitions, while the host root is a regional health authority's front page
+// with thousands of links and not one about the museum. But a recorded path
+// also goes stale: the Hasselblad Center is catalogued at
+// hasselbladfoundation.org/wp/, a WordPress path that now 404s, and reading
+// only what was recorded found nothing at all on a site that publishes a full
+// programme.
+//
+// Recorded path first, host root second, so the more specific page wins when
+// it works and the site is still reached when it does not.
+func homeURLs(base *url.URL) []string {
+	root := *base
+	root.Path, root.RawQuery, root.Fragment = "/", "", ""
+
+	recorded := *base
+	recorded.RawQuery, recorded.Fragment = "", ""
+	if recorded.Path == "" || recorded.Path == "/" {
+		return []string{root.String()}
 	}
-	return homePage{
-		reached:   true,
-		listings:  FindListingLinks(body, pageBase),
-		permanent: FindPermanentLinks(body, pageBase),
-		info:      FindInfoLinks(body, pageBase),
-	}
+	return []string{recorded.String(), root.String()}
 }
 
 // dedupe removes repeated entries and orders them: running first, then by

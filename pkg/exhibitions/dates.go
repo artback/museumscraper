@@ -141,6 +141,12 @@ var (
 	ongoing = regexp.MustCompile(`(?i)\b(ongoing|permanent|indefinite|long[- ]term|dauerausstellung)\b`)
 )
 
+// qualifierWindow is how much of the text before a date is read for the word
+// that says whether it opens or closes the run. Wide enough for "Until ",
+// "Opening on " and their translations; far too narrow to reach a sentence
+// about something else.
+const qualifierWindow = 24
+
 // ParseDateRange reads the run dates out of a listing's text.
 //
 // Museum listings are written for humans, so the same page may carry
@@ -153,21 +159,40 @@ func ParseDateRange(text string, now time.Time) DateRange {
 		return DateRange{}
 	}
 
-	if ongoing.MatchString(text) {
-		return DateRange{Permanent: true}
-	}
-
 	dates := findDates(text, now)
+
+	if ongoing.MatchString(text) {
+		// The opening date is kept when the text gives one. "Permanent
+		// exhibition Opens May 23 2026" says both that it has no end and when
+		// it began, and the second half was being discarded — which left the
+		// entry with nothing but a claim of permanence, indistinguishable from
+		// a card that merely had the word "Dauerausstellung" somewhere in the
+		// furniture around it.
+		permanent := DateRange{Permanent: true}
+		if len(dates) > 0 {
+			start := dates[0].when
+			permanent.Start = &start
+		}
+		return permanent
+	}
 	switch len(dates) {
 	case 0:
 		return DateRange{}
 
 	case 1:
-		single := dates[0]
+		single := dates[0].when
+		// Read only the text just before the date, not the whole card.
+		//
+		// A qualifier means something because of where it sits. Searching the
+		// whole card for it turned "From the Hasselblad Foundation Collection
+		// March 23 – May 19, 2013" into an exhibition that opened in 2013 and
+		// never closes: the "From" belongs to the collection, forty characters
+		// away, and the run had ended twelve years earlier.
+		lead := text[max(0, dates[0].at-qualifierWindow):dates[0].at]
 		switch {
-		case openEnded.MatchString(text):
+		case openEnded.MatchString(lead):
 			return DateRange{End: &single}
-		case openStart.MatchString(text):
+		case openStart.MatchString(lead):
 			return DateRange{Start: &single}
 		default:
 			// A bare date on a listing is its closing date more often than not,
@@ -176,7 +201,7 @@ func ParseDateRange(text string, now time.Time) DateRange {
 		}
 
 	default:
-		start, end := dates[0], dates[len(dates)-1]
+		start, end := dates[0].when, dates[len(dates)-1].when
 		if end.Before(start) {
 			start, end = end, start
 		}
@@ -184,15 +209,17 @@ func ParseDateRange(text string, now time.Time) DateRange {
 	}
 }
 
+// located is a date and where in the text it was written.
+type located struct {
+	at   int
+	when time.Time
+}
+
 // findDates returns every date in the text, in order of appearance.
 //
 // The trailing year is shared backwards: "12 March – 7 September 2026" gives
 // the year only once, and the opening date has to borrow it.
-func findDates(text string, now time.Time) []time.Time {
-	type located struct {
-		at   int
-		when time.Time
-	}
+func findDates(text string, now time.Time) []located {
 	var found []located
 	claimed := make([]bool, len(text)+1)
 
@@ -289,11 +316,7 @@ func findDates(text string, now time.Time) []time.Time {
 		}
 	}
 
-	dates := make([]time.Time, 0, len(found))
-	for _, f := range found {
-		dates = append(dates, f.when)
-	}
-	return dates
+	return found
 }
 
 // firstDateIndex returns the byte offset of the first date-looking run in text,
