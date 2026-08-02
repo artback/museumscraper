@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"museum/internal/models"
+	"museum/internal/sweep"
 	"museum/pkg/exhibitions"
 )
 
@@ -16,7 +17,7 @@ type fakeHarvester struct {
 	asked chan [3]float64
 }
 
-func (h *fakeHarvester) MuseumsWithWebsitesNear(_ context.Context, lat, lon, radiusKm float64, _ int) ([]models.Museum, error) {
+func (h *fakeHarvester) TargetsNear(_ context.Context, lat, lon, radiusKm float64, _ int) ([]sweep.Target, error) {
 	h.asked <- [3]float64{lat, lon, radiusKm}
 	return nil, nil
 }
@@ -25,10 +26,14 @@ func (h *fakeHarvester) SaveExhibitions(context.Context, []exhibitions.Exhibitio
 	return 0, nil
 }
 func (h *fakeHarvester) MergeDuplicateExhibitions(context.Context) (int64, error) { return 0, nil }
-func (h *fakeHarvester) ForgetUnlisted(context.Context, string, []string) (int64, error) {
+func (h *fakeHarvester) PruneNavigationListings(context.Context) (int64, error)   { return 0, nil }
+func (h *fakeHarvester) DiscoverSites(context.Context) (int64, error)             { return 0, nil }
+func (h *fakeHarvester) RetireUnseen(context.Context, string, time.Time) (int64, error) {
 	return 0, nil
 }
-func (h *fakeHarvester) PruneNavigationListings(context.Context) (int64, error) { return 0, nil }
+func (h *fakeHarvester) TouchSite(context.Context, string, time.Time) (int64, error) { return 0, nil }
+func (h *fakeHarvester) SoonestClose(context.Context, string) (*time.Time, error)    { return nil, nil }
+func (h *fakeHarvester) RecordScrape(context.Context, sweep.Record, time.Time) error { return nil }
 
 // A scrape must read every part of the cell it then blocks for a day.
 //
@@ -101,7 +106,7 @@ type blockingHarvester struct {
 	release chan struct{}
 }
 
-func (h *blockingHarvester) MuseumsWithWebsitesNear(context.Context, float64, float64, float64, int) ([]models.Museum, error) {
+func (h *blockingHarvester) TargetsNear(context.Context, float64, float64, float64, int) ([]sweep.Target, error) {
 	h.entered <- struct{}{}
 	<-h.release
 	return nil, nil
@@ -111,10 +116,20 @@ func (h *blockingHarvester) SaveExhibitions(context.Context, []exhibitions.Exhib
 	return 0, nil
 }
 func (h *blockingHarvester) MergeDuplicateExhibitions(context.Context) (int64, error) { return 0, nil }
-func (h *blockingHarvester) ForgetUnlisted(context.Context, string, []string) (int64, error) {
+func (h *blockingHarvester) PruneNavigationListings(context.Context) (int64, error)   { return 0, nil }
+func (h *blockingHarvester) DiscoverSites(context.Context) (int64, error)             { return 0, nil }
+func (h *blockingHarvester) RetireUnseen(context.Context, string, time.Time) (int64, error) {
 	return 0, nil
 }
-func (h *blockingHarvester) PruneNavigationListings(context.Context) (int64, error) { return 0, nil }
+func (h *blockingHarvester) TouchSite(context.Context, string, time.Time) (int64, error) {
+	return 0, nil
+}
+func (h *blockingHarvester) SoonestClose(context.Context, string) (*time.Time, error) {
+	return nil, nil
+}
+func (h *blockingHarvester) RecordScrape(context.Context, sweep.Record, time.Time) error {
+	return nil
+}
 
 // Different places must not wait for each other.
 //
@@ -164,11 +179,14 @@ func TestScrapeReadsSeveralAreasAtOnce(t *testing.T) {
 // each waiting area in turn, so the small one is done in a couple of rounds.
 func TestScrapeTakesSitesFromEveryAreaInTurn(t *testing.T) {
 	area := func(cell string, sites int) *scrapeArea {
-		museums := make([]models.Museum, sites)
-		for i := range museums {
-			museums[i] = models.Museum{Name: cell, Website: "https://example.invalid/"}
+		targets := make([]sweep.Target, sites)
+		for i := range targets {
+			targets[i] = sweep.Target{
+				Site:   cell,
+				Museum: models.Museum{Name: cell, Website: "https://example.invalid/"},
+			}
 		}
-		return &scrapeArea{cell: cell, museums: museums}
+		return &scrapeArea{cell: cell, targets: targets}
 	}
 
 	// Only the dispatcher: no workers, so this test reads the jobs itself and
@@ -200,12 +218,12 @@ func TestScrapeTakesSitesFromEveryAreaInTurn(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("the dispatcher stopped handing out work after %d sites", i)
 		}
-		if smallSeen == len(small.museums) {
+		if smallSeen == len(small.targets) {
 			return
 		}
 	}
 	t.Errorf("after %d sites the small area had %d of its %d read; it is waiting for the large one",
-		patience, smallSeen, len(small.museums))
+		patience, smallSeen, len(small.targets))
 }
 
 // haversineKm is the great-circle distance, for checking coverage in the test's

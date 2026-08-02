@@ -58,40 +58,91 @@ func NewFetcher() *Fetcher {
 	}
 }
 
+// Validators are the cache tags a site gave for a page last time it was read,
+// and are what a conditional request offers back to ask whether anything has
+// changed.
+//
+// Worth carrying because the answer is so much cheaper than the question. A
+// site that has not changed replies 304 with no body at all: no transfer, no
+// parse, and a definitive "nothing to do" rather than the inference the
+// scraper would otherwise have to make by re-reading and re-comparing the
+// page. On a sweep of thousands of sites, most of which change a few times a
+// year, that is the difference between what can be swept weekly and what
+// cannot.
+type Validators struct {
+	ETag         string
+	LastModified string
+}
+
+// none reports whether there is nothing to ask the site about.
+func (v Validators) none() bool { return v.ETag == "" && v.LastModified == "" }
+
+// Page is a fetched page, or a site's word that it has not changed.
+type Page struct {
+	Body string
+	// URL is where the request ended up after redirects.
+	URL string
+	// Validators are the tags this response carried, to be offered back next
+	// time.
+	Validators Validators
+	// Unchanged is set when the site answered 304. Body is empty then, and
+	// that is an answer rather than a failure.
+	Unchanged bool
+}
+
 // Get fetches a page and returns its body as text, along with the URL it ended
 // up at after redirects. It refuses URLs that robots.txt disallows.
 func (f *Fetcher) Get(ctx context.Context, rawURL string) (body string, finalURL string, err error) {
+	page, err := f.Fetch(ctx, rawURL, Validators{})
+	if err != nil {
+		return "", "", err
+	}
+	return page.Body, page.URL, nil
+}
+
+// Fetch retrieves a page, telling the site what we already hold so it can
+// answer 304 instead of sending it again.
+func (f *Fetcher) Fetch(ctx context.Context, rawURL string, known Validators) (Page, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return "", "", fmt.Errorf("parse %q: %w", rawURL, err)
+		return Page{}, fmt.Errorf("parse %q: %w", rawURL, err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", "", fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+		return Page{}, fmt.Errorf("unsupported scheme %q", parsed.Scheme)
 	}
 
 	allowed, err := f.allowed(ctx, parsed)
 	if err != nil {
-		return "", "", err
+		return Page{}, err
 	}
 	if !allowed {
-		return "", "", fmt.Errorf("%w: %s", ErrDisallowed, parsed.Path)
+		return Page{}, fmt.Errorf("%w: %s", ErrDisallowed, parsed.Path)
 	}
 
-	return f.fetch(ctx, parsed)
+	return f.get(ctx, parsed, known)
 }
 
 // ErrDisallowed means robots.txt forbids the path.
 var ErrDisallowed = fmt.Errorf("disallowed by robots.txt")
 
-// fetch performs the rate-limited request.
+// fetch performs an unconditional rate-limited request.
 func (f *Fetcher) fetch(ctx context.Context, target *url.URL) (string, string, error) {
-	if err := f.waitFor(ctx, target.Host); err != nil {
+	page, err := f.get(ctx, target, Validators{})
+	if err != nil {
 		return "", "", err
+	}
+	return page.Body, page.URL, nil
+}
+
+// get performs the rate-limited request, offering back what we already hold.
+func (f *Fetcher) get(ctx context.Context, target *url.URL, known Validators) (Page, error) {
+	if err := f.waitFor(ctx, target.Host); err != nil {
+		return Page{}, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
-		return "", "", fmt.Errorf("build request: %w", err)
+		return Page{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("User-Agent", f.userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
@@ -104,18 +155,34 @@ func (f *Fetcher) fetch(ctx context.Context, target *url.URL) (string, string, e
 	// maintains, and reading it is what makes a catalogue of the whole world
 	// possible — extraction here is already multilingual.
 	req.Header.Set("Accept-Language", "*")
+	if known.ETag != "" {
+		req.Header.Set("If-None-Match", known.ETag)
+	}
+	if known.LastModified != "" {
+		req.Header.Set("If-Modified-Since", known.LastModified)
+	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("fetch %s: %w", target, err)
+		return Page{}, fmt.Errorf("fetch %s: %w", target, err)
 	}
 	defer resp.Body.Close()
 
+	final := target.String()
+	if resp.Request != nil && resp.Request.URL != nil {
+		final = resp.Request.URL.String()
+	}
+
+	// The site's word that nothing has changed. Not an error, and the whole
+	// point of having asked.
+	if resp.StatusCode == http.StatusNotModified {
+		return Page{URL: final, Validators: known, Unchanged: true}, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("fetch %s: status %s", target, resp.Status)
+		return Page{}, fmt.Errorf("fetch %s: status %s", target, resp.Status)
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.Contains(ct, "html") {
-		return "", "", fmt.Errorf("fetch %s: content type %s is not HTML", target, ct)
+		return Page{}, fmt.Errorf("fetch %s: content type %s is not HTML", target, ct)
 	}
 
 	// Decode whatever encoding the page is actually in, rather than assuming
@@ -136,14 +203,17 @@ func (f *Fetcher) fetch(ctx context.Context, target *url.URL) (string, string, e
 
 	data, err := io.ReadAll(body)
 	if err != nil {
-		return "", "", fmt.Errorf("read %s: %w", target, err)
+		return Page{}, fmt.Errorf("read %s: %w", target, err)
 	}
 
-	final := target.String()
-	if resp.Request != nil && resp.Request.URL != nil {
-		final = resp.Request.URL.String()
-	}
-	return string(data), final, nil
+	return Page{
+		Body: string(data),
+		URL:  final,
+		Validators: Validators{
+			ETag:         resp.Header.Get("ETag"),
+			LastModified: resp.Header.Get("Last-Modified"),
+		},
+	}, nil
 }
 
 // waitFor blocks until this host may be contacted again.
