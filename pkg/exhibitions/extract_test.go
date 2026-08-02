@@ -365,6 +365,30 @@ func TestTitleFromSlug(t *testing.T) {
 		"/exhibitions/show.html":         "Show",
 		"/":                              "",
 		"/a":                             "",
+
+		// The day the page was published is not the name of the exhibition.
+		// Mölndals stadsmuseum puts it in front of every one of them.
+		"/utstallningar/2026-06-02-noughties---00-talets-mode-och-trender":      "Noughties 00 Talets Mode Och Trender",
+		"/utstallningar/2025-11-27-ren-skit---fran-lortsverige-till-clean-girl": "Ren Skit Fran Lortsverige Till Clean Girl",
+		"/utstallningar/2026-02-23-en-tidsresa-i-underlandet":                   "En Tidsresa I Underlandet",
+
+		// A slug that is only a date names nothing, and the entry goes no
+		// further: these are a library's calendar, one page per session.
+		"/events/aeldre-sagens-it-cafe/2026-08-03": "",
+
+		// A year is not a date, and plenty of exhibitions are named after one.
+		// These must all survive untouched.
+		"/utstallningar/1700-talets-goteborg":        "1700 Talets Goteborg",
+		"/ausstellungen/detail/2101-future-ceramics": "2101 Future Ceramics",
+		"/exhibitions/1913-1923-lesprit-du-temps":    "1913 1923 Lesprit Du Temps",
+		"/whats-on/2026-summer-camps":                "2026 Summer Camps",
+		"/events/2026-archeo-hotspot":                "2026 Archeo Hotspot",
+		// Numbers that cannot be a month or a day are not a date either.
+		"/exhibitions/2016-17-18-season": "2016 17 18 Season",
+
+		// A slug that is only the site's record number names nothing.
+		"/programm/veranstaltungskalender/2026/09/metaxy/588488": "",
+		"/event_listing_category/2026":                           "",
 	}
 	for path, want := range cases {
 		if got := titleFromSlug(path); got != want {

@@ -42,6 +42,8 @@ export async function show(place) {
 	};
 	current = { name: String(place.name || "").split(",")[0], spot };
 	tab = "museums";
+	// A different place has not been looked at, whatever happened at the last one.
+	looked = null;
 
 	card.setTitle(current.name).open().busy("Looking…");
 
@@ -170,6 +172,7 @@ function showList() {
 	const kept = listings.filter(shows.FILTERS[filter].keep);
 	const summary = shows.coverage(report, listings, {
 		scraping: scraping,
+		looked: looked,
 		onScrape: () => look(),
 	});
 
@@ -233,12 +236,15 @@ export function openVenue({ name }) {
 
 /* ---- reading the websites ----------------------------------------------- */
 
-let scraping = false, progressBox = null;
+// looked records that a read of this area has just finished, and how it ended.
+// Cleared when the area changes, because it is a fact about this place only.
+let scraping = false, progressBox = null, looked = null;
 
 export async function look() {
 	if (!current || scraping) return;
 
 	scraping = true;
+	looked = null;
 	progressBox = scrape.progress(null);
 	paint();
 
@@ -255,7 +261,9 @@ export async function look() {
 
 	scrape.announce(started.status);
 	if (!api.running(started.status)) {
-		finish();
+		// Nothing to wait for: either the area was read recently enough that the
+		// server declined, or there was nothing here to read at all.
+		finish(started.status.state);
 		return;
 	}
 
@@ -268,11 +276,12 @@ export async function look() {
 			progressBox = scrape.progress(status);
 			paint();
 		},
-		onDone: () => finish(),
+		onDone: status => finish(status ? status.state : "done"),
 	});
 }
 
-async function finish() {
+async function finish(state = "done") {
+	looked = state;
 	scraping = false;
 	progressBox = null;
 	hud.setNote("");

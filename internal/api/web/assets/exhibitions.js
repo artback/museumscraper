@@ -173,7 +173,7 @@ function row(show, onPick, withVenue) {
 // exist, so most areas hold little and some hold nothing. Saying so plainly is
 // the difference between a thin list and a list that looks broken — and the
 // numbers to say it with are in every response.
-export function coverage(report, shows, { onScrape, scraping } = {}) {
+export function coverage(report, shows, { onScrape, scraping, looked } = {}) {
 	if (!report) return null;
 
 	const venues = new Set(shows.map(show => show.museum).filter(Boolean)).size;
@@ -203,6 +203,26 @@ export function coverage(report, shows, { onScrape, scraping } = {}) {
 	if (scraping) {
 		return null; // the progress bar is already saying it
 	}
+
+	// A look that has just been and gone says so, whatever the coverage report
+	// makes of it.
+	//
+	// The report is built from the sites that were actually visited, so an area
+	// where there was nothing to visit comes back exactly as it went in — and
+	// the panel used to answer a press of "Look for exhibitions here" by
+	// offering it again, word for word, which reads as a button that does
+	// nothing. It is now the one thing on screen that knows a look happened.
+	if (looked) {
+		return note(
+			looked === "recently-scraped"
+				? "These websites were read recently, and nothing is on show."
+				: "Nothing was found here just now.",
+			withSite > 0
+				? "Museums here publish " + plural(withSite, "website") +
+					", but none of them lists anything on at the moment."
+				: "No museum here publishes a website that can be read.");
+	}
+
 	if (report.last_scraped) {
 		return note(
 			"Nothing is on show here.",

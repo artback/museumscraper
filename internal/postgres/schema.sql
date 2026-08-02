@@ -367,3 +367,26 @@ CREATE TABLE IF NOT EXISTS area_scrapes (
     cell       text PRIMARY KEY,
     scraped_at timestamptz NOT NULL
 );
+
+-- Take the publishing date off the titles that were read before the reader
+-- stopped putting it there.
+--
+-- Mölndals stadsmuseum names every exhibition page after the day it opens, so
+-- the title taken from the slug began with the date rather than the name. The
+-- reader no longer does this, but a title is only rewritten when its page is
+-- read again, and that is a week away at the median sweep interval.
+--
+-- The pattern is the reader's: a full year-month-day, month and day both in
+-- range, and never a bare year — plenty of exhibitions are named after one,
+-- and "1700-talets Göteborg" must survive untouched. Idempotent, because a
+-- title it has already corrected no longer matches.
+UPDATE exhibitions
+   SET title = regexp_replace(title,
+                   '^[0-9]{4} (0[1-9]|1[0-2]) (0[1-9]|[12][0-9]|3[01]) +', '')
+ WHERE title ~ '^[0-9]{4} (0[1-9]|1[0-2]) (0[1-9]|[12][0-9]|3[01]) ';
+
+-- A title that was nothing but a date names nothing at all. These are a
+-- library's calendar entries, one page per session, and the reader now declines
+-- them at the source.
+DELETE FROM exhibitions
+ WHERE title ~ '^[0-9]{4} (0[1-9]|1[0-2]) (0[1-9]|[12][0-9]|3[01])$';

@@ -1097,7 +1097,17 @@ type Coverage struct {
 func (s *Store) ExhibitionCoverage(ctx context.Context, lat, lon, radiusKm float64) (Coverage, error) {
 	const stmt = `
 SELECT count(*),
-       count(*) FILTER (WHERE website IS NOT NULL AND website <> ''),
+       -- Counted by the host, not by the field.
+       --
+       -- A website nothing can be read from is not one this report should
+       -- promise: 197 records hold a bare "mucat.net" with no scheme, the
+       -- generated host is null for every one of them, and a scrape finds no
+       -- site to visit. Counting the field said "1 museum here has a website
+       -- to read", the visitor asked for it to be read, the queue found
+       -- nothing to fetch and marked the area done for the day, and the panel
+       -- went back to offering the same thing — with no way to tell that
+       -- anything had happened at all.
+       count(*) FILTER (WHERE site IS NOT NULL),
        -- Read from the attempt record, not from the results.
        --
        -- Taking this from max(scraped_at) over the exhibitions meant an area

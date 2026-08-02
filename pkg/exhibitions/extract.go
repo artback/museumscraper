@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/net/html"
 )
@@ -575,10 +576,18 @@ func titleFromSlug(path string) string {
 	if idx := strings.LastIndex(slug, "."); idx > 0 {
 		slug = slug[:idx]
 	}
+	slug = trimPublishDate(slug)
 	slug = trimOccurrenceSuffix(slug)
 	slug = strings.NewReplacer("-", " ", "_", " ").Replace(slug)
 	slug = strings.TrimSpace(whitespaceRe.ReplaceAllString(slug, " "))
 	if len([]rune(slug)) < 3 {
+		return ""
+	}
+	// A slug that is only digits is the site's own record number, not a name:
+	// the Akademie der Künste ends every event's URL with one, and the reader
+	// dutifully turned "…/588488" into an exhibition called "588488". Nothing a
+	// visitor can read is lost by declining it.
+	if onlyDigits(slug) {
 		return ""
 	}
 
@@ -588,6 +597,43 @@ func titleFromSlug(path string) string {
 		words[i] = strings.ToUpper(string(runes[:1])) + string(runes[1:])
 	}
 	return strings.Join(words, " ")
+}
+
+// publishDateRe matches the date a publishing system puts at the front of a
+// slug: a full year-month-day, and nothing less.
+//
+// The month and day are range-checked in the pattern itself, because the only
+// thing separating a date from the start of a real name here is whether the
+// numbers could be one. Titles beginning with a year are common and must
+// survive: "1700-talets-goteborg", "2101-future-ceramics",
+// "1913-1923-lesprit-du-temps", "2026-summer-camps". None of those has a
+// two-digit month and day after the year, and a bare year is never dropped.
+var publishDateRe = regexp.MustCompile(`^\d{4}[-_.](?:0[1-9]|1[0-2])[-_.](?:0[1-9]|[12]\d|3[01])(?:[-_.]+|$)`)
+
+// onlyDigits reports whether a slug carries no letters at all — spaces and
+// digits only, once the separators have become spaces.
+func onlyDigits(slug string) bool {
+	for _, r := range slug {
+		if r != ' ' && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// trimPublishDate removes that date.
+//
+// Mölndals stadsmuseum names every exhibition page after the day it opens —
+// "2026-06-02-noughties---00-talets-mode-och-trender" — so the title read off
+// the slug began with the date rather than the name. It read as a serial
+// number where the exhibition's name should be, and it sorted the panel by
+// something nobody was looking for.
+//
+// A slug that is nothing but a date leaves nothing behind, which is the right
+// answer: those are a library's calendar entries, one page per session, and
+// they are not exhibitions whatever the reader thought.
+func trimPublishDate(slug string) string {
+	return publishDateRe.ReplaceAllString(slug, "")
 }
 
 // trimOccurrenceSuffix removes the counter a site appends to a slug when it

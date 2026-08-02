@@ -37,6 +37,56 @@ const GLYPHS = window.MUSEUM_GLYPHS ||
 
 const EMPTY = { type: "FeatureCollection", features: [] };
 
+// CAMERA is the shape MapLibre writes a position in: zoom, latitude, longitude,
+// optionally followed by bearing and pitch.
+const CAMERA = /^-?\d+(?:\.\d+)?\/-?\d+(?:\.\d+)?\/-?\d+(?:\.\d+)?/;
+
+// nameTheCamera brings a link made before the camera had a name up to date.
+//
+// MapLibre used to write the position as a bare "#14/57.69857/11.9548". The
+// hash now carries what is being looked at as well, so the position had to be
+// named — and a bare fragment is not a parameter. Read as one it becomes a key
+// with an empty value, and the first write after that re-encodes it into the
+// URL as "14%2F57.69857%2F11.9548=": no longer a position anything acts on,
+// and permanent, because every later write carries it along. Anyone holding a
+// link or a bookmark from before has one of those.
+//
+// Run before the map is built, because the map reads the hash in its
+// constructor and this is the only chance to hand it something it understands.
+// replaceState rather than pushState: this is a correction to the address, not
+// somewhere the reader has been.
+function nameTheCamera() {
+	const raw = window.location.hash.replace(/^#/, "");
+	if (!raw) return;
+
+	const kept = [];
+	let camera = null, named = false;
+
+	for (const part of raw.split("&").filter(Boolean)) {
+		if (part.startsWith("view=")) {
+			named = true;
+			kept.push(part);
+			continue;
+		}
+		// The trailing "=" is what URLSearchParams leaves behind when it has
+		// already mistaken one of these for a key.
+		const decoded = decodeURIComponent(part.replace(/=$/, ""));
+		if (!camera && CAMERA.test(decoded)) {
+			camera = decoded;
+			continue;
+		}
+		kept.push(part);
+	}
+
+	if (camera === null) return;
+	// A named position already present wins; the bare one beside it is residue
+	// from a page that has since been corrected, and is dropped.
+	if (!named) kept.unshift("view=" + camera);
+	window.history.replaceState(null, "", "#" + kept.join("&"));
+}
+
+nameTheCamera();
+
 export const map = new maplibregl.Map({
 	container: "map",
 	style: {
