@@ -1013,3 +1013,80 @@ func TestMergeNameVariants(t *testing.T) {
 		t.Fatal("the museum is no longer findable by its merged-away name")
 	}
 }
+
+// A scrape has to be able to take things away, not only add them.
+//
+// Without that, everything a past run got wrong stayed wrong for good: fixing
+// the mistake stops it being made again and does nothing about the rows already
+// written. Göteborgs naturhistoriska museum kept three of its own index pages
+// as exhibitions, and the Maritime Museum kept every show twice — once in
+// Swedish and once in English, from when the scraper asked sites for their
+// translations — and neither set would ever have been looked at again.
+func TestForgetUnlisted(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	const host = "www.gnm.se"
+	listed := "https://www.gnm.se/utstallningar/permanenta-utstallningar/valsalen/"
+
+	if _, err := store.SaveExhibitions(ctx, []exhibitions.Exhibition{
+		{Title: "Valsalen", URL: listed, Museum: "GNM", Permanent: true},
+		// An index page the site links to but which is not an exhibition.
+		{Title: "Permanenta Utstallningar", Museum: "GNM", Permanent: true,
+			URL: "https://www.gnm.se/utstallningar/permanenta-utstallningar/"},
+		// The same museum's English translation of a show, from an older run.
+		{Title: "The Whale Hall", Museum: "GNM", Permanent: true,
+			URL: "https://www.gnm.se/en/exhibitions/the-whale-hall/"},
+		// Another museum entirely, which this reading says nothing about.
+		{Title: "Vikingr", Museum: "Gothenburg City Museum", Permanent: true,
+			URL: "https://goteborgsstadsmuseum.se/utstallningar/vikingr/"},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	gone, err := store.ForgetUnlisted(ctx, host, []string{listed})
+	if err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if gone != 2 {
+		t.Errorf("removed %d entries, want the 2 this site no longer lists", gone)
+	}
+
+	left := storedTitles(t, ctx, store)
+	if !left["Valsalen"] {
+		t.Error("the entry the site still lists was removed")
+	}
+	if !left["Vikingr"] {
+		t.Error("another museum's entry was removed; this reading said nothing about it")
+	}
+	if left["Permanenta Utstallningar"] || left["The Whale Hall"] {
+		t.Errorf("stale entries survived: %v", left)
+	}
+
+	// A reading that found nothing is not evidence that a programme has ended.
+	if gone, err := store.ForgetUnlisted(ctx, host, nil); err != nil || gone != 0 {
+		t.Errorf("an empty reading removed %d entries (err %v), want none", gone, err)
+	}
+}
+
+// storedTitles reads back every stored exhibition's title. Straight SQL rather
+// than a query method: these rows carry no position, so every reader that takes
+// a radius would report them all as missing.
+func storedTitles(t *testing.T, ctx context.Context, store *Store) map[string]bool {
+	t.Helper()
+	rows, err := store.pool.Query(ctx, "SELECT title FROM exhibitions")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	defer rows.Close()
+
+	found := make(map[string]bool)
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		found[title] = true
+	}
+	return found
+}

@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ type Harvester interface {
 	SaveExhibitions(ctx context.Context, found []exhibitions.Exhibition) (int64, error)
 	MergeDuplicateExhibitions(ctx context.Context) (int64, error)
 	PruneNavigationListings(ctx context.Context) (int64, error)
+	ForgetUnlisted(ctx context.Context, host string, keep []string) (int64, error)
 }
 
 // Limits on scraping the API starts on a visitor's behalf.
@@ -417,7 +419,7 @@ func (q *scrapeQueue) collect(area *scrapeArea) {
 	defer area.cancel()
 
 	start := time.Now()
-	var found, stored int
+	var found, stored, forgotten int64
 
 	// Deduplicated by URL within the area, because sites cross-list: one
 	// venue's programme page carries entries another venue's site also shows.
@@ -432,7 +434,7 @@ func (q *scrapeQueue) collect(area *scrapeArea) {
 		if err != nil {
 			log.Printf("scrape %s: storing: %v", area.cell, err)
 		}
-		stored += int(n)
+		stored += n
 		buffer = buffer[:0]
 	}
 
@@ -443,6 +445,13 @@ func (q *scrapeQueue) collect(area *scrapeArea) {
 			flush()
 			return
 		case batch := <-area.results:
+			// What this site listed is now the whole truth about it, so
+			// anything else we hold for that host has stopped being true.
+			// Done before the batch is filtered, because a URL dropped here
+			// for being a duplicate of another site's entry is still one this
+			// site offered.
+			forgotten += q.forgetUnlisted(area, batch)
+
 			for _, e := range batch {
 				if e.URL == "" {
 					continue
@@ -457,7 +466,7 @@ func (q *scrapeQueue) collect(area *scrapeArea) {
 			if len(buffer) >= scrapeStoreBatch {
 				flush()
 			}
-			q.setProgress(area.cell, func(p *scrapeProgress) { p.Read++; p.Found = found })
+			q.setProgress(area.cell, func(p *scrapeProgress) { p.Read++; p.Found = int(found) })
 		}
 	}
 	flush()
@@ -469,10 +478,38 @@ func (q *scrapeQueue) collect(area *scrapeArea) {
 		log.Printf("scrape %s: merging: %v", area.cell, err)
 	}
 
-	log.Printf("scrape %s: %d sites, %d exhibitions found, %d stored, %s",
-		area.cell, len(area.museums), found, stored, time.Since(start).Round(time.Second))
+	log.Printf("scrape %s: %d sites, %d exhibitions found, %d stored, %d no longer listed, %s",
+		area.cell, len(area.museums), found, stored, forgotten, time.Since(start).Round(time.Second))
 
 	q.release(area.cell, true)
+}
+
+// forgetUnlisted drops whatever the site behind this batch no longer shows.
+func (q *scrapeQueue) forgetUnlisted(area *scrapeArea, batch []exhibitions.Exhibition) int64 {
+	if len(batch) == 0 {
+		return 0
+	}
+	host := hostOf(batch[0].SourcePage)
+	keep := make([]string, 0, len(batch))
+	for _, e := range batch {
+		keep = append(keep, e.URL)
+	}
+
+	gone, err := q.store.ForgetUnlisted(area.ctx, host, keep)
+	if err != nil {
+		log.Printf("scrape %s: forgetting unlisted: %v", area.cell, err)
+		return 0
+	}
+	return gone
+}
+
+// hostOf is the host a page was served from, or "" if it cannot be read.
+func hostOf(page string) string {
+	parsed, err := url.Parse(page)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
 }
 
 // release lets go of an area, either recording that it has just been read or

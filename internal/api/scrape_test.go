@@ -25,7 +25,10 @@ func (h *fakeHarvester) SaveExhibitions(context.Context, []exhibitions.Exhibitio
 	return 0, nil
 }
 func (h *fakeHarvester) MergeDuplicateExhibitions(context.Context) (int64, error) { return 0, nil }
-func (h *fakeHarvester) PruneNavigationListings(context.Context) (int64, error)   { return 0, nil }
+func (h *fakeHarvester) ForgetUnlisted(context.Context, string, []string) (int64, error) {
+	return 0, nil
+}
+func (h *fakeHarvester) PruneNavigationListings(context.Context) (int64, error) { return 0, nil }
 
 // A scrape must read every part of the cell it then blocks for a day.
 //
@@ -108,7 +111,10 @@ func (h *blockingHarvester) SaveExhibitions(context.Context, []exhibitions.Exhib
 	return 0, nil
 }
 func (h *blockingHarvester) MergeDuplicateExhibitions(context.Context) (int64, error) { return 0, nil }
-func (h *blockingHarvester) PruneNavigationListings(context.Context) (int64, error)   { return 0, nil }
+func (h *blockingHarvester) ForgetUnlisted(context.Context, string, []string) (int64, error) {
+	return 0, nil
+}
+func (h *blockingHarvester) PruneNavigationListings(context.Context) (int64, error) { return 0, nil }
 
 // Different places must not wait for each other.
 //

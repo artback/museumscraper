@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"museum/internal/models"
+	"museum/internal/postgres"
 	"museum/pkg/exhibitions"
 	"museum/pkg/graceful"
 	"museum/pkg/location"
@@ -113,7 +115,15 @@ func runRefresh(ctx context.Context, args []string) error {
 		buffer = buffer[:0]
 	}
 
+	var forgotten int64
+
 	exhibitions.NewScraper().Stream(ctx, museums, *concurrency, func(batch []exhibitions.Exhibition) {
+		// Reading a site is a statement about all of it, not only about what is
+		// new on it, so whatever that host still holds and no longer shows has
+		// stopped being true. Without this a scrape only ever adds, and every
+		// mistake a past run made stays in the catalogue for good.
+		forgotten += forgetUnlisted(ctx, db, batch)
+
 		found += len(batch)
 		buffer = append(buffer, batch...)
 		if len(buffer) >= checkpointSize {
@@ -123,6 +133,10 @@ func runRefresh(ctx context.Context, args []string) error {
 		}
 	})
 	flush()
+
+	if forgotten > 0 {
+		log.Printf("Removed %d entries the museums' sites no longer list", forgotten)
+	}
 
 	// Occurrences of one recurring event arrive from different listing pages
 	// and different runs, so folding them together belongs here as well as in
@@ -220,4 +234,39 @@ func nearbyMuseumsWithWebsites(ctx context.Context, lat, lon, radius float64) ([
 		}
 	}
 	return museums, nil
+}
+
+// forgetUnlisted removes whatever the site behind this batch no longer shows,
+// and reports how many it removed.
+//
+// The batch is one site's whole reading — Stream calls back once per site — so
+// the URLs in it are exactly what that host offers now. Only a reading that
+// found something says anything: a site that was unreachable, or whose shape
+// changed so that nothing was recognised, is not evidence that its programme
+// has ended.
+func forgetUnlisted(ctx context.Context, db *postgres.Store, batch []exhibitions.Exhibition) int64 {
+	if len(batch) == 0 {
+		return 0
+	}
+	page, err := url.Parse(batch[0].SourcePage)
+	if err != nil || page.Host == "" {
+		return 0
+	}
+
+	keep := make([]string, 0, len(batch))
+	for _, e := range batch {
+		keep = append(keep, e.URL)
+	}
+
+	// Detached from the run's context: this is a small write that should still
+	// happen if the scrape is interrupted between sites.
+	forgetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), checkpointTimeout)
+	defer cancel()
+
+	gone, err := db.ForgetUnlisted(forgetCtx, page.Host, keep)
+	if err != nil {
+		log.Printf("  could not forget unlisted entries on %s: %v", page.Host, err)
+		return 0
+	}
+	return gone
 }

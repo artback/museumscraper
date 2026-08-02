@@ -1427,6 +1427,42 @@ func (s *Store) PruneNavigationListings(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
+// ForgetUnlisted removes the exhibitions a site no longer lists, and reports how
+// many it removed. keep is every URL the site offered on this reading.
+//
+// Without this a scrape only ever adds. Everything a run once got wrong stayed
+// wrong for good, because the fix stops the mistake being made again and does
+// nothing about the rows already written: Göteborgs naturhistoriska museum kept
+// three of its own index pages as though they were exhibitions, and the
+// Maritime Museum kept every show twice, once in Swedish and once in English
+// from back when the scraper asked sites for their translations. Neither would
+// ever have been read again.
+//
+// The site is the authority on what it is showing. Reading it is therefore a
+// statement about all of it, not only about the entries that happen to be new,
+// and anything on that host we no longer see has stopped being true.
+//
+// Called only for a reading that found something. A site that was unreachable,
+// or that changed shape so that nothing was recognised, tells us nothing about
+// what it holds — and deleting a museum's whole programme because its server
+// was briefly down is not a repair.
+func (s *Store) ForgetUnlisted(ctx context.Context, host string, keep []string) (int64, error) {
+	if host == "" || len(keep) == 0 {
+		return 0, nil
+	}
+
+	const stmt = `
+DELETE FROM exhibitions
+WHERE split_part(regexp_replace(url, '^https?://', ''), '/', 1) = $1
+  AND url <> ALL($2)`
+
+	tag, err := s.pool.Exec(ctx, stmt, host, keep)
+	if err != nil {
+		return 0, fmt.Errorf("forget unlisted on %s: %w", host, err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // MuseumsWithWebsitesNear returns the museums around a point whose sites are
 // worth reading for exhibitions, most prominent first.
 func (s *Store) MuseumsWithWebsitesNear(ctx context.Context, lat, lon, radiusKm float64, limit int) ([]models.Museum, error) {
