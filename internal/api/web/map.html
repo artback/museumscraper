@@ -438,17 +438,27 @@ function scrapeStatusHTML(data) {
          '<div class="where">' + escape(describeScrape(data)) + "</div>";
 }
 
-// Asks what is happening at a point without starting anything. A GET, so
-// opening a museum never sets a scrape running on its own.
+// Asks what is happening at a point, and starts a scrape if nothing is.
+//
+// Opening a museum used to only ask. That was the wrong instinct about consent:
+// someone who has clicked a museum and is reading its panel has asked for its
+// exhibitions more plainly than someone who merely panned the map past it, and
+// answering "this area has not been scraped yet" while doing nothing about it
+// is a dead end with no way out of it. An area already read, running, or inside
+// its cooldown is left alone by the server either way.
 async function scrapeStatusAt(lat, lon) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const params = new URLSearchParams({
+    lat: lat.toFixed(5), lon: lon.toFixed(5), radius_km: "5",
+  });
   try {
-    const params = new URLSearchParams({
-      lat: lat.toFixed(5), lon: lon.toFixed(5), radius_km: "5",
-    });
-    const res = await fetch("/v1/scrape?" + params);
+    let res = await fetch("/v1/scrape?" + params);
     if (!res.ok) return null;
-    return await res.json();
+    const status = await res.json();
+    if (status.state !== "idle") return status;
+
+    res = await fetch("/v1/scrape?" + params, { method: "POST" });
+    return res.ok ? await res.json() : status;
   } catch (_) { return null; }
 }
 
@@ -570,9 +580,11 @@ async function loadShows(museum) {
         watchScrape({ lat: museum.latitude, lon: museum.longitude, radiusKm: 5 });
         return;
       }
-      const said = data.coverage && data.coverage.last_scraped
+      const read = (status && status.state === "recently-scraped") ||
+                   (data.coverage && data.coverage.last_scraped);
+      const said = read
         ? "Nothing listed for this museum."
-        : "This area has not been scraped for exhibitions yet.";
+        : "No exhibitions found for this area.";
       box.innerHTML = "<h3>What's on</h3><div class=\"where\">" + said + "</div>";
       return;
     }
@@ -626,17 +638,22 @@ q.addEventListener("keydown", e => {
 async function runSearch(term) {
   const token = ++searchToken;
 
-  const [museums, places] = await Promise.all([
+  const [museums, places, shows] = await Promise.all([
     fetchJSON("/v1/search?q=" + encodeURIComponent(term) + "&limit=10"),
     fetchJSON("/v1/places?q=" + encodeURIComponent(term)),
+    fetchJSON("/v1/exhibitions?q=" + encodeURIComponent(term) + "&limit=6"),
   ]);
   if (token !== searchToken) return;
 
   // Places lead: someone typing a city name wants to go there, and the museums
-  // in it are what they will see when they arrive.
+  // in it are what they will see when they arrive. Exhibitions come last
+  // because a name that is both a town and a show is far more often the town,
+  // but they are here at all because the title is often the only thing someone
+  // knows — not the museum holding it, and not the city it is in.
   hits = [
     ...(places?.places || []).map(p => ({ kind: "place", ...p })),
     ...(museums?.museums || []).map(m => ({ kind: "museum", ...m })),
+    ...(shows?.exhibitions || []).map(e => ({ kind: "show", ...e })),
   ];
   cursor = -1;
 
@@ -645,12 +662,23 @@ async function runSearch(term) {
     return;
   }
 
-  results.innerHTML = hits.map((h, i) => h.kind === "place"
-    ? '<div class="hit" data-i="' + i + '"><b>◎ ' + escape(h.name) + "</b>" +
-      '<small>place · ' + h.radius_km.toFixed(0) + " km across</small></div>"
-    : '<div class="hit" data-i="' + i + '"><b>' + escape(h.name) + "</b><small>" +
-      escape([h.locality, h.country].filter(Boolean).join(", ")) +
-      (h.locatable ? "" : " · position unknown") + "</small></div>").join("");
+  results.innerHTML = hits.map((h, i) => {
+    const open = '<div class="hit" data-i="' + i + '">';
+    if (h.kind === "place") {
+      return open + "<b>◎ " + escape(h.name) + "</b><small>place · " +
+             h.radius_km.toFixed(0) + " km across</small></div>";
+    }
+    if (h.kind === "show") {
+      const when = h.permanent ? "permanent"
+                 : h.upcoming ? "opens " + (h.start || "").slice(0, 10)
+                 : h.end ? "until " + h.end.slice(0, 10) : "on now";
+      return open + "<b>▣ " + escape(h.title) + "</b><small>" +
+             escape(h.museum || "exhibition") + " · " + escape(when) + "</small></div>";
+    }
+    return open + "<b>" + escape(h.name) + "</b><small>" +
+           escape([h.locality, h.country].filter(Boolean).join(", ")) +
+           (h.locatable ? "" : " · position unknown") + "</small></div>";
+  }).join("");
 
   for (const el of results.querySelectorAll(".hit[data-i]")) {
     el.onclick = () => choose(hits[Number(el.dataset.i)]);
@@ -667,6 +695,16 @@ async function fetchJSON(url) {
 // A place flies the map there and lets the arrival trigger a scrape; a museum
 // opens its window.
 function choose(hit) {
+  // An exhibition is somewhere before it is anything else: go to its venue and
+  // open it, which is where the entry and its dates are.
+  if (hit.kind === "show") {
+    results.innerHTML = ""; hits = []; cursor = -1;
+    if (Number.isFinite(hit.latitude) && (hit.latitude || hit.longitude)) {
+      goTo({ center: [hit.longitude, hit.latitude], zoom: 15 });
+    }
+    if (hit.url) window.open(hit.url, "_blank", "noopener");
+    return;
+  }
   if (hit.kind === "place") {
     results.innerHTML = ""; hits = []; cursor = -1;
     closeDetail();

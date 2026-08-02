@@ -11,6 +11,7 @@ import (
 
 	"museum/internal/models"
 	"museum/internal/postgres"
+	"museum/pkg/exhibitions"
 )
 
 // fakeCatalogue stands in for the database so the handlers can be tested
@@ -28,6 +29,8 @@ type fakeCatalogue struct {
 	lastLimit    int
 	lastOffset   int
 	lastUpcoming bool
+	lastSearch   string
+	lastNear     bool
 
 	coverage         postgres.Coverage
 	lastVerifiedOnly bool
@@ -74,6 +77,16 @@ func (f *fakeCatalogue) ExhibitionCoverage(context.Context, float64, float64, fl
 func (f *fakeCatalogue) ExhibitionsNearby(_ context.Context, _, _, radiusKm float64, upcoming bool, limit int) ([]postgres.ExhibitionHit, error) {
 	f.lastRadiusKm, f.lastLimit, f.lastUpcoming = radiusKm, limit, upcoming
 	return f.exhibitions, f.err
+}
+
+// lastSearch records the term a text search reached the store with, so a test
+// can check that q is passed down rather than quietly ignored.
+func (f *fakeCatalogue) SearchExhibitions(_ context.Context, query string, _, _, radiusKm float64,
+	near, upcoming bool, limit, offset int,
+) ([]postgres.ExhibitionHit, int64, error) {
+	f.lastSearch, f.lastNear = query, near
+	f.lastRadiusKm, f.lastLimit, f.lastOffset, f.lastUpcoming = radiusKm, limit, offset, upcoming
+	return f.exhibitions, int64(len(f.exhibitions)), f.err
 }
 
 func (f *fakeCatalogue) Counts(context.Context) (postgres.Counts, error) { return f.counts, f.err }
@@ -235,5 +248,47 @@ func TestHealth_ReportsWhatTheCatalogueHolds(t *testing.T) {
 	// are reported.
 	if body["status"] != "ok" || body["museums"].(float64) != 86052 {
 		t.Errorf("body = %v", body)
+	}
+}
+
+// Exhibitions were reachable only through a location. Someone who knew the name
+// of a show but not the town it was in — the ordinary case for anything
+// touring, or anything a friend mentioned — could not ask at all.
+func TestExhibitions_SearchByName(t *testing.T) {
+	c := &fakeCatalogue{exhibitions: []postgres.ExhibitionHit{
+		{Exhibition: exhibitions.Exhibition{Title: "Vikingr", Museum: "Göteborgs stadsmuseum"}},
+	}}
+
+	// No place named: the search covers everywhere, because someone who knows a
+	// title rarely knows the town.
+	rec := get(t, c, "/v1/exhibitions?q=vikingr")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
+	}
+	if c.lastSearch != "vikingr" {
+		t.Errorf("the store was asked for %q, want the search term", c.lastSearch)
+	}
+	if c.lastNear {
+		t.Error("a search with no place was narrowed to a radius anyway")
+	}
+
+	var body exhibitionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count != 1 || body.Exhibitions[0].Title != "Vikingr" {
+		t.Fatalf("body = %+v", body)
+	}
+	if body.Query.Text != "vikingr" {
+		t.Errorf("query echo = %+v, want the term echoed so a search is recognisable", body.Query)
+	}
+
+	// With a place, the term narrows the area rather than replacing it.
+	get(t, c, "/v1/exhibitions?q=vikingr&lat=57.7&lon=11.97&radius_km=5")
+	if !c.lastNear {
+		t.Error("a search with a place ignored the place")
+	}
+	if c.lastRadiusKm != 5 {
+		t.Errorf("radius reached the query as %v, want 5", c.lastRadiusKm)
 	}
 }

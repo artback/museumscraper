@@ -132,6 +132,16 @@ CREATE INDEX IF NOT EXISTS exhibitions_location_idx ON exhibitions USING gist (l
 -- "What is on now" filters on the closing date, so it leads the index.
 CREATE INDEX IF NOT EXISTS exhibitions_ends_idx ON exhibitions (ends_on);
 
+-- Exhibitions were findable only by location: a visitor who knew the name of
+-- the show but not which museum held it had no way to ask. Trigrams rather than
+-- full-text search for the same reason the museums use them — titles arrive in
+-- every language and are often read off a URL slug, so stemming in one language
+-- would not help and near-misses are most of what people type.
+-- On the title alone, matching the query: similarity against the title joined
+-- to the venue drops below the threshold for the near-misses this is for.
+CREATE INDEX IF NOT EXISTS exhibitions_title_trgm_idx
+    ON exhibitions USING gin ((lower(title)) gin_trgm_ops);
+
 -- Resolved place names, so "exhibitions in Paris" costs one geocoder call ever
 -- rather than one per request.
 --
