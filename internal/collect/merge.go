@@ -37,8 +37,11 @@ type Merger struct {
 	mu         sync.Mutex
 	byWikidata map[string]int
 	byName     map[string]int
-	museums    []*models.Museum
-	merged     int
+	// ambiguous marks name keys that more than one distinct museum answers to,
+	// which are therefore evidence of nothing. See lookup.
+	ambiguous map[string]struct{}
+	museums   []*models.Museum
+	merged    int
 }
 
 // NewMerger returns an empty Merger.
@@ -46,6 +49,7 @@ func NewMerger() *Merger {
 	return &Merger{
 		byWikidata: make(map[string]int),
 		byName:     make(map[string]int),
+		ambiguous:  make(map[string]struct{}),
 	}
 }
 
@@ -85,6 +89,17 @@ func (m *Merger) lookup(museum models.Museum, keys []string) (int, bool) {
 		}
 	}
 	for _, key := range keys {
+		// A name more than one museum answers to identifies none of them.
+		// Aliases are matched on as well as primary names, and some aliases are
+		// generic: dozens of Italian museums list "Museo civico" among their
+		// names, so a record actually called "Museo Civico" would be folded into
+		// whichever of them happened to be seen first — two different museums,
+		// hundreds of kilometres apart, silently made one. The Wikidata id
+		// check below does not catch it, because it passes whenever either side
+		// has no id, and a record read off a list page usually has none.
+		if _, shared := m.ambiguous[key]; shared {
+			continue
+		}
 		idx, ok := m.byName[key]
 		if !ok {
 			continue
@@ -105,8 +120,14 @@ func (m *Merger) index(idx int, museum models.Museum, keys []string) {
 		m.byWikidata[museum.WikidataID] = idx
 	}
 	for _, key := range append(keys, nameKeys(museum)...) {
-		if _, taken := m.byName[key]; !taken {
+		switch owner, taken := m.byName[key]; {
+		case !taken:
 			m.byName[key] = idx
+		case owner != idx:
+			// A second, distinct museum answers to this name too, so it can no
+			// longer be used to recognise either of them. The first claimant
+			// keeps the entry; lookup skips it from here on.
+			m.ambiguous[key] = struct{}{}
 		}
 	}
 }
@@ -183,6 +204,17 @@ func mergeInto(dst *models.Museum, src models.Museum) {
 		}
 	}
 	slices.Sort(dst.Sources)
+
+	// Classes union for the same reason aliases do: each source classifies in
+	// its own vocabulary, and a record is only as informative as the union.
+	// Sorted so the same museum yields the same list whatever order the sources
+	// happened to finish in.
+	for _, class := range src.Classes {
+		if class != "" && !slices.Contains(dst.Classes, class) {
+			dst.Classes = append(dst.Classes, class)
+		}
+	}
+	slices.Sort(dst.Classes)
 }
 
 // CleanName normalises a museum name for storage and display.

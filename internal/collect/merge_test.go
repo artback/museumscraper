@@ -58,6 +58,37 @@ func TestMerger_MergesOnWikidataID(t *testing.T) {
 	}
 }
 
+func TestMerger_UnionsClasses(t *testing.T) {
+	m := NewMerger()
+
+	m.Add(models.Museum{
+		Name: "Bohuslän", Country: "Sweden", WikidataID: "Q10659234",
+		Classes: []string{"steamboat", "working life museum"},
+		Sources: []string{"wikidata"},
+	})
+	// A source that classifies differently, and one that does not classify at
+	// all. Neither may erase what the first established — the OpenStreetMap and
+	// Wikipedia crawls supply no classes, and they run last as often as not.
+	m.Add(models.Museum{
+		Name: "S/S Bohuslän", Country: "Sweden", WikidataID: "Q10659234",
+		Classes: []string{"passenger ship", "steamboat"},
+		Sources: []string{"osm"},
+	})
+	m.Add(models.Museum{
+		Name: "Bohuslän", Country: "Sweden", WikidataID: "Q10659234",
+		Sources: []string{"wikipedia-category"},
+	})
+
+	museums := m.Museums()
+	if len(museums) != 1 {
+		t.Fatalf("got %d museums, want 1: %+v", len(museums), museums)
+	}
+	want := []string{"passenger ship", "steamboat", "working life museum"}
+	if got := museums[0].Classes; !slices.Equal(got, want) {
+		t.Errorf("Classes = %v, want %v", got, want)
+	}
+}
+
 func TestMerger_MergesOnNameAndCountry(t *testing.T) {
 	m := NewMerger()
 
@@ -266,5 +297,57 @@ func TestMerger_CleansNamesOnEntry(t *testing.T) {
 	got := m.Museums()[0].Name
 	if got != "Riedmuseum Ottersdorf" {
 		t.Errorf("stored name = %q, want it cleaned on the way in", got)
+	}
+}
+
+func TestMerger_GenericAliasDoesNotFuseDistinctMuseums(t *testing.T) {
+	m := NewMerger()
+
+	// Two real Italian museums, each of which answers to "Museo civico" — the
+	// generic name dozens of them share. They are 335 km apart and Wikidata
+	// gives them different ids.
+	m.Add(models.Museum{Name: "Bassano Civic Museum", Country: "Italy", WikidataID: "Q18670440",
+		AlsoKnownAs: []string{"Museo civico"}, Sources: []string{"wikidata"}})
+	m.Add(models.Museum{Name: "Piacenza Civic Museum", Country: "Italy", WikidataID: "Q18753616",
+		AlsoKnownAs: []string{"Museo civico"}, Sources: []string{"wikidata"}})
+
+	// A third record, read off a list page, carrying that generic name and no
+	// Wikidata id of its own. It must not be folded into either: the id check
+	// cannot stop it, because this record has no id to disagree with.
+	m.Add(models.Museum{Name: "Museo Civico", Country: "Italy", Sources: []string{"lists"}})
+
+	museums := m.Museums()
+	if len(museums) != 3 {
+		t.Fatalf("got %d museums, want 3 — a shared alias fused distinct records: %+v",
+			len(museums), museums)
+	}
+	for _, got := range museums {
+		if got.WikidataID == "Q18670440" && slices.Contains(got.Sources, "lists") {
+			t.Error("the nameless record was merged into Bassano on a generic alias")
+		}
+	}
+}
+
+func TestMerger_StillMergesOnADistinctiveAlias(t *testing.T) {
+	m := NewMerger()
+
+	// The cross-language case the alias matching exists for: one source knows
+	// the museum by its English name and lists the German one, another stores
+	// the German name on its own. Only one museum answers to it, so it is
+	// evidence.
+	m.Add(models.Museum{Name: "MAK – Museum of Applied Arts", Country: "Austria", WikidataID: "Q478455",
+		AlsoKnownAs: []string{"Museum für angewandte Kunst Wien"}, Sources: []string{"wikidata"}})
+	m.Add(models.Museum{Name: "Museum für angewandte Kunst Wien", Country: "Austria",
+		Website: "https://www.mak.at", Sources: []string{"wikipedia-list"}})
+
+	museums := m.Museums()
+	if len(museums) != 1 {
+		t.Fatalf("got %d museums, want 1: %+v", len(museums), museums)
+	}
+	if museums[0].Website != "https://www.mak.at" {
+		t.Errorf("the merge did not enrich the record: %+v", museums[0])
+	}
+	if !slices.Contains(museums[0].Sources, "wikipedia-list") {
+		t.Errorf("Sources = %v, want both", museums[0].Sources)
 	}
 }

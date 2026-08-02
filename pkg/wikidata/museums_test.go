@@ -1,7 +1,10 @@
 package wikidata
 
 import (
+	"slices"
 	"testing"
+
+	"museum/internal/models"
 )
 
 func TestParsePoint(t *testing.T) {
@@ -132,6 +135,75 @@ func TestMuseumsFromRows_SkipsUnlabelledEntities(t *testing.T) {
 	}
 	if museums[0].Name != "Real Museum" {
 		t.Errorf("Name = %q", museums[0].Name)
+	}
+}
+
+func TestClassIDsFromRows(t *testing.T) {
+	// The class query pairs each museum with each of its P31 values, so a
+	// museum ship arrives as several rows. The OPTIONAL that keeps the query
+	// off a full P31 scan also lets a museum come back with no class at all.
+	rows := []binding{
+		{"item": "http://www.wikidata.org/entity/Q10659234", "class": "http://www.wikidata.org/entity/Q178193"},
+		{"item": "http://www.wikidata.org/entity/Q10659234", "class": "http://www.wikidata.org/entity/Q2055880"},
+		{"item": "http://www.wikidata.org/entity/Q10659234", "class": "http://www.wikidata.org/entity/Q10416961"},
+		// Repeated by a second path through the data; it must not be stored twice.
+		{"item": "http://www.wikidata.org/entity/Q10659234", "class": "http://www.wikidata.org/entity/Q178193"},
+		{"item": "http://www.wikidata.org/entity/Q23402", "class": "http://www.wikidata.org/entity/Q207694"},
+		{"item": "http://www.wikidata.org/entity/Q999"},
+	}
+
+	ids := classIDsFromRows(rows)
+
+	want := []string{"Q178193", "Q2055880", "Q10416961"}
+	if got := ids["Q10659234"]; !slices.Equal(got, want) {
+		t.Errorf("classes = %v, want %v", got, want)
+	}
+	if got := ids["Q23402"]; !slices.Equal(got, []string{"Q207694"}) {
+		t.Errorf("classes = %v", got)
+	}
+	// An item row with no class is not an item with an empty class.
+	if _, present := ids["Q999"]; present {
+		t.Errorf("an unclassified museum should contribute no entry, got %v", ids["Q999"])
+	}
+}
+
+func TestAttachClasses(t *testing.T) {
+	museums := []models.Museum{
+		{Name: "Bohuslän", WikidataID: "Q10659234"},
+		{Name: "Musée d'Orsay", WikidataID: "Q23402"},
+		{Name: "No Wikidata id"},
+	}
+
+	attachClasses(museums, map[string][]string{
+		"Q10659234": {"steamboat", "passenger ship", "working life museum"},
+		// A class for a museum that is not on this page must not be attached to
+		// anything.
+		"Q7": {"art museum"},
+	})
+
+	// This is the case the whole change exists for: "Bohuslän" is also a Swedish
+	// province, and only the classes say the record is a ship.
+	want := []string{"steamboat", "passenger ship", "working life museum"}
+	if !slices.Equal(museums[0].Classes, want) {
+		t.Errorf("Classes = %v, want %v", museums[0].Classes, want)
+	}
+	if museums[1].Classes != nil {
+		t.Errorf("Classes = %v, want none", museums[1].Classes)
+	}
+	if museums[2].Classes != nil {
+		t.Errorf("Classes = %v, want none", museums[2].Classes)
+	}
+}
+
+func TestAttachClasses_NoClassesLeavesMuseumsIntact(t *testing.T) {
+	// A failed class query returns nil, which must cost the classes and not the
+	// museums — the whole reason the class query is a separate request.
+	museums := []models.Museum{{Name: "Bohuslän", WikidataID: "Q10659234", Website: "https://example.org"}}
+
+	attachClasses(museums, nil)
+
+	if len(museums) != 1 || museums[0].Website != "https://example.org" {
+		t.Errorf("museums = %+v, want them untouched", museums)
 	}
 }
 

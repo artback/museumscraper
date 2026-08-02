@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -36,9 +37,15 @@ func crawlCommand() Command {
 }
 
 func runCrawl(ctx context.Context, args []string) error {
-	fs := newFlagSet("crawl", "[-sources wikidata,category,lists,osm]", os.Stderr)
+	fs := newFlagSet("crawl", "[-sources wikidata,category,lists,osm] [-languages en,es,…]", os.Stderr)
 	sources := fs.String("sources", "wikidata,category,lists",
 		"comma-separated sources: wikidata, category, lists, osm")
+	// English only by default. Every extra edition is a full category walk and
+	// roughly doubles the crawl's Wikipedia traffic, so widening coverage is a
+	// decision to make deliberately rather than something a routine crawl does
+	// by accident. "all" is the shorthand for every edition known.
+	languages := fs.String("languages", wikipedia.DefaultLanguage,
+		"comma-separated Wikipedia editions for the category source, or \"all\"")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -49,6 +56,11 @@ func runCrawl(ctx context.Context, args []string) error {
 	enabled := parseSources(*sources)
 	if len(enabled) == 0 {
 		return fmt.Errorf("no valid sources selected in %q", *sources)
+	}
+
+	editions := parseLanguages(*languages)
+	if len(editions) == 0 {
+		return fmt.Errorf("no known Wikipedia editions selected in %q", *languages)
 	}
 
 	store, bucket, err := museumStore()
@@ -65,6 +77,9 @@ func runCrawl(ctx context.Context, args []string) error {
 
 	start := time.Now()
 	log.Printf("Crawling sources: %s", strings.Join(enabled, ", "))
+	if contains(enabled, "category") {
+		log.Printf("Wikipedia editions: %s", strings.Join(editions, ", "))
+	}
 
 	// The database is opened for the whole crawl so records can be made durable
 	// while they are still being collected. A crawl that cannot reach it still
@@ -74,7 +89,7 @@ func runCrawl(ctx context.Context, args []string) error {
 	defer saver.close()
 
 	merger := collect.NewMerger()
-	collectSources(ctx, enabled, merger, saver.add)
+	collectSources(ctx, enabled, editions, merger, saver.add)
 	saver.flush()
 
 	distinct, folded := merger.Stats()
@@ -327,6 +342,19 @@ func loadIntoDatabase(ctx context.Context, museums []models.Museum) {
 	if variants > 0 {
 		log.Printf("Merged %d museums recorded under more than one name", variants)
 	}
+
+	// The same museum stored under its name in two languages, which neither of
+	// the merges above can see: they compare names, and a translation shares no
+	// words with its original. Run last, so it works on a catalogue the other
+	// two have already tidied.
+	aliases, err := db.MergeAliasVariants(ctx)
+	if err != nil {
+		log.Printf("Alias-variant merge failed: %v (records are intact)", err)
+		return
+	}
+	if aliases > 0 {
+		log.Printf("Merged %d museums recorded under a name another row already knew", aliases)
+	}
 }
 
 // collectSources runs every enabled source concurrently and feeds the merger.
@@ -335,27 +363,160 @@ func loadIntoDatabase(ctx context.Context, museums []models.Museum) {
 //
 // Each museum is also handed to onMuseum as it arrives, so the caller can make
 // it durable without waiting for every source to finish.
-func collectSources(ctx context.Context, enabled []string, merger *collect.Merger, onMuseum func(models.Museum)) {
+//
+// The category source runs once per language edition. Those crawls are the only
+// way to reach the museums English Wikipedia has no article for, which is most
+// of them: 35,352 against 19,802.
+func collectSources(ctx context.Context, enabled, languages []string, merger *collect.Merger, onMuseum func(models.Museum)) {
 	var wg sync.WaitGroup
 
 	// One Wikipedia client for every source that needs one, so they share both
 	// the rate limiter and the connection pool.
 	wiki := wikipedia.NewClient()
 
-	for _, name := range enabled {
+	run := func(label string, stream func() <-chan models.Museum) {
 		wg.Add(1)
-		go func(name string) {
+		go func() {
 			defer wg.Done()
-
-			for museum := range museumsFrom(ctx, name, wiki) {
+			for museum := range stream() {
 				merger.Add(museum)
 				onMuseum(museum)
 			}
-			log.Printf("source %q finished", name)
-		}(name)
+			log.Printf("source %q finished", label)
+		}()
+	}
+
+	for _, name := range enabled {
+		if name != "category" {
+			run(name, func() <-chan models.Museum { return museumsFrom(ctx, name, wiki) })
+			continue
+		}
+		for _, lang := range languages {
+			root, ok := wikipedia.RootCategoryFor(lang)
+			if !ok {
+				log.Printf("no museum category root known for %q, skipping that edition", lang)
+				continue
+			}
+			run("category:"+lang, func() <-chan models.Museum {
+				svc := wikipedia.NewCategoryService(wikipedia.NewLanguageClient(lang))
+				stream := wikipedia.NewCategoryCrawler(svc).Museums(ctx, root)
+				if lang == wikipedia.DefaultLanguage {
+					return stream
+				}
+				return englishNormalized(ctx, stream)
+			})
+		}
 	}
 
 	wg.Wait()
+}
+
+// normalizeBatch is how many records are held back to be normalised together.
+// Each batch costs one Wikidata request, so the size trades round trips against
+// how long a record waits before it can be checkpointed.
+const normalizeBatch = 200
+
+// englishNormalized restates records from a non-English edition in the terms the
+// rest of the catalogue uses.
+//
+// A Spanish crawl finds real museums, but it describes them in Spanish and files
+// them under "Categoría:Museos de Alemania", so the country arrives as
+// "Alemania". Nothing downstream can work with that: the country is a grouping
+// key, the duplicate merger compares it, and the geographic checks look it up in
+// an English gazetteer. The same museum found by the English crawl and by the
+// Spanish one would not even be recognised as one record.
+//
+// Every article carries a Wikidata id, and Wikidata states the country as an
+// entity rather than a word, so resolving through it produces exactly the shape
+// the English crawl produces — without translating anything, and without a
+// second gazetteer per language.
+//
+// The museum's own name is not replaced unless Wikidata has an English label for
+// it, and for a museum that label is almost always the real name rather than a
+// translation. The edition's own title is kept as an alias either way, because
+// it is the name the museum is known by locally and losing it would make the
+// record unfindable to anyone searching in that language.
+//
+// A record with no Wikidata id, or a lookup that fails, passes through unchanged
+// rather than being dropped. It is then a record in Spanish, which is worse than
+// one in English and far better than none.
+func englishNormalized(ctx context.Context, in <-chan models.Museum) <-chan models.Museum {
+	out := make(chan models.Museum)
+
+	go func() {
+		defer close(out)
+
+		svc := wikidata.NewService(wikidata.NewClient())
+		batch := make([]models.Museum, 0, normalizeBatch)
+
+		flush := func() bool {
+			if len(batch) == 0 {
+				return true
+			}
+			ids := make([]string, 0, len(batch))
+			for _, m := range batch {
+				if m.WikidataID != "" {
+					ids = append(ids, m.WikidataID)
+				}
+			}
+			details, err := svc.Details(ctx, ids)
+			if err != nil {
+				log.Printf("normalising to English failed for %d records: %v", len(batch), err)
+			}
+			for _, m := range batch {
+				select {
+				case out <- applyDetails(m, details[m.WikidataID]):
+				case <-ctx.Done():
+					return false
+				}
+			}
+			batch = batch[:0]
+			return true
+		}
+
+		for museum := range in {
+			batch = append(batch, museum)
+			if len(batch) >= normalizeBatch && !flush() {
+				return
+			}
+		}
+		flush()
+	}()
+
+	return out
+}
+
+// applyDetails restates one record in English, keeping whatever the edition
+// supplied where Wikidata has nothing better.
+func applyDetails(m models.Museum, d wikidata.Details) models.Museum {
+	if d.Label != "" && d.Label != m.Name {
+		// The local name becomes an alias rather than being discarded: it is
+		// how the museum is known where it stands, and the merger and the
+		// search index both use aliases.
+		if !slices.Contains(m.AlsoKnownAs, m.Name) {
+			m.AlsoKnownAs = append(m.AlsoKnownAs, m.Name)
+		}
+		m.Name = d.Label
+	}
+	// Country is replaced, not gap-filled: the value already there was inferred
+	// from a category title in another language, and that is the thing being
+	// corrected.
+	if d.Country != "" {
+		m.Country = d.Country
+	}
+	if d.Description != "" {
+		m.Description = d.Description
+	}
+	if m.Locality == "" {
+		m.Locality = d.Locality
+	}
+	if len(m.Classes) == 0 {
+		m.Classes = d.Classes
+	}
+	if d.Sitelinks > m.Sitelinks {
+		m.Sitelinks = d.Sitelinks
+	}
+	return m
 }
 
 // museumsFrom starts the named source and returns its stream.
@@ -389,6 +550,30 @@ func museumsFrom(ctx context.Context, name string, wiki *wikipedia.Client) <-cha
 		close(closed)
 		return closed
 	}
+}
+
+// parseLanguages validates and de-duplicates the -languages flag, keeping only
+// editions the category crawl knows a root category for.
+func parseLanguages(raw string) []string {
+	if strings.EqualFold(strings.TrimSpace(raw), "all") {
+		return wikipedia.Languages()
+	}
+
+	var editions []string
+	for _, lang := range strings.Split(raw, ",") {
+		lang = strings.ToLower(strings.TrimSpace(lang))
+		switch {
+		case lang == "":
+		case contains(editions, lang):
+		default:
+			if _, known := wikipedia.RootCategoryFor(lang); !known {
+				log.Printf("ignoring unknown Wikipedia edition %q", lang)
+				continue
+			}
+			editions = append(editions, lang)
+		}
+	}
+	return editions
 }
 
 // parseSources validates and de-duplicates the -sources flag.
