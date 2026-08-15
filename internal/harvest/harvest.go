@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	"museum/pkg/extract"
+	"github.com/artback/museumscraper/extract"
 )
 
 // Fetcher retrieves a page as a browser would see it.

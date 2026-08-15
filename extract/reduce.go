@@ -14,8 +14,8 @@ import (
 // Reducer compresses a fetched page into a structural sketch small enough to
 // put in a prompt.
 //
-// A museum listing page is commonly half a megabyte, of which the part that
-// tells a model where the data is amounts to a few hundred bytes. The rest is
+// A listing page is commonly half a megabyte, of which the part that tells a
+// model where the data is amounts to a few hundred bytes. The rest is
 // inline scripts, base64 images, styling, tracking, and — most of all — the
 // same row repeated two hundred times. A list of two hundred identical rows
 // teaches a model nothing the first three do not, and costs context that would
@@ -25,8 +25,8 @@ import (
 // written against, discard everything else.
 type Reducer struct {
 	// MaxTextRunes truncates each text node. Enough to recognise a title and
-	// see the shape of a date; not enough to paste in an exhibition's
-	// catalogue essay.
+	// see the shape of a date; not enough to paste in an entry's full
+	// description.
 	//
 	// Text is the single largest category in a reduced page, and the model is
 	// being shown where data lives rather than asked to read it: a title is
@@ -129,7 +129,7 @@ var droppedElements = map[string]bool{
 	"source": true, "track": true, "link": true, "br": true, "symbol": true,
 
 	// Chrome. A site's menu is the largest repeated structure on most pages
-	// and contains no data: on one museum's listing page the reduction spent
+	// and contains no data: on one measured listing page the reduction spent
 	// its first 160 lines on head metadata and navigation, reached the actual
 	// listing at line 164, and was then truncated part-way through a second
 	// menu — so the model paid the full token budget to see the page's
@@ -234,7 +234,7 @@ func (s *sketch) writeNode(node *html.Node, depth int) {
 	//
 	// Modern pages nest a dozen anonymous divs around every piece of content
 	// for layout. Each costs a line, an indent and a tag name, and tells a
-	// model nothing it can select on — one museum's listing page spent 139
+	// model nothing it can select on — one measured listing page spent 139
 	// lines on them. Where such an element has no attributes worth keeping and
 	// exactly one element child, it is elided and the child takes its place.
 	if attributes == "" && onlyChild(node) != nil {
@@ -267,7 +267,7 @@ func (s *sketch) writeHead(node *html.Node, depth int) {
 // extraction wants.
 //
 // A WordPress site with Yoast declares a WebSite, a CollectionPage, a
-// BreadcrumbList and an ImageObject on every page. On one museum that
+// BreadcrumbList and an ImageObject on every page. On one measured page that
 // boilerplate filled the entire JSON-LD budget and was truncated before
 // reaching anything else — so a signal the reducer keeps precisely because it
 // is exact was, in practice, pure cost.
@@ -551,7 +551,7 @@ var utilityClass = func() func(string) bool {
 
 // truncateRunes shortens a string to at most n runes, marking that it was cut.
 // It counts runes rather than bytes because a cut mid-rune would put invalid
-// UTF-8 into a prompt, and museum listings are full of multi-byte characters.
+// UTF-8 into a prompt, and real pages are full of multi-byte characters.
 func truncateRunes(s string, n int) string {
 	if n <= 0 {
 		return s

@@ -28,9 +28,9 @@ type History struct {
 	// once, at generation, and versions are immutable — so the first cosmetic
 	// change a still-working extractor survives makes every later run report
 	// drift forever. That matters because drift is what turns an ordinary
-	// seasonal dip into grounds for healing: a museum going from twenty shows
-	// to four would be graded suspect, read as a partial break, regenerated,
-	// honestly re-extract four, and be quarantined for it.
+	// seasonal dip into grounds for regeneration: a source going from twenty
+	// entries to four would be graded suspect, read as a partial break,
+	// regenerated, honestly re-extract four, and be quarantined for it.
 	Fingerprint string
 
 	// Complete reports that the history was read in full. A read that failed,

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"museum/pkg/extract"
+	"github.com/artback/museumscraper/extract"
 )
 
 // memory is an in-memory Archive, so the loop can be exercised against

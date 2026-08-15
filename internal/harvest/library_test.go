@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"museum/pkg/extract"
+	"github.com/artback/museumscraper/extract"
 )
 
 // libraryRun executes a script with the exhibitions library installed, at a

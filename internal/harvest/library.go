@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/artback/museumscraper/extract"
 	"museum/pkg/exhibitions"
-	"museum/pkg/extract"
 )
 
 // ExhibitionLibrary is the standard library generated museum extractors get.

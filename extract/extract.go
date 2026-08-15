@@ -1,37 +1,3 @@
-// Package extract compiles a web page and a declared schema into durable,
-// executable extraction logic, and keeps that logic working as the page
-// changes.
-//
-// The problem it answers is the one pkg/exhibitions demonstrates at length:
-// hand-written extraction is tedious to write, worse to maintain, and fails
-// silently. A site rearranges its markup, the selectors stop matching, and the
-// result is an empty list — indistinguishable, downstream, from a museum with
-// nothing on show. The alternative of asking a language model to read every
-// page on every run is slow, expensive, non-deterministic and unauditable.
-//
-// So the model is used as a compiler rather than as a runtime. It inspects a
-// page once and emits a script; every subsequent run executes that script with
-// no model involved, deterministically and for free. The model is re-invoked
-// only when a run has produced evidence that the script has stopped working.
-//
-// Three properties make that safe enough to run unattended:
-//
-// The generated script is JavaScript executed in a bare goja interpreter with a
-// read-only DOM and nothing else. There is no fetch, no XMLHttpRequest, no
-// require, no process, no timers and no console, because none of those exist in
-// an empty interpreter — they are absent by construction rather than forbidden
-// by instruction, which is the only form of that guarantee worth having when
-// the code was written by a model.
-//
-// Nothing is stored until it has been tried. A generated script is run against
-// the very page that produced it and validated before it is allowed to replace
-// anything, so an artifact that cannot extract its own source page never
-// reaches the store.
-//
-// Every run is graded, and a grade of anything but pass withholds the data.
-// Structural validity alone is never enough: a page that silently drops from
-// two hundred rows to three yields three perfectly well-formed records, and
-// only a count compared against this source's own history catches it.
 package extract
 
 import (
@@ -131,8 +97,8 @@ type Field struct {
 	Kind Kind `json:"kind"`
 	// Description tells the model what the field means. It is the only part of
 	// the schema written for the model rather than for the validator, and it
-	// is worth writing well: it is what distinguishes an exhibition's opening
-	// date from the date the page was published.
+	// is worth writing well: it is what distinguishes the date an event starts
+	// from the date the page describing it was published.
 	Description string `json:"description,omitempty"`
 	// Required means a record missing this field, or carrying it empty, is not
 	// a record at all and is dropped.
@@ -372,17 +338,17 @@ func (s Source) Validate() error {
 // internalHost reports whether a URL names an address on the host or its
 // private network by literal IP.
 //
-// Museum websites arrive from OpenStreetMap and Wikidata, both world-editable,
-// and the Pi this runs on shares a network with sixteen other services. A
-// source URL is the one field of a museum record that is dereferenced, so a
-// literal private address in it is worth refusing at definition time.
+// A source URL is dereferenced by whatever fetches for this package, and it
+// often arrives from data someone else can edit. A literal private or loopback
+// address in one is worth refusing when the source is defined rather than
+// discovering what it reached afterwards.
 //
 // It is deliberately narrow, and does not resolve names. Resolving would make
 // validation depend on DNS at definition time, non-deterministic, and offline
 // tests impossible — and it would still not close the hole, since a name can
 // resolve differently later and a redirect is not checked here at all. The
-// complete fix is a dialler control on the fetcher, which is shared with the
-// catalogue's own crawler and is a wider change than this; see the README.
+// complete fix is a dialler control on whatever HTTP client fetches pages,
+// which is the caller's to install: this package does no I/O.
 //
 // Carrier-grade NAT (100.64.0.0/10) is deliberately NOT refused: that is
 // Tailscale's range, and the operator reaches their own deployment over it.
@@ -430,9 +396,9 @@ type Provenance struct {
 	// PageDigest identifies the page snapshot the script was written against.
 	PageDigest string `json:"page_digest"`
 	// Library names the standard library the script was generated and trialled
-	// against, so a script that throws "museum is not defined" on a runner
-	// configured without it says why rather than looking like a broken
-	// extractor and spending a heal to rediscover itself.
+	// against, so a script that throws a ReferenceError on a runner configured
+	// without that library says why, rather than looking like a broken
+	// extractor and spending a regeneration to rediscover itself.
 	Library string `json:"library,omitempty"`
 	// Attempts is how many generations were tried before one passed its trial.
 	Attempts int `json:"attempts"`

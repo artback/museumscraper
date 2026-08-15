@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/artback/museumscraper/extract"
 	"museum/pkg/exhibitions"
-	"museum/pkg/extract"
 	"museum/pkg/model"
 )
 

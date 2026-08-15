@@ -10,26 +10,26 @@ import (
 	"time"
 )
 
-// listingPage is the shape a museum programme page actually takes: a repeated
+// listingPage is the shape a listing page actually takes: a repeated
 // row carrying a title, a relative link, and machine-readable dates in a
 // datetime attribute next to human-readable ones in the text.
 const listingPage = `<!doctype html>
-<html><head><title>What's On — Example Museum</title>
+<html><head><title>What's On — Example Site</title>
 <script>var tracking = {visitors: 12};</script>
-<style>.exhibition { color: red }</style>
+<style>.entry { color: red }</style>
 </head><body>
 <nav><a href="/">Home</a><a href="/whats-on">What's On</a></nav>
 <main>
-  <ul class="exhibitions">
-    <li class="exhibition" data-entry-id="a1">
+  <ul class="listings">
+    <li class="listing" data-entry-id="a1">
       <h3 class="title">Bronze Age Britain</h3>
-      <a class="more" href="/exhibitions/bronze-age">Find out more</a>
+      <a class="more" href="/listings/bronze-age">Find out more</a>
       <time class="from" datetime="2026-09-01">1 September</time>
       <time class="to" datetime="2027-01-15">15 January</time>
     </li>
-    <li class="exhibition" data-entry-id="a2">
+    <li class="listing" data-entry-id="a2">
       <h3 class="title">Silk Roads</h3>
-      <a class="more" href="/exhibitions/silk-roads">Find out more</a>
+      <a class="more" href="/listings/silk-roads">Find out more</a>
       <time class="from" datetime="2026-10-12">12 October</time>
       <time class="to" datetime="2027-02-28">28 February</time>
     </li>
@@ -39,7 +39,7 @@ const listingPage = `<!doctype html>
 
 // listingScript is what a well-behaved generated artifact looks like.
 const listingScript = `function extract(document) {
-  return [...document.querySelectorAll('li.exhibition')].map(row => ({
+  return [...document.querySelectorAll('li.listing')].map(row => ({
     title: row.querySelector('h3.title').innerText,
     url:   row.querySelector('a.more').href,
     opens: row.querySelector('time.from').getAttribute('datetime'),
@@ -77,7 +77,7 @@ func TestSandboxRun(t *testing.T) {
 	}
 	// The href in the markup is relative; the DOM resolves it as a browser
 	// would, so the artifact never has to know the page's own address.
-	if got, _ := first.String("url"); got != "https://example.org/exhibitions/bronze-age" {
+	if got, _ := first.String("url"); got != "https://example.org/listings/bronze-age" {
 		t.Errorf("record[0].url = %q, want the absolute URL", got)
 	}
 	if got, _ := first.String("opens"); got != "2026-09-01" {
@@ -115,10 +115,10 @@ func TestSandboxHasNoCapabilities(t *testing.T) {
 // appeared to succeed would only mislead whoever reviewed the artifact.
 func TestSandboxDocumentIsReadOnly(t *testing.T) {
 	const script = `function extract(document) {
-	  const row = document.querySelector('li.exhibition');
+	  const row = document.querySelector('li.listing');
 	  let threw = false;
 	  try { row.textContent = 'nonsense'; } catch (e) { threw = true; }
-	  return [{after: document.querySelector('li.exhibition h3').innerText, threw: threw}];
+	  return [{after: document.querySelector('li.listing h3').innerText, threw: threw}];
 	}`
 
 	out, err := run(t, script)
@@ -230,8 +230,8 @@ func TestSandboxCapsRecords(t *testing.T) {
 // otherwise be false.
 func TestSandboxElementIdentity(t *testing.T) {
 	const script = `function extract(document) {
-	  const a = document.querySelector('li.exhibition');
-	  const b = document.querySelectorAll('li.exhibition')[0];
+	  const a = document.querySelector('li.listing');
+	  const b = document.querySelectorAll('li.listing')[0];
 	  return [{same: a === b, viaParent: a.querySelector('h3').parentElement === a}];
 	}`
 
@@ -305,7 +305,7 @@ func TestSandboxNormalisesNumbers(t *testing.T) {
 
 func TestSandboxCapturesConsole(t *testing.T) {
 	const script = `function extract(document) {
-	  console.log("rows", document.querySelectorAll('li.exhibition').length);
+	  console.log("rows", document.querySelectorAll('li.listing').length);
 	  return [{title: "one"}];
 	}`
 

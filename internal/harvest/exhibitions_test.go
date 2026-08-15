@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/artback/museumscraper/extract"
 	"museum/internal/models"
-	"museum/pkg/extract"
 )
 
 func TestExhibitionSchemaIsValid(t *testing.T) {

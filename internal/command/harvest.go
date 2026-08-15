@@ -12,10 +12,10 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/artback/museumscraper/extract"
 	"museum/internal/env"
 	"museum/internal/harvest"
 	"museum/pkg/exhibitions"
-	"museum/pkg/extract"
 	"museum/pkg/graceful"
 	"museum/pkg/model"
 )

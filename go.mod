@@ -3,6 +3,7 @@ module museum
 go 1.25.0
 
 require (
+	github.com/artback/museumscraper/extract v0.0.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
 	github.com/minio/minio-go/v7 v7.0.95
@@ -36,3 +37,7 @@ require (
 	golang.org/x/sync v0.17.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
 )
+
+// The extraction harness is its own module, usable without the catalogue.
+// Replaced rather than version-pinned because it lives in this repository.
+replace github.com/artback/museumscraper/extract => ./extract

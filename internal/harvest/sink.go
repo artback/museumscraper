@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"time"
 
-	"museum/pkg/extract"
+	"github.com/artback/museumscraper/extract"
 )
 
 // Sink delivers validated output.

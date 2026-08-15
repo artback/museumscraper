@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/artback/museumscraper/extract"
 	"museum/internal/storage"
-	"museum/pkg/extract"
 )
 
 // Key layout under the bucket. Artifacts are versioned in their own directory

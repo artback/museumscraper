@@ -889,6 +889,7 @@ Every external API is called with a descriptive User-Agent, a client-side rate l
 ## Repository layout
 
 ```
+extract/               a module of its own - the extraction harness, usable alone
 cmd/museum/            the only binary; dispatches to subcommands
 internal/
   command/             one file per subcommand
@@ -910,8 +911,7 @@ pkg/
   wikipedia/           API client, wikitext/table parsing, classification
   osm/                 Overpass client
   exhibitions/         museum-website scraper
-  extract/             generated extractors: reduce, generate, sandbox, validate, heal
-  model/               local language-model client
+  model/               language-model clients: a local server, and the Claude Code CLI
   location/            Nominatim client
   geo/                 country recognition, ISO codes
   kafkaclient/         consumer with explicit offset commits

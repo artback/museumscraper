@@ -25,7 +25,7 @@ Answer with a single JSON object and nothing else:
 {"plausible": true, "reason": ""}
 
 Set plausible to false only when the records are clearly the wrong kind of
-thing — gift shop products where exhibitions were wanted, navigation labels,
+thing — shop products where event listings were wanted, navigation labels,
 cookie notices. When in doubt, answer true: cheaper checks have already
 passed, and withholding correct data is the more expensive mistake.
 

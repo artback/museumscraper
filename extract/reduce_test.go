@@ -12,13 +12,13 @@ import (
 func bigListing(rows int) string {
 	var b strings.Builder
 	b.WriteString(`<!doctype html><html><head><title>What's On</title>`)
-	b.WriteString(`<style>` + strings.Repeat(".exhibition{color:red}", 200) + `</style>`)
+	b.WriteString(`<style>` + strings.Repeat(".listing{color:red}", 200) + `</style>`)
 	b.WriteString(`<script>var analytics=` + strings.Repeat(`"padding",`, 500) + `1;</script>`)
-	b.WriteString(`</head><body><main><ul class="exhibitions">`)
+	b.WriteString(`</head><body><main><ul class="listings">`)
 	for i := range rows {
-		fmt.Fprintf(&b, `<li class="exhibition" data-id="%d">`+
+		fmt.Fprintf(&b, `<li class="listing" data-id="%d">`+
 			`<h3 class="title">Exhibition %d</h3>`+
-			`<a href="/exhibitions/%d?utm_source=nav&utm_campaign=whats-on">Find out more</a>`+
+			`<a href="/listings/%d?utm_source=nav&utm_campaign=whats-on">Find out more</a>`+
 			`<time datetime="2026-09-%02d">1 September</time>`+
 			`</li>`, i, i, i, i%28+1)
 	}
@@ -36,7 +36,7 @@ func TestReduceCollapsesRepeatedRows(t *testing.T) {
 		t.Errorf("Reduce() kept %d rows, want %d:\n%s",
 			strings.Count(got.Text, `<h3 class="title">`), DefaultMaxRepeats, got.Text)
 	}
-	if !strings.Contains(got.Text, "197 more li.exhibition") {
+	if !strings.Contains(got.Text, "197 more li.listing") {
 		t.Errorf("Reduce() did not summarise the collapsed rows:\n%s", got.Text)
 	}
 
@@ -51,7 +51,7 @@ func TestReduceCollapsesRepeatedRows(t *testing.T) {
 	if strings.Contains(got.Text, "utm_source") {
 		t.Errorf("Reduce() kept query-string tracking:\n%s", got.Text)
 	}
-	if !strings.Contains(got.Text, `href="/exhibitions/0?…"`) {
+	if !strings.Contains(got.Text, `href="/listings/0?…"`) {
 		t.Errorf("Reduce() lost the link path:\n%s", got.Text)
 	}
 
@@ -68,12 +68,12 @@ func TestReduceKeepsJSONLD(t *testing.T) {
 	const page = `<html><head>
 	<script>var tracking = 1;</script>
 	<script type="application/ld+json">
-	{"@type":"ExhibitionEvent","name":"Silk Roads","startDate":"2026-10-12"}
+	{"@type":"Event","name":"Silk Roads","startDate":"2026-10-12"}
 	</script></head><body><p>Hello</p></body></html>`
 
 	got := NewReducer().Reduce(testPage(t, page))
 
-	if !strings.Contains(got.Text, "ExhibitionEvent") {
+	if !strings.Contains(got.Text, "Event") {
 		t.Errorf("Reduce() dropped a JSON-LD declaration:\n%s", got.Text)
 	}
 	if strings.Contains(got.Text, "var tracking") {
@@ -112,7 +112,7 @@ func TestReduceRespectsByteCap(t *testing.T) {
 
 func TestFingerprintIgnoresContent(t *testing.T) {
 	// The same page with three entries and with two hundred. A fingerprint
-	// that changed here would report drift every time a museum's programme
+	// that changed here would report drift every time a site's listing
 	// turned over, which is the commonest thing that happens to these pages
 	// and the one thing that is not a layout change.
 	few := Fingerprint(testPage(t, bigListing(3)))
@@ -133,8 +133,8 @@ func TestFingerprintDetectsLayoutChange(t *testing.T) {
 	// The site rebuilds its listing with different markup: the change that
 	// actually breaks an artifact.
 	redesigned := strings.NewReplacer(
-		`ul class="exhibitions"`, `div class="programme-grid"`,
-		`li class="exhibition"`, `article class="card"`,
+		`ul class="listings"`, `div class="programme-grid"`,
+		`li class="listing"`, `article class="card"`,
 		`h3 class="title"`, `h2 class="card__heading"`,
 	).Replace(bigListing(20))
 
@@ -175,9 +175,9 @@ func TestDriftedWithMissingFingerprint(t *testing.T) {
 // TestSimilarity covers the gate that decides whether one site's extractor may
 // be tried on another.
 //
-// Validation alone cannot be that gate. An extractor generated for Textilmuseet
-// was measured extracting four records from Arbetets museum and grading pass,
-// where that museum's own extractor found twenty-four — a first run has no
+// Validation alone cannot be that gate. An extractor generated for one site
+// was measured extracting four records from another and grading pass,
+// where that site's own extractor found twenty-four — a first run has no
 // volumetric baseline, so nothing in the ladder sees the missing eighty-three
 // per cent. Structural similarity is what separates "the same page shape, so
 // the same selectors mean the same thing" from "different page, matched by
@@ -195,7 +195,7 @@ func TestSimilarity(t *testing.T) {
 	// realistically on purpose — on a page of only a few elements the shared
 	// html/body skeleton is most of the paths and every pair scores high, which
 	// is why this measure is only meaningful on real pages. The five live
-	// museum sites score 0.00 to 0.02 against each other.
+	// sites score 0.00 to 0.02 against each other.
 	var b strings.Builder
 	b.WriteString(`<!doctype html><html><head><title>Programme</title></head>`)
 	b.WriteString(`<body><div class="wrap"><section class="programme-grid">`)

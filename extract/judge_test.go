@@ -34,7 +34,7 @@ func TestModelJudge(t *testing.T) {
 			// as an error rather than as "implausible" keeps a formatting
 			// failure from being read as a fault in the data.
 			name:    "prose is an error, not a no",
-			answer:  "Yes, these look like exhibitions to me!",
+			answer:  "Yes, these look like entries to me!",
 			wantErr: true,
 		},
 	}
@@ -43,7 +43,7 @@ func TestModelJudge(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			judge := NewJudge(&scriptedModel{answers: []string{tt.answer}})
 
-			ok, reason, err := judge.Plausible(context.Background(), "exhibitions on show",
+			ok, reason, err := judge.Plausible(context.Background(), "entries on show",
 				[]Record{{"title": "Bronze Age Britain"}})
 
 			if gotErr := err != nil; gotErr != tt.wantErr {
@@ -71,7 +71,7 @@ func TestModelJudgeCapsTheSample(t *testing.T) {
 		records[i] = Record{"title": "Exhibition"}
 	}
 
-	if _, _, err := judge.Plausible(context.Background(), "exhibitions", records); err != nil {
+	if _, _, err := judge.Plausible(context.Background(), "listings", records); err != nil {
 		t.Fatalf("Plausible() error = %v", err)
 	}
 

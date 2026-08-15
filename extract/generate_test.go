@@ -51,12 +51,12 @@ func testGenerator(model Model) *Generator {
 // listingSource matches the fixture in sandbox_test.go.
 func listingSource() Source {
 	return Source{
-		Name:   "example-museum",
+		Name:   "example-source",
 		URL:    "https://example.org/whats-on",
 		Expect: Expectation{MinRecords: 1},
 		Schema: Schema{
-			Name:   "exhibitions",
-			Intent: "the exhibitions currently on show",
+			Name:   "listings",
+			Intent: "the events currently listed",
 			Fields: []Field{
 				{Name: "title", Kind: KindString, Required: true,
 					Rules: Rules{MinLength: 2, Placeholders: []string{"Find out more"}}},
@@ -110,7 +110,7 @@ func TestGenerateNeverStoresAnArtifactThatFailsItsOwnPage(t *testing.T) {
 	// rather than the heading, which is the classic selector-one-element-too-
 	// high mistake.
 	const wrong = `function extract(document) {
-	  return [...document.querySelectorAll('li.exhibition')].map(row => ({
+	  return [...document.querySelectorAll('li.listing')].map(row => ({
 	    title: row.querySelector('a.more').innerText,
 	    url: row.querySelector('a.more').href,
 	  }));
@@ -143,7 +143,7 @@ func TestGenerateNeverStoresAnArtifactThatFailsItsOwnPage(t *testing.T) {
 
 func TestGenerateRetriesOnBadEnvelope(t *testing.T) {
 	model := &scriptedModel{answers: []string{
-		"Sure! Here's a script that extracts the exhibitions:\n\n```js\nfunction extract(d){}\n```",
+		"Sure! Here's a script that extracts the entries:\n\n```js\nfunction extract(d){}\n```",
 		envelope(t, listingScript),
 	}}
 
@@ -188,14 +188,14 @@ func TestGenerateRejectsInvalidSource(t *testing.T) {
 }
 
 func TestHeal(t *testing.T) {
-	// The site has moved its listing from <li class="exhibition"> to
+	// The site has moved its listing from <li class="listing"> to
 	// <article class="card">, which is what a real redesign looks like.
 	const redesigned = `<html><body><main><div class="programme">
 	  <article class="card"><h2 class="card__heading">Bronze Age Britain</h2>
-	    <a class="card__link" href="/exhibitions/bronze-age">Find out more</a>
+	    <a class="card__link" href="/listings/bronze-age">Find out more</a>
 	    <time datetime="2026-09-01">1 September</time></article>
 	  <article class="card"><h2 class="card__heading">Silk Roads</h2>
-	    <a class="card__link" href="/exhibitions/silk-roads">Find out more</a>
+	    <a class="card__link" href="/listings/silk-roads">Find out more</a>
 	    <time datetime="2026-10-12">12 October</time></article>
 	</div></main></body></html>`
 
@@ -208,7 +208,7 @@ func TestHeal(t *testing.T) {
 	}`
 
 	previous := Artifact{
-		Source:      "example-museum",
+		Source:      "example-source",
 		Version:     4,
 		Script:      listingScript,
 		Fingerprint: "old",

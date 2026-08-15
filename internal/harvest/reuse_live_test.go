@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/artback/museumscraper/extract"
 	"museum/pkg/exhibitions"
-	"museum/pkg/extract"
 )
 
 // artifactDir points at a directory of .js extractors to cross-test.

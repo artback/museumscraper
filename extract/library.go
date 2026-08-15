@@ -11,13 +11,13 @@ import (
 
 // Library is a set of pure functions a generated script may call.
 //
-// It exists because the same knowledge was being rediscovered in every
-// artifact. Six extractors compiled for six museums each independently wrote a
-// Swedish month table, a parser for "t.o.m." and "från", and a whitespace
+// It exists because the same knowledge is otherwise rediscovered in every
+// artifact. Six extractors compiled for six sites in one language each
+// independently wrote a month-name table, a date-range parser and a whitespace
 // cleaner — hundreds of lines of the same thing, written slightly differently
 // every time, each version a fresh opportunity to get a leap year or an
 // en-dash wrong. That is the model paying for the same lesson repeatedly, and
-// the operator reviewing a different version of it in every heal diff.
+// a reviewer reading a different version of it in every regeneration diff.
 //
 // Putting it here inverts that. A helper is written once, tested once, and
 // improved once: adding a language to the shared date parser improves every

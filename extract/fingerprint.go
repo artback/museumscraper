@@ -144,8 +144,8 @@ func volatileClass(token string) bool {
 // their paths and score high; two unrelated sites score near zero.
 //
 // It exists to gate reuse of an extractor across sites. Validation alone is not
-// a safe gate: an extractor written against one museum was measured extracting
-// four records from another and grading pass, where the site's own extractor
+// a safe gate: an extractor written against one site was measured extracting
+// four records from another and grading pass, where that site's own extractor
 // found twenty-four. A first run has no volumetric baseline, so nothing in the
 // ladder can see that eighty-three per cent of the page was missed. Structural
 // similarity is the signal that distinguishes "the same page shape, so the same
@@ -156,7 +156,7 @@ func volatileClass(token string) bool {
 // distinct paths in a document, and a small page has few of them, so the
 // html/head/body skeleton every document shares is most of a synthetic
 // fixture's score and almost none of a real one's. Measured across five real
-// museum sites, every unrelated pair scored between 0.00 and 0.02 — so a gate
+// sites, every unrelated pair scored between 0.00 and 0.02 — so a gate
 // anywhere from 0.5 upward is safe on real input, and no threshold at all is
 // meaningful on a fixture of a dozen elements.
 func Similarity(a, b *Page) float64 {

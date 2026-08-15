@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/artback/museumscraper/extract"
 	"museum/internal/models"
 	"museum/pkg/exhibitions"
-	"museum/pkg/extract"
 )
 
 // ExhibitionSchema is the schema every generated museum extractor is compiled

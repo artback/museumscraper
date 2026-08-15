@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"museum/pkg/extract"
+	"github.com/artback/museumscraper/extract"
 )
 
 // Scheduler defaults.

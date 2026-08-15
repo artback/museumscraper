@@ -8,17 +8,17 @@ import (
 	"time"
 )
 
-// exhibitionSchema is the kind of schema an operator writes: required fields
+// ruledSchema is the kind of schema an operator writes: required fields
 // that make a record worth having, and rules that say what a plausible value
 // looks like.
-func exhibitionSchema() Schema {
+func ruledSchema() Schema {
 	return Schema{
-		Name:   "exhibitions",
-		Intent: "the exhibitions currently on show at this museum",
+		Name:   "listings",
+		Intent: "the events currently listed on this site",
 		Fields: []Field{
 			{
 				Name: "title", Kind: KindString, Required: true,
-				Description: "the exhibition's name",
+				Description: "the entry's name",
 				Rules: Rules{
 					MinLength: 2, MaxLength: 200,
 					Placeholders: []string{"Find out more", "Read more", "Book now", "More info"},
@@ -26,7 +26,7 @@ func exhibitionSchema() Schema {
 			},
 			{
 				Name: "url", Kind: KindURL, Required: true,
-				Description: "link to the exhibition's own page",
+				Description: "link to the entry's own page",
 			},
 			{
 				Name: "opens", Kind: KindDate,
@@ -39,11 +39,11 @@ func exhibitionSchema() Schema {
 
 func ptr[T any](v T) *T { return &v }
 
-func exhibitionSource() Source {
+func ruledSource() Source {
 	return Source{
-		Name:   "example-museum",
+		Name:   "example-source",
 		URL:    "https://example.org/whats-on",
-		Schema: exhibitionSchema(),
+		Schema: ruledSchema(),
 		Expect: Expectation{MinRecords: 1, Tolerance: 0.5},
 	}
 }
@@ -54,7 +54,7 @@ func goodRecords(n int) []Record {
 	for i := range n {
 		records = append(records, Record{
 			"title": "Exhibition " + string(rune('A'+i%26)),
-			"url":   "https://example.org/exhibitions/" + string(rune('a'+i%26)),
+			"url":   "https://example.org/listings/" + string(rune('a'+i%26)),
 			"opens": "2026-09-01",
 		})
 	}
@@ -68,7 +68,7 @@ func validateAt(t *testing.T, source Source, records []Record, history History) 
 }
 
 func TestValidatePasses(t *testing.T) {
-	got := validateAt(t, exhibitionSource(), goodRecords(20), History{Counts: []int{19, 21, 20}, Complete: true})
+	got := validateAt(t, ruledSource(), goodRecords(20), History{Counts: []int{19, 21, 20}, Complete: true})
 
 	if got.Verdict != Pass {
 		t.Errorf("Validate(20 good records) verdict = %s, want %s. Findings: %v",
@@ -82,7 +82,7 @@ func TestValidatePasses(t *testing.T) {
 // TestValidateEmptyIsAlwaysFail is the silent-failure case. An extraction that
 // found nothing must never be publishable, whatever the history says.
 func TestValidateEmptyIsAlwaysFail(t *testing.T) {
-	got := validateAt(t, exhibitionSource(), nil, History{Counts: []int{20, 20, 20}, Complete: true})
+	got := validateAt(t, ruledSource(), nil, History{Counts: []int{20, 20, 20}, Complete: true})
 
 	if got.Verdict != Fail {
 		t.Errorf("Validate(no records) verdict = %s, want %s", got.Verdict, Fail)
@@ -96,7 +96,7 @@ func TestValidateEmptyIsAlwaysFail(t *testing.T) {
 // is individually perfect, and the page has silently stopped listing all but a
 // handful of them. Structural validity alone would call this a pass.
 func TestValidateVolumetricCollapse(t *testing.T) {
-	source := exhibitionSource()
+	source := ruledSource()
 	history := History{Counts: []int{200, 198, 205, 201}, Complete: true}
 
 	got := validateAt(t, source, goodRecords(3), history)
@@ -119,7 +119,7 @@ func TestValidateVolumetricCollapse(t *testing.T) {
 // rung honestly: with no baseline there is nothing to compare against, and
 // only the declared floor applies.
 func TestValidateNoHistoryUsesFloorOnly(t *testing.T) {
-	source := exhibitionSource()
+	source := ruledSource()
 	source.Expect.MinRecords = 5
 
 	if got := validateAt(t, source, goodRecords(3), History{Complete: true}); got.Verdict != Fail {
@@ -158,7 +158,7 @@ func TestValidateStructural(t *testing.T) {
 		{
 			name: "a relative URL is not a URL",
 			records: []Record{
-				{"title": "Bronze Age Britain", "url": "/exhibitions/bronze-age"},
+				{"title": "Bronze Age Britain", "url": "/listings/bronze-age"},
 			},
 			want: Fail,
 		},
@@ -180,7 +180,7 @@ func TestValidateStructural(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := validateAt(t, exhibitionSource(), tt.records, History{Counts: []int{20, 20, 20}, Complete: true})
+			got := validateAt(t, ruledSource(), tt.records, History{Counts: []int{20, 20, 20}, Complete: true})
 			if got.Verdict != tt.want {
 				t.Errorf("Validate(%s) verdict = %s, want %s. Findings: %v",
 					tt.name, got.Verdict, tt.want, got.Findings)
@@ -197,12 +197,12 @@ func TestValidateRejectsPlaceholders(t *testing.T) {
 	for range 20 {
 		records = append(records, Record{
 			"title": "Find out more",
-			"url":   "https://example.org/exhibitions/a",
+			"url":   "https://example.org/listings/a",
 			"opens": "2026-09-01",
 		})
 	}
 
-	got := validateAt(t, exhibitionSource(), records, History{Counts: []int{20, 20, 20}, Complete: true})
+	got := validateAt(t, ruledSource(), records, History{Counts: []int{20, 20, 20}, Complete: true})
 
 	if got.Verdict != Fail {
 		t.Errorf("Validate(all placeholder titles) verdict = %s, want %s. Findings: %v",
@@ -214,16 +214,16 @@ func TestValidateRejectsPlaceholders(t *testing.T) {
 }
 
 func TestValidateDateRules(t *testing.T) {
-	source := exhibitionSource()
+	source := ruledSource()
 
-	// An exhibition opening in the year 3000 is how some sites write "no end
+	// An entry opening in the year 3000 is how some sites write "no end
 	// date". As an opening date it is a defect, and the rule is relative to
 	// today so it does not expire.
 	var records []Record
 	for range 10 {
 		records = append(records, Record{
 			"title": "Permanent Collection",
-			"url":   "https://example.org/exhibitions/permanent",
+			"url":   "https://example.org/listings/permanent",
 			"opens": "3000-01-01",
 		})
 	}
@@ -252,7 +252,7 @@ func TestValidateJudgeIsLastResort(t *testing.T) {
 	})
 
 	v := &Validator{Judge: judge, Now: time.Now}
-	v.Validate(context.Background(), exhibitionSource(), goodRecords(20), History{Counts: []int{20, 20, 20}, Complete: true})
+	v.Validate(context.Background(), ruledSource(), goodRecords(20), History{Counts: []int{20, 20, 20}, Complete: true})
 
 	if asked != 0 {
 		t.Errorf("the judge was asked %d times about a clean run with settled history, want 0", asked)
@@ -260,7 +260,7 @@ func TestValidateJudgeIsLastResort(t *testing.T) {
 
 	// With no history there is no baseline, so the doubt is real and the model
 	// is worth paying for.
-	v.Validate(context.Background(), exhibitionSource(), goodRecords(20), History{Complete: true})
+	v.Validate(context.Background(), ruledSource(), goodRecords(20), History{Complete: true})
 	if asked != 1 {
 		t.Errorf("the judge was asked %d times about a run with no baseline, want 1", asked)
 	}
@@ -272,7 +272,7 @@ func TestValidateJudgeFailureDoesNotFailTheRun(t *testing.T) {
 	})
 
 	v := &Validator{Judge: judge, Now: time.Now}
-	got := v.Validate(context.Background(), exhibitionSource(), goodRecords(20), History{Complete: true})
+	got := v.Validate(context.Background(), ruledSource(), goodRecords(20), History{Complete: true})
 
 	// An unreachable inference server must not quarantine a healthy source.
 	if got.Verdict != Pass {
@@ -286,11 +286,11 @@ func TestValidateJudgeFailureDoesNotFailTheRun(t *testing.T) {
 
 func TestValidateJudgeImplausible(t *testing.T) {
 	judge := judgeFunc(func(context.Context, string, []Record) (bool, string, error) {
-		return false, "these are gift shop items, not exhibitions", nil
+		return false, "these are gift shop items, not entries", nil
 	})
 
 	v := &Validator{Judge: judge, Now: time.Now}
-	got := v.Validate(context.Background(), exhibitionSource(), goodRecords(20), History{Complete: true})
+	got := v.Validate(context.Background(), ruledSource(), goodRecords(20), History{Complete: true})
 
 	if got.Verdict != Suspect {
 		t.Errorf("Validate() with an implausible judgement verdict = %s, want %s", got.Verdict, Suspect)
@@ -365,7 +365,7 @@ func TestSchemaValidate(t *testing.T) {
 		schema  Schema
 		wantErr bool
 	}{
-		{name: "good", schema: exhibitionSchema()},
+		{name: "good", schema: ruledSchema()},
 		{name: "no name", schema: Schema{Fields: []Field{{Name: "a", Kind: KindString, Required: true}}}, wantErr: true},
 		{name: "no fields", schema: Schema{Name: "s"}, wantErr: true},
 		{
@@ -413,7 +413,7 @@ func TestSourceValidate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			source := exhibitionSource()
+			source := ruledSource()
 			tt.mutate(&source)
 
 			err := source.Validate()
@@ -431,7 +431,7 @@ func TestSourceValidate(t *testing.T) {
 // them alike skipped the volumetric rung and let a 200-to-2 collapse — the
 // exact thing that rung exists to catch — be graded Pass and published.
 func TestValidateWithheldWhenBaselineUnreadable(t *testing.T) {
-	source := exhibitionSource()
+	source := ruledSource()
 
 	// What the harvester passes when Store.History returned an error.
 	unreadable := History{}
@@ -472,7 +472,7 @@ func TestExpectationBandNeverAdmitsNothing(t *testing.T) {
 		t.Errorf("Band(200) with tolerance 1.5 = floor %d, want at least 1", low)
 	}
 
-	source := exhibitionSource()
+	source := ruledSource()
 	source.Expect.Tolerance = 1
 	if err := source.Validate(); err == nil {
 		t.Error("Source.Validate() accepted a tolerance of 1, which makes the volumetric rung vacuous")
@@ -520,7 +520,7 @@ func TestValidateFieldNameWithColon(t *testing.T) {
 
 func TestSchemaValidateRejectsBadPattern(t *testing.T) {
 	// Reported once, at definition, rather than two hundred times per run.
-	schema := exhibitionSchema()
+	schema := ruledSchema()
 	schema.Fields[0].Rules.Pattern = "([unclosed"
 
 	if err := schema.Validate(); err == nil {
@@ -528,7 +528,7 @@ func TestSchemaValidateRejectsBadPattern(t *testing.T) {
 	}
 }
 
-// TestSourceValidateRefusesInternalAddresses covers the one field of a museum
+// TestSourceValidateRefusesInternalAddresses covers the one field of a site
 // record that gets dereferenced. Websites come from OpenStreetMap and Wikidata,
 // both world-editable, and the deployment shares a host with sixteen other
 // services.
@@ -555,7 +555,7 @@ func TestSourceValidateRefusesInternalAddresses(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			source := exhibitionSource()
+			source := ruledSource()
 			source.URL = tt.url
 
 			err := source.Validate()
@@ -575,7 +575,7 @@ func TestValidateDropsUndeclaredFields(t *testing.T) {
 		"internal": "debug output",
 	}}
 
-	got := validateAt(t, exhibitionSource(), records, History{Complete: true})
+	got := validateAt(t, ruledSource(), records, History{Complete: true})
 
 	if len(got.Records) != 1 {
 		t.Fatalf("Validate() kept %d records, want 1", len(got.Records))

@@ -22,7 +22,7 @@ type Page struct {
 	// URL is where the page ended up after redirects. Links are resolved
 	// against it rather than against the URL that was requested, which is what
 	// a browser does and what the difference between the two costs when a site
-	// redirects /exhibitions to /en/exhibitions.
+	// redirects /listings to /en/listings.
 	URL string
 	// HTML is the page as fetched.
 	HTML string
@@ -40,9 +40,8 @@ type Page struct {
 // minutes inside a call the harness cannot abandon: the source's slot in the
 // scheduler is held for the whole of it and never released.
 //
-// Real pages are nowhere near this. The deepest markup in the catalogue's
-// fixtures is under thirty levels, and the reducer stops descending at
-// eighteen.
+// Real pages are nowhere near this: measured markup rarely passes thirty
+// levels, and the reducer stops descending at eighteen.
 const maxNestingDepth = 512
 
 // ErrTooDeep means a page nests markup far past anything a real site produces.
