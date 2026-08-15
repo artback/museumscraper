@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"museum/internal/harvest"
 	"museum/internal/models"
 	"museum/internal/postgres"
 	"museum/pkg/exhibitions"
@@ -46,6 +47,14 @@ func runRefresh(ctx context.Context, args []string) error {
 		all         = fs.Bool("all", false, "refresh every museum with a website, worldwide")
 		maxMuseums  = fs.Int("max-museums", 500, "cap on museums to scrape (0 for no limit)")
 		concurrency = fs.Int("concurrency", 8, "how many museum sites to read at once")
+
+		// Off by default, and worth keeping that way. The heuristic scraper
+		// reads thousands of sites for nothing; this reads the ones it could
+		// not, and pays a model invocation of minutes the first time it meets
+		// each of them.
+		fallback    = fs.Bool("fallback", false, "for sites the scraper cannot read, use a generated extractor")
+		maxCompiles = fs.Int("max-new-extractors", harvest.DefaultMaxCompiles,
+			"how many new extractors one run may generate")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -118,7 +127,21 @@ func runRefresh(ctx context.Context, args []string) error {
 	// retired once everything found has been written.
 	read := make(map[string]bool)
 
-	exhibitions.NewScraper().Stream(ctx, museums, *concurrency, func(batch []exhibitions.Exhibition) {
+	scraper := exhibitions.NewScraper()
+	if *fallback {
+		generated, err := exhibitionFallback(ctx, *maxCompiles)
+		if err != nil {
+			// A misconfigured fallback must not cost the whole refresh. What
+			// the heuristics can read is the great majority of the catalogue,
+			// and it is still worth reading.
+			log.Printf("Generated-extractor fallback unavailable, continuing without it: %v", err)
+		} else {
+			scraper.Fallback = generated
+			log.Printf("Generated-extractor fallback enabled, up to %d new extractors this run", *maxCompiles)
+		}
+	}
+
+	scraper.Stream(ctx, museums, *concurrency, func(batch []exhibitions.Exhibition) {
 		if len(batch) > 0 {
 			if site := exhibitions.SiteKey(batch[0].SourcePage); site != "" {
 				read[site] = true

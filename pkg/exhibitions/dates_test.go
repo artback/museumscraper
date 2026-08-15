@@ -198,3 +198,61 @@ func assertDate(t *testing.T, label string, got, want *time.Time) {
 }
 
 func ptr(t time.Time) *time.Time { return &t }
+
+// TestParseDateRangeAcrossTheYear covers the commonest shape a museum's
+// programme takes and the way it used to be read backwards.
+//
+// A winter run is written without years — "24 sep - 28 feb" — so both bounds
+// were dated to the current year, the end landed before the start, and they
+// were swapped. The result was an exhibition recorded as running the wrong
+// seven months: 28 February to 24 September, of a year it was never on.
+func TestParseDateRangeAcrossTheYear(t *testing.T) {
+	now := date(2026, time.August, 15)
+
+	tests := []struct {
+		name       string
+		text       string
+		start, end time.Time
+	}{
+		{
+			// Verbatim from Kalmar läns museum.
+			name:  "Swedish, no years, over the winter",
+			text:  "24 sep - 28 feb",
+			start: date(2026, time.September, 24), end: date(2027, time.February, 28),
+		},
+		{
+			name:  "English, no years, over the winter",
+			text:  "12 November – 3 March",
+			start: date(2026, time.November, 12), end: date(2027, time.March, 3),
+		},
+		{
+			// Within one year, no rolling.
+			name:  "no years, same year",
+			text:  "3 March – 12 November",
+			start: date(2026, time.March, 3), end: date(2026, time.November, 12),
+		},
+		{
+			// Years written out and in order: unchanged.
+			name:  "explicit years over the turn",
+			text:  "24 september 2026 – 28 februari 2027",
+			start: date(2026, time.September, 24), end: date(2027, time.February, 28),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseDateRange(tt.text, now)
+			if got.Start == nil || got.End == nil {
+				t.Fatalf("ParseDateRange(%q) = %+v, want both bounds", tt.text, got)
+			}
+			if !got.Start.Equal(tt.start) || !got.End.Equal(tt.end) {
+				t.Errorf("ParseDateRange(%q) = %s to %s, want %s to %s",
+					tt.text, got.Start.Format(time.DateOnly), got.End.Format(time.DateOnly),
+					tt.start.Format(time.DateOnly), tt.end.Format(time.DateOnly))
+			}
+			if got.End.Before(*got.Start) {
+				t.Errorf("ParseDateRange(%q) ended before it started", tt.text)
+			}
+		})
+	}
+}

@@ -212,6 +212,16 @@ Reads `raw_data/` and `enriched_data/`, **preferring the enriched copy**, and up
 
 `crawl` loads the database itself, so this is only needed when the two have drifted: after enrichment adds coordinates, after records were written by some other route, or to repair a partial load. A failed database load during a crawl is logged rather than fatal — the records are already in object storage, which is the durable copy.
 
+### `museum harvest` — generated extractors
+
+```bash
+museum harvest add -file examples/harvest-source.json
+museum harvest run -source example-museum
+museum harvest serve
+```
+
+The fallback for sites the heuristic scraper cannot read. A local model writes an extractor once; every run after that executes it with no model involved. See [Generated extractors](#generated-extractors).
+
 ### `museum refresh` — scrape exhibitions
 
 ```bash
@@ -740,6 +750,147 @@ Scraping is polite: `robots.txt` honoured, one request per host per second, bodi
 
 ---
 
+## Generated extractors
+
+The scraper above is nine hundred lines of hand-written heuristics, and its own section says where it stops: sites whose markup it cannot read yield nothing, and nothing is indistinguishable from a museum with an empty programme.
+
+`museum harvest` is the fallback for exactly those sites. A local language model reads a page **once** and writes a small JavaScript extractor for it; every run after that executes the stored script with no model involved. The model is a compiler, not a runtime.
+
+```bash
+museum harvest add -file examples/harvest-source.json   # read a page, generate an extractor, show it
+museum harvest run -source example-museum               # run it; prints the result, publishes nothing
+museum harvest show -source example-museum -script      # current extractor, recent verdicts, heal history
+museum harvest serve                                    # run every source on its own schedule
+```
+
+**It is the expensive path, so it runs last.** `museum refresh -fallback` consults it only for museums the heuristics read nothing from — a few hundred sites out of six thousand, at one model invocation each, once per site rather than once per run. `-max-new-extractors` caps how many a single run will compile, because generation takes minutes on a Pi and a nightly batch that tries to compile four hundred of them never finishes. Coverage grows over a fortnight instead.
+
+**Generated code cannot do anything but read the page.** The script runs in a bare goja interpreter holding a read-only DOM and nothing else. There is no `fetch`, no `XMLHttpRequest`, no `require`, no `process`, no timers and no storage — not because they are filtered out, but because an empty interpreter never had them. `TestSandboxHasNoCapabilities` asserts each one is absent. Execution is bounded by a wall-clock interrupt, a cap on elements reached, and a cap on records returned.
+
+**Nothing is stored until it has worked.** A generated script is run against the very page that produced it and graded before it is allowed to replace anything, so an artifact that cannot extract its own source page never reaches the store.
+
+### How a run is graded
+
+Every run gets one of three grades, and only `pass` is published.
+
+| Rung | Catches |
+| --- | --- |
+| Structural | Output missing, malformed, or with required fields empty |
+| Volumetric | A count out of character for this source's own trailing average |
+| Semantic | Values that parse but are implausible — placeholders, dates a decade out |
+| Model-judged | Output that survives all three and still does not answer the intent |
+
+The volumetric rung is the one that earns its keep. A page that silently drops from 200 rows to 3 returns three perfectly well-formed records, and structural validity alone calls that a success. The trailing average is taken over passing runs only — including the failures would poison the baseline with the very numbers it exists to catch.
+
+### When it repairs itself
+
+A failing run alone does not authorise regeneration. Each run also fingerprints the page — a hash of the *set* of structural paths in it, so it is insensitive to how much content is on the page and to class names that change on every rebuild.
+
+| Verdict | Page structure | What happens |
+| --- | --- | --- |
+| `fail` | either | Heal once, then re-validate |
+| `suspect` | changed | Heal once — a partial break |
+| `suspect` | unchanged | Hold and report; more likely a quiet week than a broken extractor |
+| `pass` | either | Publish |
+
+A fetch that timed out is never healed: that is the network failing, not the extractor. Healing is capped at one attempt per run and three per source per day, after which the source is quarantined — paused, with the reason recorded — rather than regenerated again. Every heal keeps its predecessor, so `harvest show` prints the version history and `harvest rollback` restores any of it.
+
+### What it cannot do
+
+**It does not render JavaScript.** The fetcher retrieves HTML; a listing that exists only after client-side rendering is as invisible to a generated extractor as to the hand-written one. The PRD's escalation from cheap retrieval to full rendering is not implemented, and a headless browser is the missing piece.
+
+**It does not defeat bot protection**, follow pagination, or handle sites needing a session. Multi-page traversal is unbuilt: an artifact sees one page.
+
+**The model has to be good enough** — and when the local one is not, generation can escalate. `pkg/model` has two backends: an OpenAI-compatible client for a local server, and one that shells out to the Claude Code CLI. The PRD allows this because generation is rare; nothing on the steady-state path touches either. A 7B model on a Pi writes a working extractor for a plain listing page and struggles with a complicated one. The reduction ratio printed by `harvest add` is the signal to watch — a page that barely reduces has little repeated structure and will probably not compile well.
+
+### What it did on six real museums
+
+Compiled with Claude Code as the model, August 2026. Every site is a small Swedish institution whose markup nobody designed for scraping.
+
+| Museum | Page | Reduced | Compile | Records | Re-run, no model |
+|---|---|---|---|---|---|
+| Radiomuseet, Göteborg | 115 KB | 5× | 54 s | 35 | 2 ms |
+| Kalmar läns museum | 142 KB | 6× | 27 s | 6 | 1 ms |
+| Postmuseum, Stockholm | 63 KB | 3× | 25 s | 5 | <1 ms |
+| Textilmuseet, Borås | 84 KB | 3× | 1 m 11 s | 8 | 3 ms |
+| Bohusläns museum | 65 KB | 4× | 42 s | 12 | 2 ms |
+| Arbetets museum, Norrköping | 163 KB | 7× | 29 s | 24 | 4 ms |
+
+Six for six compiled on the **first** attempt and graded `pass`. Steady-state re-execution is single-digit milliseconds with no model involved, which is the whole point of the design.
+
+The extractors are better than the schema asked for. Arbetets museum's writes a Swedish month table and a range parser for `t.o.m.`/`från`, and picks up the site's own `tills vidare` convention for permanence; Textilmuseet's finds RFC 3339 timestamps with timezones; Radiomuseet's reads JSON-LD where the page offers it.
+
+**And one of the six is wrong in a way nothing catches.** Radiomuseet has no exhibitions page — the README section above is where it is named as the case that defeats the hand-written scraper — so the generated extractor collected the site's own topic menu as 35 permanent displays. Most are genuine (the museum *is* organised as rooms of radios) but some are not: `Bibliotek` is its library and `Västkustens DX-klubb` is a club that meets there.
+
+No rung of the ladder stops this. The records are structurally valid, carry no declared placeholder, and a first run has no volumetric baseline to be out of character with. `PruneNavigationListings` does not reach them either — it skips permanent rows, and these are all permanent. The model-judged rung *can* catch it, and does describe the library and the club correctly when it does, but it answered differently on two runs against identical input, so it is not something to rely on. **Treat a source that yields only undated, permanent, root-level records as unreviewed.**
+
+### Cutting the prompt
+
+Every one of the six pages reduced to almost exactly 24,000 bytes — the byte cap — which means every one was **truncated**, and every generation paid the maximum token cost to see a prefix. Reading one reduction line by line showed where it went: 160 lines of `<head>` metadata and navigation before the listing appeared, then a cut part-way through a second menu.
+
+Four changes, all general rather than site-specific:
+
+- **Drop the chrome.** `nav`, `footer`, `aside`, `form`, `button`, `meta`. Not `header` — cards genuinely use it, and one live extractor keys on `.card__head`.
+- **Keep only `title` and schema.org from `<head>`.** The rest is metadata for other machines.
+- **Filter and re-marshal JSON-LD.** A WordPress site with Yoast declares a `WebSite`, a `CollectionPage`, a `BreadcrumbList` and an `ImageObject` on every page; on one museum that boilerplate filled the entire JSON-LD budget and was cut before anything else. Re-marshalling instead of quoting also stopped every slash being escaped, which had been doubling its size.
+- **Strip framework class soup, generated ids, and empty wrappers.** A `div` with no attributes worth keeping and one child is elided; one listing page spent 139 lines on those.
+
+| Museum | Before | After | |
+|---|---|---|---|
+| Kalmar läns museum | 24,061 | 5,984 | **−75%** |
+| Bohusläns museum | 24,030 | 8,119 | −66% |
+| Postmuseum | 24,048 | 18,895 | −21% |
+| Arbetets museum | 24,093 | 20,242 | −16% |
+| Radiomuseet | 24,021 | 19,680 | −18% |
+| Textilmuseet | 24,017 | 24,079 | 0% |
+| **Total** | **144,270** | **96,999** | **−33%** |
+
+Five of the six now fit inside the budget, where previously none did — so the model sees the whole page rather than a prefix. Textilmuseet still fills it, but its eight exhibitions all appear before the cut; what is lost is the tail, not the listing.
+
+Regenerating Kalmar on the smaller prompt: **29 s → 19 s**, first attempt, same six exhibitions.
+
+### Where the knowledge accumulates
+
+The six extractors above each independently wrote a Swedish month table, a parser for `t.o.m.` and `från`, and a whitespace cleaner. That is the model paying for the same lesson six times, in six slightly different versions, each a fresh chance to get an en-dash or a leap year wrong — and six versions for an operator to re-read in every heal diff.
+
+So generated scripts get a small standard library on the global `museum`:
+
+| Helper | What it saves them writing |
+| --- | --- |
+| `museum.dates(text)` | The catalogue's own multilingual range reader — a dozen languages, ordinals, open-ended ranges, "Ongoing" |
+| `museum.jsonld()` | Every schema.org block, parsed, with `@graph` and nested arrays flattened |
+| `museum.clean(text)` | Whitespace collapsing, including non-breaking spaces |
+| `museum.isNavigation(url)` | The catalogue's navigation heuristic, for dropping menus and pagination |
+
+Everything in it is a pure function of its arguments and the page. That is not a slackening of the sandbox and must not become one: `TestLibraryGrantsNoCapability` asserts that installing it makes nothing new reachable, and every helper is wrapped so a panic in Go becomes a catchable JavaScript exception rather than an unrecovered crash.
+
+The point is that this is where improvement compounds. `museum.dates` is `pkg/exhibitions.ParseDateRange`, the same function the hand-written scraper uses — so **fixing it once fixes every extractor ever generated, retroactively, without regenerating any of them.** Wiring it up immediately exposed two real gaps in it: Swedish `maj` was missing from a month table documented as knowing ten languages, and `t.o.m.` was absent from the open-ended markers, so the shared parser had been reading "until 15 January" as an opening date on every Scandinavian listing. Both are fixed, and both fixes reach the hand-written scraper too.
+
+### Can one site's extractor read another's page?
+
+Measured, not assumed. Every generated extractor was run against every other museum's page — 20 cross pairs, no model involved:
+
+- **2 of 20 validated.** Both were Textilmuseet's extractor, which is the only one that starts from a generic `a[href]` scan rather than from CMS selectors. The others key on their site's theme (`.grid-item.exhibition`, `.isotope article.card`, Divi's `.et_pb_blurb`) and transfer to nothing.
+- **Both successes were wrong.** On Arbetets museum it extracted 4 records and graded `pass`; that museum's own extractor finds 24. A first run has no volumetric baseline, so nothing in the ladder can see the missing 83%.
+
+So validation is not a safe gate for reuse — it is exactly the "plausible but wrong" case the design exists to prevent, arrived at by trying to save a model call. `Similarity` is the gate instead: the Jaccard index of two pages' structural path sets. Every unrelated pair of these sites scores **0.00–0.02**, including the pairs that validated, so a similarity gate refuses precisely the reuse that would have lost data.
+
+**The standard library made this worse, not better, and that is worth understanding.** Repeating the measurement after adding it, cross-site pairs that validate rose from 2 of 20 to 9 of 30 — because helpers like `museum.dates` and `museum.isNavigation` let a generic extractor cope with a page it was not written for. One of them passed on all five other sites, with a record count exactly matching each site's own extractor on four of them.
+
+The counts were a coincidence. Comparing the records rather than the totals: titles came back as whole card blobs on one site, with dates appended on another, and the sets included `Café och restaurang`, `Hitta hit` and `Information om cookies`. Same number, different and wrong data, graded `pass`.
+
+The lesson generalises past this codebase: **making extractors more capable raises the false-positive rate of reuse.** Anything that decides to reuse on the strength of validation alone gets less safe as the components get better, which is the opposite of the intuition. Compare records, not counts, and gate on structural similarity.
+
+That means cross-site reuse fires zero per cent of the time on this sample — five sites contain no siblings. It is worth having anyway, because sameness here is a property of the CMS theme, and a corpus of hundreds of museum sites certainly does contain WordPress installations sharing one. The mechanism should be built before it is needed, not after it has silently published a short listing.
+
+### Two risks that are bounded but not closed
+
+**A hostile regex can hold a worker.** goja routes patterns with lookaround or backreferences to a regexp engine that does not poll goja's interrupt flag, so a catastrophically backtracking regex in a generated script runs past the sandbox timeout and past context cancellation. A goroutine cannot be killed from outside, and abandoning it would pin the interpreter and the parsed page while freeing the slot to start more work — worse, on one Pi, than the wedge it replaced. Pages are gated on nesting depth before parsing, which closes the equivalent hole in the HTML parser, but the regex path has no clean lever. It needs an operator-visible watchdog on runs that outlive their timeout.
+
+**Redirects are not checked against the private network.** A source URL is refused at definition time if it names a loopback, private or link-local address by literal IP, but museum websites come from OpenStreetMap and Wikidata — both world-editable — and a public host that answers `302 http://127.0.0.1:9000/` is followed. Closing it properly means a dialler control on the fetcher, which is shared with the catalogue's own crawler, so it changes the nightly refresh too. Note also that Tailscale's range is deliberately allowed: the operator reaches this deployment over it.
+
+---
+
 ## Configuration
 
 | Variable | Purpose |
@@ -747,6 +898,15 @@ Scraping is polite: `robots.txt` honoured, one request per host per second, bodi
 | `DATABASE_URL` | Postgres connection string, e.g. `postgres://museum:museum@127.0.0.1:55432/museum?sslmode=disable` |
 | `MINIO_ENDPOINT` | S3 endpoint — `127.0.0.1:9000` from the host, `minio:9000` in compose |
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | S3 credentials |
+| `HARVEST_BUCKET_NAME` | Bucket for generated extractors and run history — a separate one, see below |
+| `EXTRACT_MODEL_ENDPOINT` | OpenAI-compatible base URL, default `http://localhost:11434/v1` |
+| `EXTRACT_MODEL` | Model that writes extractors, default `qwen2.5-coder:7b` |
+| `EXTRACT_MODEL_KEY` | Bearer token, if the inference server wants one |
+| `EXTRACT_MODEL_TIMEOUT` | Per-generation timeout, default `10m` |
+| `EXTRACT_CLAUDE_BINARY` | Path to the Claude Code CLI, for the stronger-model generation path |
+| `EXTRACT_CLAUDE_MODEL` | Model to ask that CLI for |
+| `HARVEST_WEBHOOK_URL` | Push sink; passing runs are POSTed here with an `Idempotency-Key` |
+| `HARVEST_MODEL_JUDGE` | `true` enables the fourth validation rung — the only thing that can cost a model call on a passing run |
 | `MINIO_USE_SSL` | `true` or `false` |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | Credentials for the MinIO container itself |
 | `MUSEUM_BUCKET_NAME` | Bucket holding every prefix above |
@@ -766,6 +926,7 @@ Every external API is called with a descriptive User-Agent, a client-side rate l
 ## Repository layout
 
 ```
+extract/               a module of its own - the extraction harness, usable alone
 cmd/museum/            the only binary; dispatches to subcommands
 internal/
   command/             one file per subcommand
@@ -781,11 +942,13 @@ internal/
   postgres/            schema, queries, similarity search
   quality/             catalogue audit checks
   search/              text normalisation shared by writes and queries
+  harvest/             the extraction harness wired to storage, a schedule and sinks
 pkg/
   wikidata/            SPARQL client and paged museum queries
   wikipedia/           API client, wikitext/table parsing, classification
   osm/                 Overpass client
   exhibitions/         museum-website scraper
+  model/               language-model clients: a local server, and the Claude Code CLI
   location/            Nominatim client
   geo/                 country recognition, ISO codes
   kafkaclient/         consumer with explicit offset commits
@@ -805,6 +968,12 @@ go vet ./... && gofmt -l .
 ```
 
 Offline tests in `pkg/wikipedia/extractor_structure_test.go` and `pkg/exhibitions/extract_test.go` lock the extraction rules against fixtures taken from real pages; the `live_test.go` files check the same rules against the pages they were derived from.
+
+`internal/harvest/live_test.go` compiles real extractors for real museum websites with a real model. It costs model invocations, so unlike the other live tests it needs an explicit flag:
+
+```bash
+go test ./internal/harvest/ -run TestLiveCompile -harvest.live -v -timeout 50m
+```
 
 ---
 
