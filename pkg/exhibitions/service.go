@@ -88,10 +88,26 @@ const maxPermanentPages = 2
 // scrape.
 const maxInfoPages = 2
 
+// Fallback reads a museum's site by some other means when the heuristics here
+// have found nothing.
+//
+// The interface is declared here, where it is called, so that this package
+// stays what it has always been: a self-contained heuristic scraper with no
+// dependency on the machinery that might one day replace it. The catalogue
+// wires in the generated-extractor harness; the tests wire in nothing, and
+// every existing behaviour is unchanged when Fallback is nil.
+type Fallback interface {
+	ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibition, error)
+}
+
 // Scraper reads exhibition listings from museum websites.
 type Scraper struct {
 	fetcher *Fetcher
 	now     func() time.Time
+
+	// Fallback is consulted only for museums this scraper could read nothing
+	// from. Nil disables it, which is the default and what every test uses.
+	Fallback Fallback
 }
 
 // NewScraper returns a Scraper using a polite fetcher.
@@ -180,6 +196,26 @@ func (s *Scraper) ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibi
 		permanentPages++
 
 		found = append(found, s.harvest(ctx, listingURL, base, museum, now, true)...)
+	}
+
+	// Everything above is free and language-bound. When it has come back with
+	// nothing, and only then, the generated-extractor fallback is worth its
+	// cost — which is a model invocation the first time a site is seen, and a
+	// sandboxed script execution every time after.
+	//
+	// The ordering is the whole point: this runs on the sites the heuristics
+	// could not read, not on the thousands they read perfectly well. Putting
+	// it first would be a language model reading six thousand museum websites
+	// a night to rediscover what a CSS selector already knew.
+	if len(found) == 0 && s.Fallback != nil {
+		switch generated, err := s.Fallback.ForMuseum(ctx, museum); {
+		case err != nil:
+			// A fallback that cannot run is not a scrape that failed. The
+			// museum still gets its permanent display below.
+			log.Printf("exhibitions: fallback extractor for %s: %v", museum.Name, err)
+		default:
+			found = append(found, generated...)
+		}
 	}
 
 	if len(found) == 0 {
@@ -555,5 +591,9 @@ func siteKey(website string) string {
 	if err != nil || parsed.Host == "" {
 		return ""
 	}
-	return strings.ToLower(strings.TrimPrefix(parsed.Host, "www."))
+	// Lowercased before "www." is trimmed, and via Hostname so a port is not
+	// part of the key. Trimming first left "WWW.example.org" and
+	// "www.example.org" as two different sites, and "example.org:80" as a
+	// third, so the same museum website was scraped several times over.
+	return strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www.")
 }

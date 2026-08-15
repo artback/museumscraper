@@ -210,6 +210,19 @@ func (s *S3Service[T]) EachObject(ctx context.Context, bucketName, prefix string
 		failed atomic.Int64
 	)
 
+	// Wait on every exit, not just the successful one.
+	//
+	// A listing error can arrive after earlier pages have already been
+	// dispatched, so returning on it left up to storeConcurrency goroutines
+	// still calling fn. Callers reasonably treat a returned error as "nothing
+	// is running any more" and go on to read what fn was writing: reindex
+	// logs the error, carries on, and ranges the map its callback is still
+	// filling, which is an unrecoverable concurrent map read and write.
+	//
+	// The explicit Wait below stays where it is — the failed count is read
+	// after it, and this deferred one runs too late for that.
+	defer wg.Wait()
+
 	objects := s.client.ListObjects(ctx, bucketName, minio.ListObjectsOptions{
 		Prefix:    prefix,
 		Recursive: true,
@@ -303,4 +316,39 @@ func (s *S3Service[T]) GetObject(ctx context.Context, bucketName, key string) (*
 		return nil, asNotFound(fmt.Errorf("decode object %q: %w", key, err))
 	}
 	return &value, nil
+}
+
+// RemoveObject deletes the object at key. Deleting something that is not there
+// is not an error: callers prune by listing and then removing, and an object
+// that vanished between the two steps has already reached the wanted state.
+func (s *S3Service[T]) RemoveObject(ctx context.Context, bucketName, key string) error {
+	err := s.client.RemoveObject(ctx, bucketName, key, minio.RemoveObjectOptions{})
+	if err != nil && !isNotFound(err) {
+		return fmt.Errorf("remove object %q: %w", key, err)
+	}
+	return nil
+}
+
+// ListKeys returns the keys under prefix, in the order the backend lists them,
+// which for S3 and MinIO is lexicographic.
+//
+// It fetches no objects. Callers that need one datum derivable from a key —
+// the newest of a set of timestamp-named objects, the highest of a set of
+// zero-padded version numbers — were downloading and decoding the whole prefix
+// to compute it, which on a scheduler tick is an object-storage request storm
+// for information the listing already carried.
+func (s *S3Service[T]) ListKeys(ctx context.Context, bucketName, prefix string) ([]string, error) {
+	var keys []string
+
+	objects := s.client.ListObjects(ctx, bucketName, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	})
+	for object := range objects {
+		if object.Err != nil {
+			return nil, fmt.Errorf("list %s/%s: %w", bucketName, prefix, object.Err)
+		}
+		keys = append(keys, object.Key)
+	}
+	return keys, nil
 }

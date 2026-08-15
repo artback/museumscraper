@@ -109,6 +109,14 @@ var months = map[string]time.Month{
 	"giu": time.June, "lug": time.July, "set": time.September,
 	"ott": time.October, "out": time.October,
 	"mei": time.May, "okt2": time.October,
+
+	// Nordic. lookupMonth already matches three- and four-letter prefixes, so
+	// "mars", "juni" and "augusti" resolved through the English entries and
+	// only these two were genuinely missing — but "maj" is Swedish, Danish and
+	// Norwegian for May, so the shared parser silently failed on a twelfth of
+	// every Scandinavian listing. That gap is why each extractor generated for
+	// a Swedish museum wrote its own month table instead of using this one.
+	"maj": time.May, "des": time.December,
 }
 
 var (
@@ -132,13 +140,23 @@ var (
 	separators = regexp.MustCompile(`(?i)\s*(?:–|—|-|‒|to|until|till|through|bis|jusqu'au|hasta|fino al|t/m)\s*`)
 
 	// openEnded marks a listing that gives only a closing date.
-	openEnded = regexp.MustCompile(`(?i)\b(until|till|through|ends?|bis|jusqu'au|hasta|fino al|t/m|closes)\b`)
+	//
+	// The Scandinavian forms are written with dots, so they cannot carry a
+	// trailing word boundary — "t.o.m." ends on punctuation. Their absence is
+	// why extractors generated for Swedish museums wrote their own range
+	// parsers: the shared one read "t.o.m. 15 januari" as an opening date and
+	// listed every closing show as though it were about to start.
+	openEnded = regexp.MustCompile(`(?i)(\bt\.?\s?o\.?\s?m\.?|\btill och med\b|\bfram till\b|\bsenast\b|\b(until|till|through|ends?|bis|jusqu'au|hasta|fino al|t/m|closes)\b)`)
 
 	// openStart marks a listing that gives only an opening date.
-	openStart = regexp.MustCompile(`(?i)\b(from|opens?|starting|ab|dès|desde|dal)\b`)
+	openStart = regexp.MustCompile(`(?i)(\bfr\.?\s?o\.?\s?m\.?|\b(from|opens?|starting|ab|dès|desde|dal|från|fra|öppnar|premiär)\b)`)
+
+	// explicitYear reports that the text dated itself, so a reversed range is
+	// the site's mistake rather than a run over the turn of the year.
+	explicitYear = regexp.MustCompile(`\b(?:19|20)\d{2}\b`)
 
 	// ongoing marks permanent or indefinite displays.
-	ongoing = regexp.MustCompile(`(?i)\b(ongoing|permanent|indefinite|long[- ]term|dauerausstellung)\b`)
+	ongoing = regexp.MustCompile(`(?i)\b(ongoing|permanent|indefinite|long[- ]term|dauerausstellung|tills vidare|basutställning|fast utställning|fasta utställningar)\b`)
 )
 
 // ParseDateRange reads the run dates out of a listing's text.
@@ -178,7 +196,23 @@ func ParseDateRange(text string, now time.Time) DateRange {
 	default:
 		start, end := dates[0], dates[len(dates)-1]
 		if end.Before(start) {
-			start, end = end, start
+			// A range whose end falls before its start is one of two things,
+			// and they need opposite treatment.
+			//
+			// With no year in the text — "24 sep - 28 feb", which is how a
+			// museum writes a run over the winter — both bounds were dated to
+			// the current year, so the end belongs to the next one. Swapping
+			// them instead produced "28 February to 24 September": an
+			// exhibition running the wrong seven months of the wrong year,
+			// silently, for every autumn-to-spring show in the catalogue.
+			//
+			// With years written out, a reversed pair is the site's own error
+			// and there is nothing better to do than order them.
+			if explicitYear.MatchString(text) {
+				start, end = end, start
+			} else {
+				end = end.AddDate(1, 0, 0)
+			}
 		}
 		return DateRange{Start: &start, End: &end}
 	}

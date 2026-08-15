@@ -1,0 +1,61 @@
+{
+  "name": "example-museum",
+  "url": "https://example.org/whats-on",
+  "every": "24h",
+  "expect": {
+    "min_records": 1,
+    "tolerance": 0.5
+  },
+  "schema": {
+    "name": "exhibitions",
+    "intent": "the exhibitions currently on show at this museum",
+    "fields": [
+      {
+        "name": "title",
+        "kind": "string",
+        "required": true,
+        "description": "the exhibition's own name, as a visitor would read it",
+        "rules": {
+          "min_length": 2,
+          "max_length": 300,
+          "placeholders": [
+            "Find out more",
+            "Read more",
+            "Book now",
+            "Book tickets",
+            "More info"
+          ]
+        }
+      },
+      {
+        "name": "url",
+        "kind": "url",
+        "required": true,
+        "description": "link to the exhibition's own page on this site"
+      },
+      {
+        "name": "start",
+        "kind": "date",
+        "description": "opening date, ISO 8601, omitted when the page does not give one",
+        "rules": {
+          "min": -3660,
+          "max": 3660
+        }
+      },
+      {
+        "name": "end",
+        "kind": "date",
+        "description": "closing date, ISO 8601, omitted when the page does not give one",
+        "rules": {
+          "min": -3660,
+          "max": 3660
+        }
+      },
+      {
+        "name": "permanent",
+        "kind": "bool",
+        "description": "true when the museum keeps this on show indefinitely"
+      }
+    ]
+  }
+}
