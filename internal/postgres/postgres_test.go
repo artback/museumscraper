@@ -642,6 +642,86 @@ func TestSaveMuseums_UnionsAliasesAcrossSources(t *testing.T) {
 	}
 }
 
+func TestSaveMuseums_UnionsClassesAcrossSources(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	// S/S Bohuslän: the record that motivated storing classes at all. Its name
+	// is also a Swedish province and its description says only "working life
+	// museum in Gothenburg Municipality", so nothing else in the row says it is
+	// a ship.
+	fromWikidata := models.Museum{Name: "Bohuslän", Country: "Sweden", WikidataID: "Q10659234",
+		Classes: []string{"steamboat", "working life museum"}, Sources: []string{"wikidata"}}
+	// Another source classifying it differently, and one classifying it not at
+	// all. The second is the dangerous case: the Wikipedia crawls carry no
+	// classes, and if the upsert replaced rather than unioned, whichever ran
+	// last would silently empty the column.
+	fromOSM := models.Museum{Name: "S/S Bohuslän", Country: "Sweden", WikidataID: "Q10659234",
+		Classes: []string{"passenger ship"}, Sources: []string{"osm"}}
+	fromWikipedia := models.Museum{Name: "Bohuslän", Country: "Sweden", WikidataID: "Q10659234",
+		Sources: []string{"wikipedia-category"}}
+
+	for _, m := range []models.Museum{fromWikidata, fromOSM, fromWikipedia} {
+		if _, err := store.SaveMuseums(ctx, []models.Museum{m}); err != nil {
+			t.Fatalf("save %v: %v", m.Sources, err)
+		}
+	}
+
+	hit, err := store.MuseumByID(ctx, "Q10659234")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	for _, want := range []string{"steamboat", "working life museum", "passenger ship"} {
+		if !slices.Contains(hit.Museum.Classes, want) {
+			t.Errorf("class %q was lost; have %v", want, hit.Museum.Classes)
+		}
+	}
+	if len(hit.Museum.Classes) != 3 {
+		t.Errorf("Classes = %v, want three distinct values", hit.Museum.Classes)
+	}
+}
+
+func TestSaveMuseums_ClassesSurviveTheMerges(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	// The duplicate pair MergeDuplicates exists to fold: same name and country,
+	// one row carrying a Wikidata id and one not. Each knows a different class,
+	// and the merge must keep both — the discarded row is deleted, so anything
+	// not copied over is gone for good.
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Bohuslän", Country: "Sweden", Classes: []string{"passenger ship"}, Sources: []string{"lists"}},
+	}); err != nil {
+		t.Fatalf("save name-keyed: %v", err)
+	}
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Vasa Museum", Country: "Sweden", WikidataID: "Q10659234", Classes: []string{"steamboat"}},
+	}); err != nil {
+		t.Fatalf("save id-keyed: %v", err)
+	}
+	// Rename so the two rows collide on name and country with the id already
+	// claimed, which is the shape promoteWikidataIDs cannot repair.
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "Bohuslän", Country: "Sweden", WikidataID: "Q10659234", Classes: []string{"steamboat"}},
+	}); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	if _, err := store.MergeDuplicates(ctx); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	hit, err := store.MuseumByID(ctx, "Q10659234")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	for _, want := range []string{"steamboat", "passenger ship"} {
+		if !slices.Contains(hit.Museum.Classes, want) {
+			t.Errorf("class %q did not survive the merge; have %v", want, hit.Museum.Classes)
+		}
+	}
+}
+
 // A museum with no coordinates is findable by name and invisible to every
 // radius and place query. A fifth of the catalogue is in that state, and
 // nothing could repair it: enrichment geocodes only what arrives through the
@@ -1011,5 +1091,98 @@ func TestMergeNameVariants(t *testing.T) {
 	byOldName, err := store.Search(ctx, "museum of gothenburg", 1, 0)
 	if err != nil || len(byOldName.Hits) == 0 {
 		t.Fatal("the museum is no longer findable by its merged-away name")
+	}
+}
+
+// storedTitles reads back every stored exhibition's title. Straight SQL rather
+// than a query method: these rows carry no position, so every reader that takes
+// a radius would report them all as missing.
+func storedTitles(t *testing.T, ctx context.Context, store *Store) map[string]bool {
+	t.Helper()
+	rows, err := store.pool.Query(ctx, "SELECT title FROM exhibitions")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	defer rows.Close()
+
+	found := make(map[string]bool)
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		found[title] = true
+	}
+	return found
+}
+
+func TestMergeAliasVariants(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		// The cross-language duplicate: one row knows both names, the other only
+		// the German one and no Wikidata id. These must become one record.
+		{Name: "MAK – Museum of Applied Arts", Country: "Austria", WikidataID: "Q478455",
+			AlsoKnownAs: []string{"Museum für angewandte Kunst Wien"}, Sources: []string{"wikidata"}},
+		{Name: "Museum für angewandte Kunst Wien", Country: "Austria",
+			Website: "https://www.mak.at", Sources: []string{"wikipedia-list"}},
+
+		// Two Italian museums that both answer to "Museo civico", plus a third
+		// record actually called that. The name identifies none of them, so
+		// nothing here may merge — this is the case that made the ambiguity
+		// guard necessary.
+		{Name: "Bassano Civic Museum", Country: "Italy", WikidataID: "Q18670440",
+			AlsoKnownAs: []string{"Museo civico"}, Sources: []string{"wikidata"}},
+		{Name: "Piacenza Civic Museum", Country: "Italy", WikidataID: "Q18753616",
+			AlsoKnownAs: []string{"Museo civico"}, Sources: []string{"wikidata"}},
+		{Name: "Museo Civico", Country: "Italy", Sources: []string{"lists"}},
+
+		// A distinctive alias, but the two rows disagree about identity. An
+		// explicit disagreement outranks a matching name.
+		{Name: "Museum of Illusions Paris", Country: "France", WikidataID: "Q108293274",
+			AlsoKnownAs: []string{"Musee de l Illusion"}, Sources: []string{"wikidata"}},
+		{Name: "Musee de l Illusion", Country: "France", WikidataID: "Q136503849",
+			Sources: []string{"wikidata"}},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	removed, err := store.MergeAliasVariants(ctx)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed %d rows, want exactly 1 (the Vienna duplicate)", removed)
+	}
+
+	counts, err := store.Counts(ctx)
+	if err != nil {
+		t.Fatalf("counts: %v", err)
+	}
+	if counts.Museums != 6 {
+		t.Errorf("museums = %d, want 6 of the original 7", counts.Museums)
+	}
+
+	// The survivor must be enriched by what the discarded row knew, not merely
+	// have absorbed it: the website came from the row that was deleted.
+	hit, err := store.MuseumByID(ctx, "Q478455")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if hit.Museum.Website != "https://www.mak.at" {
+		t.Errorf("Website = %q, want it carried over from the merged row", hit.Museum.Website)
+	}
+	for _, want := range []string{"wikidata", "wikipedia-list"} {
+		if !slices.Contains(hit.Museum.Sources, want) {
+			t.Errorf("source %q was lost; have %v", want, hit.Museum.Sources)
+		}
+	}
+
+	// Both Italian museums, and the generic record, must all still be there.
+	for _, qid := range []string{"Q18670440", "Q18753616", "Q108293274", "Q136503849"} {
+		if _, err := store.MuseumByID(ctx, qid); err != nil {
+			t.Errorf("%s was merged away: %v", qid, err)
+		}
 	}
 }

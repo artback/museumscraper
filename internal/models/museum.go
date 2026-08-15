@@ -56,6 +56,21 @@ type Museum struct {
 	// "wikipedia-category", "wikipedia-list". A museum found in several is
 	// merged into one record listing them all.
 	Sources []string `json:"sources,omitempty"`
+
+	// Classes are the kinds of thing this museum is, as its source classifies
+	// it — Wikidata's P31 labels, e.g. "steamboat", "passenger ship", "working
+	// life museum" for S/S Bohuslän.
+	//
+	// Without them a record says what it is called and where it is, but never
+	// what it is. That reads as a mis-scrape whenever the name alone is
+	// ambiguous: the catalogue holds "Bohuslän", described as a "working life
+	// museum in Gothenburg Municipality", which is also the name of a Swedish
+	// province — so on a map it looks like a region that was scraped by
+	// mistake rather than a preserved 1914 steamship.
+	//
+	// Multi-valued because classification is: a museum ship is a ship and a
+	// museum at once, and dropping either loses the thing that explains it.
+	Classes []string `json:"classes,omitempty"`
 }
 
 // HasCoordinates reports whether Wikipedia supplied coordinates for the museum.

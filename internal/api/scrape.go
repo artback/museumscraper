@@ -5,20 +5,40 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"net/http"
 	"sync"
 	"time"
 
-	"museum/internal/models"
+	"museum/internal/sweep"
 	"museum/pkg/exhibitions"
 )
 
 // Harvester is the part of the store an on-demand scrape needs. It is separate
 // from Catalogue because scraping writes, and most of the API only reads.
+// It embeds the sweep's own store because an on-demand scrape has to leave
+// exactly the trace a scheduled one does. When it did not, the two worked
+// against each other: the sweep reread sites this had read minutes earlier,
+// none of this work fed the adaptive interval, vanished listings were retired
+// down only one of the two paths, and an area scraped here still reported "no
+// exhibitions have been collected here yet", because the coverage report reads
+// the attempt record and this was not writing one.
 type Harvester interface {
-	MuseumsWithWebsitesNear(ctx context.Context, lat, lon, radiusKm float64, limit int) ([]models.Museum, error)
-	SaveExhibitions(ctx context.Context, found []exhibitions.Exhibition) (int64, error)
+	sweep.Store
+
+	// DiscoverSites gives any museum website without a scrape record one. A
+	// site is a row, and a museum catalogued since the last sweep does not have
+	// one yet — which is exactly the case someone panning a map to a newly
+	// crawled city hits first.
+	DiscoverSites(ctx context.Context) (int64, error)
+	TargetsNear(ctx context.Context, lat, lon, radiusKm float64, limit int) ([]sweep.Target, error)
+
+	// The cooldown, kept where it survives the process. Areas read on a
+	// visitor's behalf are remembered across a restart; without this a deploy
+	// reopened every one of them.
+	MarkAreaScraped(ctx context.Context, cell string, at time.Time) error
+	AreasScrapedSince(ctx context.Context, since time.Time) (map[string]time.Time, error)
 	MergeDuplicateExhibitions(ctx context.Context) (int64, error)
 	PruneNavigationListings(ctx context.Context) (int64, error)
 }
@@ -123,17 +143,17 @@ type scrapeArea struct {
 	cell    string
 	ctx     context.Context
 	cancel  context.CancelFunc
-	museums []models.Museum
+	targets []sweep.Target
 	sent    int
 	// results is buffered to the full site count so a worker can always deposit
 	// its result and move on, even if the area's collector has stopped.
-	results chan []exhibitions.Exhibition
+	results chan sweep.Report
 }
 
 // scrapeJob is one museum website for one worker to read.
 type scrapeJob struct {
 	area   *scrapeArea
-	museum models.Museum
+	target sweep.Target
 }
 
 // scrapeQueue reads museum websites from every waiting area at once, taking one
@@ -149,8 +169,8 @@ type scrapeJob struct {
 // One scraper between all of them is what keeps this polite: the per-host clock
 // lives on it, so more workers add no load to any single museum's server.
 type scrapeQueue struct {
-	store   Harvester
-	scraper *exhibitions.Scraper
+	store  Harvester
+	runner *sweep.Runner
 
 	requests chan scrapeRequest
 	ready    chan *scrapeArea
@@ -171,7 +191,7 @@ type scrapeQueue struct {
 func newScrapeQueue(store Harvester) *scrapeQueue {
 	q := &scrapeQueue{
 		store:    store,
-		scraper:  exhibitions.NewScraper(),
+		runner:   sweep.NewRunner(store, exhibitions.NewScraper()),
 		requests: make(chan scrapeRequest, scrapeQueueDepth),
 		ready:    make(chan *scrapeArea),
 		jobs:     make(chan scrapeJob),
@@ -180,6 +200,7 @@ func newScrapeQueue(store Harvester) *scrapeQueue {
 		progress: make(map[string]*scrapeProgress),
 		stop:     make(chan struct{}),
 	}
+	q.recoverCooldowns()
 
 	q.wg.Add(1)
 	go q.dispatch()
@@ -303,7 +324,15 @@ func (q *scrapeQueue) prepare(req scrapeRequest) {
 	// had their response, and the work should not die with their connection.
 	ctx, cancel := context.WithTimeout(context.Background(), scrapeJobTimeout)
 
-	museums, err := q.store.MuseumsWithWebsitesNear(ctx, req.lat, req.lon, req.radiusKm, scrapeMaxMuseums)
+	// A site is a row, so a museum catalogued since the last sweep has to be
+	// given one before it can be found here.
+	if _, err := q.store.DiscoverSites(ctx); err != nil {
+		log.Printf("scrape %s: discovering sites: %v", req.cell, err)
+	}
+
+	// Already one per site: the targets are selected from the scrape records,
+	// which are keyed by host, so museums sharing a website arrive once.
+	museums, err := q.store.TargetsNear(ctx, req.lat, req.lon, req.radiusKm, scrapeMaxMuseums)
 	if err != nil {
 		// No cooldown on a failure. The cooldown means "this has been read
 		// recently", and a database that was briefly unavailable has not read
@@ -314,10 +343,6 @@ func (q *scrapeQueue) prepare(req scrapeRequest) {
 		cancel()
 		return
 	}
-	// Deduplicated before the count is published: several museums can share one
-	// website, and a total that counts them separately is a progress bar that
-	// stops short of the end.
-	museums = exhibitions.UniqueBySite(museums)
 	if len(museums) == 0 {
 		q.release(req.cell, true)
 		cancel()
@@ -333,8 +358,8 @@ func (q *scrapeQueue) prepare(req scrapeRequest) {
 		cell:    req.cell,
 		ctx:     ctx,
 		cancel:  cancel,
-		museums: museums,
-		results: make(chan []exhibitions.Exhibition, len(museums)),
+		targets: museums,
+		results: make(chan sweep.Report, len(museums)),
 	}
 
 	q.wg.Add(1)
@@ -367,7 +392,7 @@ func (q *scrapeQueue) dispatch() {
 		var job scrapeJob
 		if len(areas) > 0 {
 			area := areas[turn]
-			job = scrapeJob{area: area, museum: area.museums[area.sent]}
+			job = scrapeJob{area: area, target: area.targets[area.sent]}
 			offer = q.jobs
 		}
 
@@ -379,7 +404,7 @@ func (q *scrapeQueue) dispatch() {
 		case offer <- job:
 			area := areas[turn]
 			area.sent++
-			if area.sent == len(area.museums) {
+			if area.sent == len(area.targets) {
 				// Fully handed out. Its collector goes on working; there is
 				// simply nothing left here to give anyone.
 				areas = append(areas[:turn], areas[turn+1:]...)
@@ -398,69 +423,39 @@ func (q *scrapeQueue) work() {
 	defer q.wg.Done()
 
 	for job := range q.jobs {
-		found, err := q.scraper.ForMuseum(job.area.ctx, job.museum)
-		if err != nil && !errors.Is(err, exhibitions.ErrNoWebsite) {
-			log.Printf("scrape %s: %s: %v", job.area.cell, job.museum.Name, err)
-		}
+		// The same reader the scheduled sweep uses, so this stores, retires and
+		// reschedules identically. It writes as it goes rather than handing
+		// results back to be batched, which is why the collector below counts
+		// rather than saves.
+		report := q.runner.Read(job.area.ctx, job.target)
 		// Never blocks: the channel holds one slot per site in the area.
-		job.area.results <- found
+		job.area.results <- report
 	}
 }
 
-// collect gathers one area's results, stores them as they arrive, and finishes
-// the area off.
+// collect follows one area's progress and finishes the area off.
 //
-// One of these per area, so the batching and the deduplication belong to that
-// area alone even though the workers filling it are shared with every other.
+// The reads store as they go now, through the shared reader, so this counts
+// rather than saves. One of these per area, so progress belongs to that area
+// alone even though the workers filling it are shared with every other.
 func (q *scrapeQueue) collect(area *scrapeArea) {
 	defer q.wg.Done()
 	defer area.cancel()
 
 	start := time.Now()
-	var found, stored int
+	var found int
+	var retired int64
 
-	// Deduplicated by URL within the area, because sites cross-list: one
-	// venue's programme page carries entries another venue's site also shows.
-	seen := make(map[string]struct{})
-	buffer := make([]exhibitions.Exhibition, 0, scrapeStoreBatch)
-
-	flush := func() {
-		if len(buffer) == 0 {
-			return
-		}
-		n, err := q.store.SaveExhibitions(area.ctx, buffer)
-		if err != nil {
-			log.Printf("scrape %s: storing: %v", area.cell, err)
-		}
-		stored += int(n)
-		buffer = buffer[:0]
-	}
-
-	for range area.museums {
+	for range area.targets {
 		select {
 		case <-q.stop:
-			// Keep what has already been read rather than discarding it.
-			flush()
 			return
-		case batch := <-area.results:
-			for _, e := range batch {
-				if e.URL == "" {
-					continue
-				}
-				if _, dup := seen[e.URL]; dup {
-					continue
-				}
-				seen[e.URL] = struct{}{}
-				buffer = append(buffer, e)
-				found++
-			}
-			if len(buffer) >= scrapeStoreBatch {
-				flush()
-			}
+		case report := <-area.results:
+			found += report.Found
+			retired += report.Retired
 			q.setProgress(area.cell, func(p *scrapeProgress) { p.Read++; p.Found = found })
 		}
 	}
-	flush()
 
 	if _, err := q.store.PruneNavigationListings(area.ctx); err != nil {
 		log.Printf("scrape %s: pruning: %v", area.cell, err)
@@ -469,21 +464,62 @@ func (q *scrapeQueue) collect(area *scrapeArea) {
 		log.Printf("scrape %s: merging: %v", area.cell, err)
 	}
 
-	log.Printf("scrape %s: %d sites, %d exhibitions found, %d stored, %s",
-		area.cell, len(area.museums), found, stored, time.Since(start).Round(time.Second))
+	log.Printf("scrape %s: %d sites, %d exhibitions found, %d retired, %s",
+		area.cell, len(area.targets), found, retired, time.Since(start).Round(time.Second))
 
 	q.release(area.cell, true)
+}
+
+// recoverCooldowns gives the queue back the areas that were read before this
+// process started.
+//
+// Failure here is logged and not fatal: an empty cooldown is how this behaved
+// before the table existed, so the map still works and the worst case is that
+// an area read yesterday can be asked for again today.
+func (q *scrapeQueue) recoverCooldowns() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	areas, err := q.store.AreasScrapedSince(ctx, time.Now().Add(-scrapeCooldown))
+	if err != nil {
+		log.Printf("scrape: could not recover cooldowns: %v", err)
+		return
+	}
+	if len(areas) == 0 {
+		return
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	maps.Copy(q.done, areas)
+	log.Printf("scrape: %d area(s) still cooling down from before this start", len(areas))
 }
 
 // release lets go of an area, either recording that it has just been read or
 // leaving it free to be asked for again.
 func (q *scrapeQueue) release(cell string, scraped bool) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	delete(q.state, cell)
 	delete(q.progress, cell)
-	if scraped {
-		q.done[cell] = time.Now()
+	if !scraped {
+		q.mu.Unlock()
+		return
+	}
+	at := time.Now()
+	q.done[cell] = at
+	q.mu.Unlock()
+
+	// Written outside the lock: this is a database round trip, and every
+	// request asking what is happening anywhere takes the same mutex.
+	//
+	// Not the caller's context either. That belongs to whoever asked for the
+	// scrape and is long gone by the time it finishes; cancelling this with it
+	// would drop the record of work that has already been done, and the next
+	// visitor would pay for all of it again.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := q.store.MarkAreaScraped(ctx, cell, at); err != nil {
+		log.Printf("scrape %s: recording the cooldown: %v", cell, err)
 	}
 }
 

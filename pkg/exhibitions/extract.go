@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/net/html"
 )
@@ -30,12 +31,42 @@ var listingLinkWords = []string{
 	"exposition", "expositions", "agenda",
 	"esposizioni", "mostre", "exposiciones", "exposições",
 	"tentoonstelling", "tentoonstellingen", "utstilling", "wystawy",
+	// Swedish and Danish were missing while Norwegian was here, so a nav link
+	// reading "Utställningar" — which is how a Swedish museum labels the way
+	// to its programme — scored nothing from its text. World of Volvo and the
+	// Medicinhistoriska museet both list their exhibitions behind exactly that
+	// word. The same gap was found and fixed in strongPathHints below and not
+	// carried across to here, so both spellings of each go in this time.
+	"utställning", "utställningar", "utstallning", "utstallningar",
+	"udstilling", "udstillinger", "näyttely", "nayttely", "näyttelyt",
 	// Words for permanent displays are deliberately absent: this list decides
 	// which page is read for the programme, and the loop that uses it stops at
 	// the first page that yields anything. Scoring a permanent link here put
 	// Ateneum's permanent collection ahead of "/nayttelyt/" and lost all three
 	// of its temporary exhibitions. Permanent pages are found separately, by
 	// FindPermanentLinks, so they add to the programme instead of replacing it.
+}
+
+// pastListingWords name a page as the archive of what has already closed.
+//
+// Never worth one of the three page reads a museum gets: every entry behind it
+// is a finished run, and every one is discarded for being finished. Hasselblad
+// Center offers "Past Exhibitions" and "Calendar" alongside "Current
+// Exhibitions", all three scoring alike, and the archive came first in the
+// page — so the budget was spent before the current programme was reached.
+var pastListingWords = []string{
+	"past exhibition", "past show", "previous exhibition", "archive", "arkiv",
+	"tidigare", "förra", "vergangene", "vroegere", "passate", "anteriores",
+	"archiv", "ausstellungsarchiv",
+	"passées", "passees", "aiemmat", "tidligere",
+}
+
+// currentListingWords name a page as what is on right now, which is what a
+// visitor is asking about and so what the budget should be spent on first.
+var currentListingWords = []string{
+	"current", "now on", "on now", "on view now", "aktuell", "aktuella",
+	"pågående", "pagaende", "nu visas", "actueel", "en cours", "attuale",
+	"actual", "nykyiset", "jetzt", "heute",
 }
 
 // strongPathHints name a URL as an exhibition outright. A site that uses these
@@ -77,10 +108,43 @@ var skipLinkWords = []string{
 	"accessibility", "terms", "contact", "press", "jobs", "careers",
 	"view all", "see all", "show all", "load more", "next", "previous",
 	"filter", "sort", "sign in", "log in", "register", "français", "deutsch",
+	"biljett", "biljetter", "köp biljett", "entré", "öppettider", "kontakt",
+	// Archives of what has already been on. Harmless while every entry needed
+	// a date — a closed run was dropped for being closed — but the undated
+	// rule has no dates to judge by, so the index of past shows has to be
+	// named. The Medicinhistoriska museet lists "Tidigare utställningar"
+	// beside its current ones.
+	"tidigare", "past exhibition", "previous exhibition", "archive", "arkiv",
+	"archiv", "sarchiv",
+	// Staff pages. A museum names them after the exhibition the team works on
+	// — "Team Dauerausstellung" — so the path and the words both look right.
+	"team ", "unser team", "mitarbeiter", "staff", "medarbetare", "personal",
+	"vergangene", "vroegere", "mostre passate", "exposiciones anteriores",
+	"expositions passées", "aiemmat",
+	// And the index of what has not opened yet, for the same reason: Ateneum
+	// lists "Tulevat näyttelyt" beside its current ones.
+	"tulevat", "upcoming exhibition", "kommande", "kommende", "à venir",
+	"proximas", "próximas", "prossime",
 }
 
 // whitespaceRe collapses runs of whitespace in extracted text.
 var whitespaceRe = regexp.MustCompile(`\s+`)
+
+// invisibleText strips the characters a page inserts to control line breaking
+// and nothing else.
+//
+// German sites use the soft hyphen heavily — the Jewish Museum Berlin writes
+// "Aus­stel­lun­gen" with three of them — and every word list in this package
+// then fails to match, silently. Its archive link, "Alle ver­gangenen
+// Aus­stel­lun­gen", was read as a permanent exhibition for exactly that
+// reason. They are invisible to a reader and should be invisible here.
+var invisibleText = strings.NewReplacer(
+	"\u00ad", "", // soft hyphen
+	"\u200b", "", // zero-width space
+	"\u200c", "", // zero-width non-joiner
+	"\u200d", "", // zero-width joiner
+	"\ufeff", "", // byte-order mark
+)
 
 // Candidate is a possible exhibition pulled out of a listing page.
 type Candidate struct {
@@ -94,6 +158,12 @@ type Candidate struct {
 	// ISO-8601 whatever language the page is written in, so where they exist
 	// they are used in place of reading the text.
 	Dates DateRange
+
+	// Vouched marks an entry admitted only because the page it sits on calls
+	// itself an exhibitions listing — its own path says nothing. The caller
+	// holds these to a higher standard, because the path test they skipped is
+	// what normally keeps a listing page's navigation out.
+	Vouched bool
 }
 
 // FindListingLinks returns the URLs on a page that look like they lead to the
@@ -120,7 +190,26 @@ func FindListingLinks(pageHTML string, base *url.URL) []string {
 			return
 		}
 
+		parsed, err := url.Parse(resolved)
+		if err != nil {
+			return
+		}
+		// Only this site's own pages. A listing page is read for the links it
+		// carries, and ExtractCandidates discards everything off-host, so an
+		// off-site page can never yield an exhibition — but it still costs one
+		// of the three pages a museum gets. World of Volvo's front page offers
+		// four ticketing links on a different host, which filled the budget
+		// before its exhibitions page was ever tried.
+		if base.Host != "" && !strings.EqualFold(parsed.Host, base.Host) {
+			return
+		}
+
 		lower := strings.ToLower(text)
+		path := strings.ToLower(parsed.Path)
+		if containsAny(lower, pastListingWords) || containsAny(path, pastListingWords) {
+			return
+		}
+
 		score := 0
 		for _, word := range listingLinkWords {
 			if strings.Contains(lower, word) {
@@ -128,12 +217,13 @@ func FindListingLinks(pageHTML string, base *url.URL) []string {
 				break
 			}
 		}
-		parsed, err := url.Parse(resolved)
-		if err != nil {
-			return
+		// What is on now beats what was on, and beats an undifferentiated
+		// calendar of everything the museum does.
+		if containsAny(lower, currentListingWords) || containsAny(path, currentListingWords) {
+			score += 2
 		}
 		for _, hint := range exhibitionPathHints {
-			if strings.Contains(strings.ToLower(parsed.Path), hint) {
+			if strings.Contains(path, hint) {
 				score++
 				break
 			}
@@ -287,6 +377,22 @@ func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
 	}
 
 	repeated := repeatedLinkTexts(doc)
+	// A page that calls itself the exhibitions page is believed about the
+	// links it carries, even when their paths say nothing.
+	//
+	// The path test is the main defence against reading a listing page's
+	// navigation as exhibitions, and it holds wherever a site files
+	// exhibitions somewhere named. Plenty do not. The Hasselblad Foundation
+	// publishes every exhibition under "/en/portfolio_page/439876/" — a
+	// WordPress grid plugin's own path, carrying an post id and no word about
+	// what it is — so "Women Behind the Camera" was rejected along with the
+	// rest, and a museum with a full programme looked empty.
+	//
+	// Relaxing it here is safe because the date rule is still in force. An
+	// entry on this page has to be datable to be kept, and the navigation this
+	// would otherwise let in — the opening hours, the library, the shop —
+	// carries no dates.
+	trustPage := namesExhibitions(pageHTML, base)
 
 	var strong, weak []Candidate
 	seen := make(map[string]struct{})
@@ -294,7 +400,7 @@ func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "a" {
-			if candidate, isStrong, ok := candidateFrom(n, base, repeated); ok {
+			if candidate, isStrong, ok := candidateFrom(n, base, repeated, trustPage); ok {
 				// Paging and view-switching links are calendar chrome,
 				// whatever their text says.
 				if IsNavigationLink(candidate.URL, base) {
@@ -326,7 +432,7 @@ func ExtractCandidates(pageHTML string, base *url.URL) []Candidate {
 }
 
 // candidateFrom decides whether an anchor names an exhibition.
-func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool) (Candidate, bool, bool) {
+func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool, trustPage bool) (Candidate, bool, bool) {
 	href := attr(anchor, "href")
 	if href == "" {
 		return Candidate{}, false, false
@@ -346,13 +452,34 @@ func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool) (
 	// Royal Academy files a DJ night at /event/summer-exhibition-friday-lates,
 	// whose slug contains "exhibition" while the entry plainly is not one.
 	sections := pathSections(parsed.Path)
+	joined := strings.Join(sections, "/")
 	if len(sections) == 0 {
-		// A listing index links to its entries, so an entry is deeper than the
-		// index itself.
-		return Candidate{}, false, false
+		// No sections means a flat path — the whole of it is the entry's own
+		// slug, with no directory above to classify it by.
+		//
+		// Rejecting those outright lost every exhibition on any site that does
+		// not nest. The Jewish Museum Berlin publishes "/dauerausstellung" and
+		// "/ausstellung-gegenteil-von-jetzt" at the root, so it had no
+		// extractable exhibitions at all and fell back to a single entry for
+		// the museum.
+		//
+		// Judged by the slug, which the nested case deliberately ignores, and
+		// only on a strong word. The danger the nested rule guards against is
+		// the Royal Academy's "/event/summer-exhibition-friday-lates", where a
+		// directory says "event" and the slug says "exhibition" — there the
+		// directory is believed. Here there is no directory to disagree with.
+		slug := strings.Trim(strings.ToLower(parsed.Path), "/")
+		if slug == "" || !containsAny(slug, strongPathHints) {
+			return Candidate{}, false, false
+		}
+		joined = slug
 	}
-	isStrong := containsAny(strings.Join(sections, "/"), strongPathHints)
-	if !isStrong && !containsAny(strings.Join(sections, "/"), weakPathHints) {
+	isStrong := containsAny(joined, strongPathHints)
+	pathNamed := isStrong || containsAny(joined, weakPathHints)
+	// trustPage stands in for a path hint the site does not give. It never
+	// makes an entry strong: a page that does name its exhibitions in the path
+	// still outranks one that does not.
+	if !pathNamed && !trustPage {
 		return Candidate{}, false, false
 	}
 
@@ -400,7 +527,13 @@ func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool) (
 		// slug names the entry by construction.
 		title = titleFromSlug(parsed.Path)
 	}
-	if title == "" {
+	// A title of nothing but digits names nothing, wherever it was read.
+	//
+	// The slug fallback declines these already, but a card can carry one in its
+	// own text just as easily: the Royal Academy's summer exhibition listing
+	// gave up "2026", and that is what the panel showed a visitor as the name of
+	// something to go and see.
+	if title == "" || onlyDigits(title) {
 		return Candidate{}, false, false
 	}
 
@@ -410,6 +543,7 @@ func candidateFrom(anchor *html.Node, base *url.URL, repeated map[string]bool) (
 		URL:     resolved,
 		Context: context,
 		Dates:   machineDates(card),
+		Vouched: !isStrong && !pathNamed,
 	}, isStrong, true
 }
 
@@ -444,13 +578,22 @@ func titleFromSlug(path string) string {
 	}
 	slug := trimmed[strings.LastIndex(trimmed, "/")+1:]
 
-	// Drop a file extension and any numeric id suffix.
+	// Drop a file extension.
 	if idx := strings.LastIndex(slug, "."); idx > 0 {
 		slug = slug[:idx]
 	}
+	slug = trimPublishDate(slug)
+	slug = trimOccurrenceSuffix(slug)
 	slug = strings.NewReplacer("-", " ", "_", " ").Replace(slug)
 	slug = strings.TrimSpace(whitespaceRe.ReplaceAllString(slug, " "))
 	if len([]rune(slug)) < 3 {
+		return ""
+	}
+	// A slug that is only digits is the site's own record number, not a name:
+	// the Akademie der Künste ends every event's URL with one, and the reader
+	// dutifully turned "…/588488" into an exhibition called "588488". Nothing a
+	// visitor can read is lost by declining it.
+	if onlyDigits(slug) {
 		return ""
 	}
 
@@ -460,6 +603,74 @@ func titleFromSlug(path string) string {
 		words[i] = strings.ToUpper(string(runes[:1])) + string(runes[1:])
 	}
 	return strings.Join(words, " ")
+}
+
+// publishDateRe matches the date a publishing system puts at the front of a
+// slug: a full year-month-day, and nothing less.
+//
+// The month and day are range-checked in the pattern itself, because the only
+// thing separating a date from the start of a real name here is whether the
+// numbers could be one. Titles beginning with a year are common and must
+// survive: "1700-talets-goteborg", "2101-future-ceramics",
+// "1913-1923-lesprit-du-temps", "2026-summer-camps". None of those has a
+// two-digit month and day after the year, and a bare year is never dropped.
+var publishDateRe = regexp.MustCompile(`^\d{4}[-_.](?:0[1-9]|1[0-2])[-_.](?:0[1-9]|[12]\d|3[01])(?:[-_.]+|$)`)
+
+// onlyDigits reports whether a slug carries no letters at all — spaces and
+// digits only, once the separators have become spaces.
+func onlyDigits(slug string) bool {
+	for _, r := range slug {
+		if r != ' ' && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// trimPublishDate removes that date.
+//
+// Mölndals stadsmuseum names every exhibition page after the day it opens —
+// "2026-06-02-noughties---00-talets-mode-och-trender" — so the title read off
+// the slug began with the date rather than the name. It read as a serial
+// number where the exhibition's name should be, and it sorted the panel by
+// something nobody was looking for.
+//
+// A slug that is nothing but a date leaves nothing behind, which is the right
+// answer: those are a library's calendar entries, one page per session, and
+// they are not exhibitions whatever the reader thought.
+func trimPublishDate(slug string) string {
+	return publishDateRe.ReplaceAllString(slug, "")
+}
+
+// trimOccurrenceSuffix removes the counter a site appends to a slug when it
+// publishes the same event again.
+//
+// This is what makes the recurring-event merge work at all. Hasselblad Center
+// publishes one weekly introduction to its current exhibition as seven pages,
+// "…-women-behind-the-camera-1848-1968-3" through "-9". The merge keys on the
+// title, and where the title comes from the slug, the counter made seven
+// different titles out of one name — so nothing merged and the museum showed
+// the same event seven times.
+//
+// Only a short number, and only when a real name is left without it. A year is
+// four digits and stays; "documenta-14" keeps its number because "documenta"
+// alone is not a name the rest of the slug supports.
+func trimOccurrenceSuffix(slug string) string {
+	idx := strings.LastIndex(slug, "-")
+	if idx <= 0 {
+		return slug
+	}
+	suffix := slug[idx+1:]
+	if len(suffix) == 0 || len(suffix) > 2 {
+		return slug
+	}
+	if _, err := strconv.Atoi(suffix); err != nil {
+		return slug
+	}
+	if strings.Count(slug[:idx], "-") < 2 {
+		return slug
+	}
+	return slug[:idx]
 }
 
 // pathSections returns a URL path's segments with the final one — the entry's
@@ -632,6 +843,13 @@ var nonExhibitionTypes = []string{
 	"guided tour", "guided visit", "workshop", "concert", "lecture",
 	"screening", "conference", "performance", "reading", "masterclass",
 	"symposium", "seminar", "webinar", "course", "family activity",
+	// An introduction, a walkthrough or a curator's talk is an event about an
+	// exhibition rather than the exhibition, and museums schedule them weekly.
+	// Hasselblad Center's calendar carries seven introductions to one show and
+	// no entry for the show itself.
+	"introduction to the exhibition", "introduktion till utställningen",
+	"curator's tour", "curator tour", "artist talk", "gallery talk",
+	"einführung in die ausstellung", "visite commentée",
 	"visite guidée", "atelier", "rencontre", "projection", "spectacle",
 	"führung", "vortrag", "werkstatt", "rondleiding", "lezing",
 }
@@ -671,6 +889,20 @@ func cleanTitle(text string) string {
 	// "permanente Méditerranées" until the adjective went too.
 	title = trimLeadingWord(title, permanenceAdjectives)
 
+	// A link's accessible label often leads with what the link does rather than
+	// what it names — "Gå till sidan Kungens skepp", "Read about Bärgningen".
+	// titleOf prefers the aria-label because it is usually the cleanest title
+	// on the card, so the affordance has to come off the front of it or every
+	// exhibition at the Vasamuseet is called "Gå till sidan ...".
+	for _, prefix := range linkAffordances {
+		if len(title) > len(prefix) && strings.EqualFold(title[:len(prefix)], prefix) {
+			if rest := strings.TrimSpace(title[len(prefix):]); len([]rune(rest)) >= 4 {
+				title = rest
+			}
+			break
+		}
+	}
+
 	// Listing cards run the title into the dates and the "now on view" badge.
 	// Cutting at the first date keeps the title and drops the rest.
 	if idx := firstDateIndex(title); idx > 3 {
@@ -686,6 +918,18 @@ func cleanTitle(text string) string {
 	}
 
 	return strings.Trim(strings.TrimSpace(title), " ,;:–—-")
+}
+
+// linkAffordances are the phrases an accessible label puts in front of the
+// thing it names, saying what following the link does.
+var linkAffordances = []string{
+	"gå till sidan ", "ga till sidan ", "gå till ", "läs om ", "las om ",
+	"go to page ", "go to ", "read about ", "read more about ", "more about ",
+	"link to ", "navigate to ", "visit page ",
+	"zur seite ", "mehr über ", "mehr ueber ",
+	"aller à la page ", "en savoir plus sur ",
+	"ga naar ", "lees over ",
+	"siirry sivulle ", "gå til siden ",
 }
 
 // markupRe matches anything tag-shaped left in extracted text.
@@ -730,8 +974,22 @@ func trimLeadingWord(title string, words []string) string {
 func lastTypeLabel(title string) int {
 	best := -1
 	for _, label := range typeLabels {
-		if idx := strings.LastIndex(title, label); idx != -1 && idx+len(label) > best {
-			best = idx + len(label)
+		idx := strings.LastIndex(title, label)
+		if idx == -1 {
+			continue
+		}
+		end := idx + len(label)
+		// A whole word, not the start of a longer one. Cutting inside a word
+		// turned "Ausstellungsarchiv" into "sarchiv": the label "Ausstellung"
+		// is a prefix of it, and everything up to the end of the label was
+		// taken for scaffolding.
+		if end < len(title) {
+			if r := rune(title[end]); r == '\'' || (r|0x20 >= 'a' && r|0x20 <= 'z') || r >= 0x80 {
+				continue
+			}
+		}
+		if end > best {
+			best = end
 		}
 	}
 	return best
@@ -761,7 +1019,7 @@ var skippedElements = map[string]bool{
 func attr(n *html.Node, name string) string {
 	for _, a := range n.Attr {
 		if a.Key == name {
-			return strings.TrimSpace(a.Val)
+			return strings.TrimSpace(invisibleText.Replace(a.Val))
 		}
 	}
 	return ""
@@ -787,7 +1045,7 @@ func textOf(n *html.Node) string {
 	}
 	walk(n)
 
-	return strings.TrimSpace(whitespaceRe.ReplaceAllString(b.String(), " "))
+	return strings.TrimSpace(whitespaceRe.ReplaceAllString(invisibleText.Replace(b.String()), " "))
 }
 
 // resolveURL turns a possibly relative href into an absolute http(s) URL.

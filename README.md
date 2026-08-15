@@ -90,7 +90,8 @@ The six subcommands have genuinely different lifecycles, and that is a good reas
 | `serve` | long-running service | always up |
 | `enrich` | long-running consumer | always up |
 | `crawl` | batch, runs to completion | weekly |
-| `refresh` | batch, runs to completion | daily |
+| `refresh` | batch, runs to completion | on demand, for one area |
+| `sweep` | long-running service | always up |
 | `reindex` | batch, runs to completion | after `crawl`, and after `enrich` catches up |
 | `verify` | batch, runs to completion | after every crawl |
 | `query` | interactive | on demand |
@@ -231,6 +232,42 @@ museum refresh -all -max-museums 2000
 Scraping twenty museum websites takes about **16 seconds**, and politeness limits mean that cost cannot come down — so it is a background job, not part of a request. Run it daily; exhibition runs change over weeks.
 
 A refresh replaces only the entries for the museums it just scraped, so a run scoped to one city does not wipe another city's results out of a shared cell.
+
+### `museum sweep` — keep exhibitions current
+
+```bash
+museum sweep                              # run continuously; this is the service
+museum sweep -once -batch 500             # a single pass, for a cron
+museum sweep -dry-run                     # show what it would read, and why
+```
+
+`refresh` reads an area because a caller asked for that area. `sweep` asks a different question: which sites does the catalogue expect to be **out of date**? Refreshing everything on one cadence gets both halves wrong — the Tate changes faster than a weekly sweep notices, and a village radio museum whose site last changed in 2019 is read fifty times a year to confirm it still says the same thing. With 54,168 distinct museum websites, one request per host per second, the sweep budget is the scarce resource.
+
+Each site carries its own due date, adapted from what the last sweeps found:
+
+| Signal | Effect |
+| --- | --- |
+| Nothing changed | Interval × 1.5, up to 60 days |
+| Something changed | Interval ÷ 2, down to 2 days |
+| **An exhibition closes on the 14th** | **Due on the 15th, whatever the rate says** |
+| Read failed | Backoff × 2 per failure; parked after 6 |
+| Never read | Ahead of everything with a due date |
+
+The closing-date rule is the valuable one: it is the single moment staleness is certain rather than inferred. The interval is otherwise left to settle per site, because nobody could configure 54,168 of them by hand and any rate chosen centrally is wrong for most.
+
+The first read of a site deliberately learns nothing — it has nothing to compare against, and treating it as a change would move every site in the catalogue off the starting interval at once, in the same direction.
+
+**Retiring what vanished.** A listing that stops appearing on the site it came from is marked `retired_at` and drops out of results. Retirement is a column rather than a `DELETE`, and only ever runs after a read that found *something*: a site answering half a page or blocking us for an afternoon would otherwise erase a museum's whole programme, irreversibly. Submissions are exempt — nothing will see them on a museum's site, because they did not come from one.
+
+**New museums need no wiring.** Every cycle begins by giving any museum website without a scrape record one, due immediately, so a museum added by a later `crawl` enters the rotation ahead of everything already scheduled. A museum with no coordinates is skipped — its exhibitions could not be found by any radius query anyway — and joins by itself once enrichment places it.
+
+**Safe to run more than one of.** The sweeper holds no state: everything deciding what to read and when to return lives in the database, so a restart resumes where it left off and a second replica simply takes different work. Sites are claimed under `FOR UPDATE SKIP LOCKED` with a 30-minute lease, because the cost of getting this wrong is two crawlers pointed at the same museum's server — the one thing the politeness rules exist to bound. A sweeper killed mid-batch strands nothing; its claims lapse and the sites fall due again.
+
+**Paced.** On a first run every site in the catalogue is due at once. `-rate` caps sites read per minute across the whole sweep, separately from the fetcher's one-request-per-host-per-second, so a large backlog is worked through steadily rather than flat out.
+
+**One reader, two callers.** The scheduled sweep and the API's on-demand area scrape go through the same code and leave the same trace. When they did not, they worked against each other: the sweep re-read sites the API had read minutes earlier, none of the API's work fed the adaptive interval, vanished listings were retired down only one of the two paths, and an area the API had just scraped still told callers "no exhibitions have been collected here yet", because the coverage report reads the attempt record and the API was not writing one.
+
+**Conditional requests.** Where a site sends `ETag` or `Last-Modified`, the sweep offers them back and a 304 costs no body and no parsing. In practice most museum sites send neither — of three checked by hand, none did — so the real change detection is a digest of each read, compared with the last. The conditional request is a free win where it is available rather than the mechanism the design leans on.
 
 **Permanent displays are collected too, and marked `permanent`.** Most museums are not the Tate: they run no temporary programme at all, and reading their sites for dated listings returned nothing — which in a result set is indistinguishable from having nothing to see. Radiomuseet in Göteborg has no exhibitions page, no calendar and no date anywhere on its site, and rooms full of radios.
 

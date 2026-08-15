@@ -130,13 +130,78 @@ var ErrNoWebsite = errors.New("museum has no website")
 // A site that lists nothing at all falls through to permanentDisplay, which
 // reads the museum's own description of itself. See permanent.go for why.
 func (s *Scraper) ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibition, error) {
+	result, err := s.ForSite(ctx, museum, Known{})
+	return result.Exhibitions, err
+}
+
+// Known is what a previous sweep learned about a site: which page its listings
+// came from, and the cache tags that page carried.
+type Known struct {
+	ListingURL string
+	Validators Validators
+}
+
+// Result is one site's worth of a sweep.
+type Result struct {
+	Exhibitions []Exhibition
+
+	// ListingURL is the page the exhibitions were read from, and Validators
+	// are its cache tags, to be offered back next time.
+	ListingURL string
+	Validators Validators
+
+	// Reached is true when at least one page was successfully fetched.
+	//
+	// Without it a site that could not be reached at all is indistinguishable
+	// from one read fine that lists nothing, because this scraper skips failed
+	// pages quietly by design. A sweep needs the difference: one should back
+	// off and eventually stop costing anything, the other is a normal result
+	// to be rechecked on the usual schedule.
+	Reached bool
+
+	// Unchanged is set when the site answered that its listing page has not
+	// moved since we last read it. Exhibitions is empty then, and that means
+	// "what you hold is still current", not "there is nothing here" — a caller
+	// must not mistake the two, or it will retire a museum's whole programme
+	// on the strength of a 304.
+	Unchanged bool
+}
+
+// ForSite reads a museum's website for a sweep, taking the short path when the
+// site can tell us nothing has changed.
+//
+// The fast path is worth the extra entry point. A steady site costs one
+// conditional request that transfers no body and needs no parsing, in place of
+// the two to four requests full discovery makes — and most museums are steady
+// most of the time.
+func (s *Scraper) ForSite(ctx context.Context, museum models.Museum, known Known) (Result, error) {
 	if strings.TrimSpace(museum.Website) == "" {
-		return nil, ErrNoWebsite
+		return Result{}, ErrNoWebsite
 	}
 
+	if known.ListingURL != "" && !known.Validators.none() {
+		page, err := s.fetcher.Fetch(ctx, known.ListingURL, known.Validators)
+		// A failure here is not the site's answer, only this shortcut's: fall
+		// through to full discovery rather than reporting the site broken.
+		if err == nil && page.Unchanged {
+			return Result{
+				ListingURL: known.ListingURL,
+				Validators: known.Validators,
+				Reached:    true,
+				Unchanged:  true,
+			}, nil
+		}
+	}
+
+	return s.readSite(ctx, museum)
+}
+
+// readSite performs full discovery: home page, listing pages, permanent pages,
+// and the museum's own description as a last resort.
+func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, error) {
 	base, err := url.Parse(strings.TrimSpace(museum.Website))
 	if err != nil || base.Host == "" {
-		return nil, errors.New("museum website is not a usable URL")
+		return Result{}, errors.New("museum website is not a usable URL")
 	}
 	if base.Scheme == "" {
 		base.Scheme = "https"
@@ -146,13 +211,15 @@ func (s *Scraper) ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibi
 	home := s.readHome(ctx, base)
 
 	var (
+		result  = Result{Reached: home.reached}
 		found   []Exhibition
 		visited = make(map[string]struct{})
 	)
 
 	for _, listingURL := range slices.Concat(home.listings, candidateListingURLs(base)) {
 		if ctx.Err() != nil {
-			return found, ctx.Err()
+			result.Exhibitions = found
+			return result, ctx.Err()
 		}
 		if len(visited) >= maxListingPages {
 			break
@@ -162,9 +229,14 @@ func (s *Scraper) ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibi
 		}
 		visited[listingURL] = struct{}{}
 
-		found = append(found, s.harvest(ctx, listingURL, base, museum, now, false)...)
+		page, entries := s.harvest(ctx, listingURL, base, museum, now, false, visited)
+		result.Reached = result.Reached || page.URL != ""
+		found = append(found, entries...)
 		if len(found) > 0 {
 			// The programme was found; no need to try further candidates.
+			// Remember which page it came from, and what it was tagged with, so
+			// the next sweep can ask this page directly whether it has moved.
+			result.ListingURL, result.Validators = page.URL, page.Validators
 			break
 		}
 	}
@@ -181,7 +253,8 @@ func (s *Scraper) ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibi
 	permanentPages := 0
 	for _, listingURL := range home.permanent {
 		if ctx.Err() != nil {
-			return dedupe(found), ctx.Err()
+			result.Exhibitions = dedupe(found)
+			return result, ctx.Err()
 		}
 		// Counted separately from the pages above rather than sharing their
 		// budget: a site whose programme was found on the first try would
@@ -195,7 +268,9 @@ func (s *Scraper) ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibi
 		visited[listingURL] = struct{}{}
 		permanentPages++
 
-		found = append(found, s.harvest(ctx, listingURL, base, museum, now, true)...)
+		page, entries := s.harvest(ctx, listingURL, base, museum, now, true, visited)
+		result.Reached = result.Reached || page.URL != ""
+		found = append(found, entries...)
 	}
 
 	// Everything above is free and language-bound. When it has come back with
@@ -221,10 +296,16 @@ func (s *Scraper) ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibi
 	if len(found) == 0 {
 		if display, ok := s.permanentDisplay(ctx, base, home, museum, now); ok {
 			found = append(found, display)
+			result.Reached = true
+			// The page describing the museum is the page whose changing
+			// matters for this site, so it is what the next sweep should ask
+			// about.
+			result.ListingURL = display.SourcePage
 		}
 	}
 
-	return dedupe(found), nil
+	result.Exhibitions = dedupe(found)
+	return result, nil
 }
 
 // harvest reads one listing page and returns the exhibitions on it.
@@ -233,11 +314,12 @@ func (s *Scraper) ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibi
 // permanent displays, which is a claim its own markup often does not repeat: a
 // page headed "Fasta utställningar" lists entries that say nothing about their
 // own permanence, because the heading already did.
-func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL, museum models.Museum, now time.Time, assumePermanent bool) []Exhibition {
-	body, finalURL, err := s.fetcher.Get(ctx, listingURL)
+func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL, museum models.Museum, now time.Time, assumePermanent bool, readAsListing map[string]struct{}) (Page, []Exhibition) {
+	page, err := s.fetcher.Fetch(ctx, listingURL, Validators{})
 	if err != nil {
-		return nil
+		return Page{}, nil
 	}
+	body, finalURL := page.Body, page.URL
 
 	pageBase, err := url.Parse(finalURL)
 	if err != nil {
@@ -248,8 +330,28 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 	// the page already gave them.
 	pagePermanent := assumePermanent || isPermanentListing(body, pageBase)
 
+	candidates := candidatesOn(body, pageBase)
+	// A page of exhibitions that dates none of them is a museum that does not
+	// write dates, not a page of noise — but that says nothing about whether
+	// any given entry has an end. See undatedListing.
+	pageUndated := undatedListing(namesExhibitions(body, pageBase), candidates, now)
+
 	var found []Exhibition
-	for _, candidate := range candidatesOn(body, pageBase) {
+	for _, candidate := range candidates {
+		// A page already read as a listing is an index, not something on show,
+		// wherever it is linked from. IsNavigationLink only recognises the page
+		// a link was found on, so a listing linking to a sibling listing slips
+		// past it: the Jewish Museum Berlin's permanent-exhibition page links
+		// back to "Ausstellungen", which arrived as a permanent exhibition.
+		//
+		// Pages actually read, not every link that looked like a listing. The
+		// link finder scores deep entry pages too — most of Tate's exhibitions
+		// match it — so excluding everything it returned threw away the
+		// exhibitions along with the indexes.
+		if _, isIndex := readAsListing[candidate.URL]; isIndex {
+			continue
+		}
+
 		dates := datesFor(candidate, now)
 		// An entry with no readable dates cannot be placed in time, and listing
 		// pages are full of links that are not exhibitions at all; requiring a
@@ -257,15 +359,41 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 		// and has to name itself one to be kept: otherwise the rule that keeps
 		// the noise out is gone.
 		permanent := dates.Permanent
+		undated := false
 		if dates.IsZero() && !permanent {
-			if !candidateIsPermanent(candidate, pagePermanent) {
+			switch {
+			case candidateIsPermanent(candidate, pagePermanent):
+				permanent = true
+			case pageUndated:
+				// On show, with no end the page was willing to state.
+				undated = true
+			default:
 				continue
 			}
-			permanent = true
+		}
+
+		// An entry the page vouched for, rather than its own path, has to look
+		// like an exhibition rather than an event: a run with two ends, or a
+		// display that says it has none.
+		//
+		// Without this the vouching let a listing page's whole navigation
+		// through. The Jewish Museum Berlin's "Aktuelle Ausstellungen" page
+		// yielded "Spenden", "Mitglied werden" and "Schließtage" alongside
+		// three Jewish holidays, and the Mucem was read from one exhibition's
+		// own page, whose only link was "Voir le plan". An exhibition runs for
+		// a period; a single day is an event.
+		// Permanence is no exemption here, because on these pages it is not the
+		// entry's own claim: the words "Dauerausstellung" and "permanent" sit
+		// in the page furniture of most museum sites, and a card's surrounding
+		// text reaches them. That is how "Spenden", "Mitglied werden" and
+		// "Schließtage" arrived as permanent exhibitions of the Jewish Museum
+		// Berlin. A run has two ends and cannot be borrowed from a footer.
+		if candidate.Vouched && !isRun(dates) && !datedPermanent(dates) {
+			continue
 		}
 
 		running, upcoming := dates.Runs(now), dates.Upcoming(now)
-		if permanent {
+		if permanent || undated {
 			running, upcoming = true, false
 		}
 		if !running && !upcoming {
@@ -288,7 +416,7 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 			ScrapedAt:        now,
 		})
 	}
-	return found
+	return page, found
 }
 
 // permanentDisplay returns the museum itself as a single permanent entry, for
@@ -360,6 +488,24 @@ func (s *Scraper) permanentDisplay(ctx context.Context, base *url.URL, home home
 	return Exhibition{}, false
 }
 
+// isRun reports whether a range has two ends and covers more than a day.
+func isRun(dates DateRange) bool {
+	return dates.Start != nil && dates.End != nil && dates.End.After(*dates.Start)
+}
+
+// datedPermanent reports whether a display claims permanence and says when it
+// opened.
+//
+// The opening date is what makes the claim the entry's own. A page's
+// navigation carries the word "Dauerausstellung" on every card it surrounds,
+// and that is how the Jewish Museum Berlin's "Spenden" link became a permanent
+// exhibition; no page furniture also supplies an opening date next to it. The
+// Hasselblad Foundation's "Erna Behind the Camera" says "Permanent exhibition
+// Opens May 23 2026" in its own card, and is exactly what this is for.
+func datedPermanent(dates DateRange) bool {
+	return dates.Permanent && dates.Start != nil
+}
+
 // widen stretches a kept entry to cover another occurrence of the same event,
 // so four one-day listings become one entry spanning all four days.
 //
@@ -383,6 +529,8 @@ func widen(kept *Exhibition, other Exhibition) {
 // Both searches start here — the programme, and failing that the museum's
 // description of itself — and the front page is not worth fetching twice.
 type homePage struct {
+	// reached is whether the front page was read at all.
+	reached bool
 	// listings are the links that look like a programme, best first.
 	listings []string
 	// permanent are the links the page labelled as leading to displays that
@@ -396,25 +544,51 @@ type homePage struct {
 // readHome fetches a site's front page and sorts its links. A front page that
 // cannot be read is not an error: the conventional paths are tried regardless.
 func (s *Scraper) readHome(ctx context.Context, base *url.URL) homePage {
-	home := *base
-	home.Path = "/"
-	home.RawQuery = ""
-	home.Fragment = ""
+	for _, candidate := range homeURLs(base) {
+		body, finalURL, err := s.fetcher.Get(ctx, candidate)
+		if err != nil {
+			continue
+		}
 
-	body, finalURL, err := s.fetcher.Get(ctx, home.String())
-	if err != nil {
-		return homePage{}
+		pageBase, err := url.Parse(finalURL)
+		if err != nil {
+			pageBase = base
+		}
+		return homePage{
+			reached:   true,
+			listings:  FindListingLinks(body, pageBase),
+			permanent: FindPermanentLinks(body, pageBase),
+			info:      FindInfoLinks(body, pageBase),
+		}
 	}
+	return homePage{}
+}
 
-	pageBase, err := url.Parse(finalURL)
-	if err != nil {
-		pageBase = base
+// homeURLs returns where to look for a site's front page: the page the
+// catalogue recorded, and then the host's root.
+//
+// Both, because either can be the wrong one. Small museums are very often a
+// section of a larger site — the Medicinhistoriska museet is at
+// vgregion.se/medicinhistoriska, and its own page links straight to its
+// exhibitions, while the host root is a regional health authority's front page
+// with thousands of links and not one about the museum. But a recorded path
+// also goes stale: the Hasselblad Center is catalogued at
+// hasselbladfoundation.org/wp/, a WordPress path that now 404s, and reading
+// only what was recorded found nothing at all on a site that publishes a full
+// programme.
+//
+// Recorded path first, host root second, so the more specific page wins when
+// it works and the site is still reached when it does not.
+func homeURLs(base *url.URL) []string {
+	root := *base
+	root.Path, root.RawQuery, root.Fragment = "/", "", ""
+
+	recorded := *base
+	recorded.RawQuery, recorded.Fragment = "", ""
+	if recorded.Path == "" || recorded.Path == "/" {
+		return []string{root.String()}
 	}
-	return homePage{
-		listings:  FindListingLinks(body, pageBase),
-		permanent: FindPermanentLinks(body, pageBase),
-		info:      FindInfoLinks(body, pageBase),
-	}
+	return []string{recorded.String(), root.String()}
 }
 
 // dedupe removes repeated entries and orders them: running first, then by
@@ -580,8 +754,17 @@ func uniqueBySite(museums []models.Museum) []models.Museum {
 	return unique
 }
 
-// siteKey reduces a website URL to the host it serves from, so that
+// SiteKey reduces a website URL to the host it serves from, so that
 // "https://www.louvre.fr/en" and "https://www.louvre.fr/" count as one site.
+//
+// Exported because the site is the unit a sweep schedules and the unit stored
+// listings are retired by, so the database and the scraper have to agree on
+// what one is. Two implementations of this would drift, and the symptom would
+// be a site scheduled under one key and recorded under another — swept every
+// run, forever, with nothing to show why.
+func SiteKey(website string) string { return siteKey(website) }
+
+// siteKey reduces a website URL to the host it serves from.
 func siteKey(website string) string {
 	website = strings.TrimSpace(website)
 	if website == "" {

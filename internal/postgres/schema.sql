@@ -132,6 +132,16 @@ CREATE INDEX IF NOT EXISTS exhibitions_location_idx ON exhibitions USING gist (l
 -- "What is on now" filters on the closing date, so it leads the index.
 CREATE INDEX IF NOT EXISTS exhibitions_ends_idx ON exhibitions (ends_on);
 
+-- Exhibitions were findable only by location: a visitor who knew the name of
+-- the show but not which museum held it had no way to ask. Trigrams rather than
+-- full-text search for the same reason the museums use them — titles arrive in
+-- every language and are often read off a URL slug, so stemming in one language
+-- would not help and near-misses are most of what people type.
+-- On the title alone, matching the query: similarity against the title joined
+-- to the venue drops below the threshold for the near-misses this is for.
+CREATE INDEX IF NOT EXISTS exhibitions_title_trgm_idx
+    ON exhibitions USING gin ((lower(title)) gin_trgm_ops);
+
 -- Resolved place names, so "exhibitions in Paris" costs one geocoder call ever
 -- rather than one per request.
 --
@@ -185,6 +195,24 @@ ALTER TABLE museums ADD COLUMN IF NOT EXISTS aliases_normalized text[] NOT NULL 
 CREATE INDEX IF NOT EXISTS museums_aliases_normalized_idx
     ON museums USING gin (aliases_normalized);
 
+-- What kind of thing the museum is, in its source's own vocabulary: Wikidata's
+-- P31 labels, e.g. {steamboat, "passenger ship", "working life museum"}.
+--
+-- The catalogue could say what a record is called and where it stood, but never
+-- what it was, and a name alone is often not enough to tell. "Bohuslän",
+-- described as a "working life museum in Gothenburg Municipality", is also a
+-- Swedish province: on a map it read as a region scraped by mistake rather than
+-- as the preserved 1914 steamship it is. The classes are what distinguish the
+-- two, and they are stored rather than derived because no amount of parsing the
+-- name or the description recovers them.
+--
+-- An array because classification is genuinely multi-valued — a museum ship is a
+-- ship and a museum at once — and GIN-indexed so "which museums are ships" is a
+-- query rather than a scan.
+ALTER TABLE museums ADD COLUMN IF NOT EXISTS classes text[] NOT NULL DEFAULT '{}';
+
+CREATE INDEX IF NOT EXISTS museums_classes_idx ON museums USING gin (classes);
+
 -- Whether a museum's position is its own or its town's.
 --
 -- A fifth of the catalogue arrives with no coordinates, and the geocoder cannot
@@ -206,3 +234,171 @@ ALTER TABLE museums ADD COLUMN IF NOT EXISTS location_approximate boolean NOT NU
 -- see today" is wrong without them. For a small museum with no temporary
 -- programme it is the only row there will ever be.
 ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS permanent boolean NOT NULL DEFAULT false;
+
+-- When an exhibition was first and last seen on the museum's own site.
+--
+-- scraped_at said only when the row was last written, which cannot answer
+-- either question a freshness system needs. "What is new near me since
+-- Tuesday" needs the first; retiring a listing that has vanished from the site
+-- needs the second, and without it the table only ever grew — nothing removed
+-- an exhibition that closed early or had its page pulled, and a permanent
+-- display, which carries no closing date at all, leaked permanently.
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS first_seen_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS last_seen_at  timestamptz NOT NULL DEFAULT now();
+
+-- When the listing stopped appearing on the site it was read from. Null while
+-- it is still there.
+--
+-- Retirement is a column rather than a DELETE because a scrape is not
+-- evidence: a site that answers half a page, or blocks us for an afternoon,
+-- would otherwise erase a museum's whole programme irreversibly. Hidden and
+-- recoverable is the right failure mode for a heuristic reader.
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS retired_at timestamptz;
+
+-- Where the row came from. Everything is scraped today; submissions will not
+-- be, and must never be retired, because nothing will ever see them again on a
+-- museum's site.
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'scraped';
+
+-- The host the listing was read from, which is the unit a sweep works in:
+-- museums share websites, so the site is what gets fetched, not the museum.
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS site text NOT NULL DEFAULT '';
+
+-- Backfill the host for rows written before the column existed. Idempotent:
+-- it only touches rows that have not got one.
+UPDATE exhibitions
+   SET site = lower(regexp_replace(
+                  substring(coalesce(source_page, url) from '^https?://([^/:]+)'),
+                  '^www\.', ''))
+ WHERE site = ''
+   AND coalesce(source_page, url) ~ '^https?://';
+
+CREATE INDEX IF NOT EXISTS exhibitions_site_idx ON exhibitions (site) WHERE site <> '';
+
+-- "What is on" must not show what has been taken down, and every such query
+-- filters on this, so it leads the index.
+CREATE INDEX IF NOT EXISTS exhibitions_live_idx ON exhibitions (retired_at, ends_on);
+
+-- The host a museum publishes on, which is the unit a sweep works in.
+--
+-- Generated rather than maintained, because it is a pure function of the
+-- website and there is no state in which the two should disagree. Indexed
+-- because every sweep query joins on it, and deriving it with a regular
+-- expression each time meant scanning 180,000 rows to answer "what is due".
+ALTER TABLE museums ADD COLUMN IF NOT EXISTS site text
+    GENERATED ALWAYS AS (
+        lower(regexp_replace(substring(website from '^https?://([^/:]+)'), '^www\.', ''))
+    ) STORED;
+
+CREATE INDEX IF NOT EXISTS museums_site_idx ON museums (site) WHERE site IS NOT NULL;
+
+-- What each museum website has cost and yielded, and when it is next worth
+-- reading.
+--
+-- Keyed by host rather than by museum because the host is what gets fetched:
+-- institutions nest, and Tate's four galleries share one domain, so a
+-- per-museum record would schedule the same crawl four times.
+--
+-- The table exists mainly to record the attempts that found nothing. Before
+-- it, the only evidence a site had been read was an exhibition row, so a
+-- museum scraped and found empty was indistinguishable from one never tried:
+-- the coverage report told a caller "nobody has looked here yet" about an area
+-- whose every museum had been read that morning, and every dead site was
+-- retried at full cost on every sweep, forever, at the same priority as the
+-- Tate.
+CREATE TABLE IF NOT EXISTS site_scrapes (
+    site text PRIMARY KEY,
+
+    last_attempt_at timestamptz,
+    last_success_at timestamptz,
+    -- When the result last differed from the one before. This is what the
+    -- interval adapts to.
+    last_change_at  timestamptz,
+
+    -- The listing page that produced results, with its cache validators, so
+    -- the next sweep can ask the site whether anything changed instead of
+    -- reading and re-parsing the page to find out.
+    listing_url   text,
+    etag          text,
+    last_modified text,
+
+    found_count          integer NOT NULL DEFAULT 0,
+    consecutive_failures integer NOT NULL DEFAULT 0,
+
+    -- A digest of what the last successful read produced, so "did anything
+    -- change" is answered exactly rather than guessed at from the row count.
+    -- Counting would call a swapped exhibition no change at all, which is the
+    -- case the interval most needs to react to.
+    fingerprint text,
+
+    -- The current gap between reads, in hours, adapted from what the last
+    -- sweeps found. A site that never changes drifts towards months; one that
+    -- changes every time is pulled back towards days.
+    interval_hours double precision NOT NULL DEFAULT 168,
+    next_due_at    timestamptz NOT NULL DEFAULT now(),
+    -- Why this due date was chosen, so a sweep's ordering can be read back
+    -- rather than guessed at.
+    due_reason     text,
+
+    -- Set when a site has failed too often to keep paying for. Null while it
+    -- is still in the rotation.
+    parked_reason text
+);
+
+-- The sweep's only selection query: what is due, soonest first.
+CREATE INDEX IF NOT EXISTS site_scrapes_due_idx
+    ON site_scrapes (next_due_at) WHERE parked_reason IS NULL;
+
+-- Which areas the map has already had read on a visitor's behalf.
+--
+-- Keyed by the same 0.25° cell the on-demand queue dedups on, because the
+-- cooldown is a promise about ground rather than about hosts: an area is left
+-- alone for a day after it has been read, however many sites that turned out
+-- to be, and however few of them had anything to say.
+--
+-- It is a table rather than a map in the queue because the queue's map did not
+-- survive the process. Deploys happen on every push here, and each one silently
+-- reopened every area anyone had looked at that day — the one bound that exists
+-- specifically to keep panning a map from becoming traffic on other people's
+-- servers, reset by an unrelated event several times a week.
+--
+-- Rows outlive their own cooldown only until the next start, which prunes them.
+CREATE TABLE IF NOT EXISTS area_scrapes (
+    cell       text PRIMARY KEY,
+    scraped_at timestamptz NOT NULL
+);
+
+-- Take the publishing date off the titles that were read before the reader
+-- stopped putting it there.
+--
+-- Mölndals stadsmuseum names every exhibition page after the day it opens, so
+-- the title taken from the slug began with the date rather than the name. The
+-- reader no longer does this, but a title is only rewritten when its page is
+-- read again, and that is a week away at the median sweep interval.
+--
+-- The pattern is the reader's: a full year-month-day, month and day both in
+-- range, and never a bare year — plenty of exhibitions are named after one,
+-- and "1700-talets Göteborg" must survive untouched. Idempotent, because a
+-- title it has already corrected no longer matches.
+UPDATE exhibitions
+   SET title = regexp_replace(title,
+                   '^[0-9]{4} (0[1-9]|1[0-2]) (0[1-9]|[12][0-9]|3[01]) +', '')
+ WHERE title ~ '^[0-9]{4} (0[1-9]|1[0-2]) (0[1-9]|[12][0-9]|3[01]) ';
+
+-- A title that was nothing but a date names nothing at all. These are a
+-- library's calendar entries, one page per session, and the reader now declines
+-- them at the source.
+DELETE FROM exhibitions
+ WHERE title ~ '^[0-9]{4} (0[1-9]|1[0-2]) (0[1-9]|[12][0-9]|3[01])$';
+
+-- And the listings whose title is nothing but numbers.
+--
+-- A year read off a card — "2026" — or a site's own record number read off a
+-- numeric URL names nothing a visitor can act on. The reader now declines them
+-- at the source; these are the ones read before it did.
+--
+-- Spaces count as nothing here, exactly as they do in the reader: the Musée
+-- des Beaux-Arts de Nice files each session under its start time, and
+-- "20260811 1000" is as empty a name as "2026" while matching no pattern that
+-- forbids only digits.
+DELETE FROM exhibitions WHERE title ~ '^[0-9 ]+$';

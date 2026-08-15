@@ -1,7 +1,9 @@
 package wikipedia
 
 import (
+	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // Candidate is a museum-like article title discovered on a list page, together
@@ -167,7 +169,7 @@ func (m *MuseumExtractor) Extract(content string) Extraction {
 			}
 		}
 
-		title := firstArticleLink(body)
+		title := entryTitle(body)
 
 		if isGroupHeader(lines, i, depth) {
 			// "* [[Bourg-en-Bresse]]" heading a set of "** [[Museum]]" children
@@ -224,6 +226,113 @@ func isGroupHeader(lines []string, i, depth int) bool {
 	}
 	return false
 }
+
+// trailingPlaceRe matches a location tacked onto the end of a list entry, as
+// either "(...)" or ", ...", where the location is the only thing linked.
+var trailingPlaceRe = regexp.MustCompile(`\s*(?:\(\s*\[\[[^\]]+\]\]\s*\)|,\s*\[\[[^\]]+\]\])\s*\.?\s*$`)
+
+// entryTitle returns the museum named by a list entry, which is not always the
+// entry's first link.
+//
+// Half of "List of Holocaust memorials and museums" writes the museum as plain
+// text and links only the town:
+//
+//   - Ani Ma'amin Holocaust Museum ([[Jerusalem]])
+//   - Memorial to the Victims of the 1941 Pogrom, [[Bucharest]]
+//   - Center for Studies of Holocaust and Religious Minorities ([[Oslo]])
+//
+// Taking the first link made the *town* the museum, so the catalogue held
+// "Jerusalem", "Bucharest" and "Oslo" as museums — with the town's own
+// Wikipedia article attached, which marked them verified. A third shape links
+// the town as the first words of the museum's own name:
+//
+//	*[[Riga]] Ghetto and Latvian Holocaust museum
+//
+// where the answer is the whole line rather than either part of it.
+//
+// So the link is only the title when the entry is the link. A trailing
+// parenthesised or comma-separated link is a location, and a link followed by
+// more words is the start of a longer name.
+func entryTitle(body string) string {
+	// Citations first: a footnote sits between the name and whatever follows it,
+	// and its publisher is often itself a linked institution.
+	body = refRe.ReplaceAllString(body, "")
+	// Files, categories and interwiki links are never the entry, so removing
+	// them lets the first remaining link be the candidate.
+	body = stripNonArticleLinks(body)
+
+	stripped := trailingPlaceRe.ReplaceAllString(body, "")
+	namedItsTown := stripped != body
+	body = stripped
+
+	links := parseLinks(body)
+	if len(links) == 0 {
+		// Only when a trailing town was removed is the remaining text a museum
+		// name. Otherwise this is prose, and treating every unlinked bullet as
+		// a museum would admit far more noise than it recovers.
+		if namedItsTown {
+			return plainTextAll(body)
+		}
+		return ""
+	}
+
+	rest := strings.TrimSpace(body[strings.Index(body, "]]")+2:])
+	if rest == "" || startsAfterName(rest) {
+		return links[0].Target
+	}
+	// Words run straight on from the link, so the link is the first part of a
+	// longer name rather than the name itself.
+	return plainTextAll(body)
+}
+
+// startsAfterName reports whether rest is context following a complete name —
+// a locative phrase or a separator — rather than a continuation of the name.
+func startsAfterName(rest string) bool {
+	// By rune, not by byte: an em dash is three bytes, and slicing the first one
+	// compares a fragment that matches nothing.
+	first, _ := utf8.DecodeRuneInString(rest)
+	if strings.ContainsRune(",;:|-–—(", first) {
+		return true
+	}
+	lower := strings.ToLower(rest)
+	for _, preposition := range []string{"in ", "at ", "near ", "on "} {
+		if strings.HasPrefix(lower, preposition) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripNonArticleLinks removes links that cannot be the entry itself.
+func stripNonArticleLinks(s string) string {
+	return linkRe.ReplaceAllStringFunc(s, func(raw string) string {
+		inner := strings.TrimSuffix(strings.TrimPrefix(raw, "[["), "]]")
+		if target, _, _ := strings.Cut(inner, "|"); !isArticleLink(strings.TrimSpace(target)) {
+			return ""
+		}
+		return raw
+	})
+}
+
+var linkRe = regexp.MustCompile(`\[\[[^\]]*\]\]`)
+
+// plainTextAll flattens every link in s to its display text, unlike plainText,
+// which keeps only the first link's. A name split across a link and the words
+// after it needs all of them.
+func plainTextAll(s string) string {
+	out := linkDisplayRe.ReplaceAllString(s, "$1")
+	out = refRe.ReplaceAllString(out, "")
+	out = strings.NewReplacer("'''", "", "''", "", "[[", "", "]]", "").Replace(out)
+	out = strings.Trim(strings.TrimSpace(whitespaceRe.ReplaceAllString(out, " ")), ".,;: ")
+	return out
+}
+
+var (
+	// linkDisplayRe rewrites [[Target|Display]] and [[Target]] to their visible text.
+	linkDisplayRe = regexp.MustCompile(`\[\[(?:[^\]|]*\|)?([^\]|]+)\]\]`)
+	// refRe removes the citation footnotes that sit inside entries.
+	refRe = regexp.MustCompile(`(?is)<ref[^>]*>.*?</ref>|<ref[^>]*/>`)
+)
 
 // firstArticleLink returns the first link in s that points at a normal article,
 // skipping files, categories and interwiki links. Taking only the first such

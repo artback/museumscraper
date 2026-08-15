@@ -44,6 +44,7 @@ func all() []Command {
 		crawlCommand(),
 		refreshCommand(),
 		harvestCommand(),
+		sweepCommand(),
 		locateCommand(),
 		reindexCommand(),
 		verifyCommand(),
