@@ -41,6 +41,15 @@ export function alreadyAsked(spot) {
 	return asked.has(cellOf(spot));
 }
 
+// onAskedChange reports that some area has been asked about. A read can be
+// started from a museum's own panel as readily as from the map, and what is
+// offered on the map is then out of date with nothing to say so.
+let onAsked = null;
+
+export function onAskedChange(handler) {
+	onAsked = handler;
+}
+
 // start asks for an area to be read.
 //
 // The area is recorded only once the server has accepted it, so a refusal — a
@@ -54,6 +63,7 @@ export async function start(spot) {
 	}
 
 	asked.set(cellOf(spot), Date.now());
+	onAsked?.();
 	return { ok: true, status: result.data };
 }
 

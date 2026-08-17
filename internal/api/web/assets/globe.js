@@ -521,11 +521,19 @@ export function reveal(lon, lat, minZoom = 14) {
 
 // here describes what is on screen: a centre, and the radius that covers it —
 // half the diagonal, which is what reaches the corners of the visible rectangle.
+//
+// The radius is left unmeasurable rather than guessed when the bounds cannot be
+// had — the projection is a globe and the corners of the window are not always
+// on it. Callers already have to handle that answer, because it is also what a
+// world view gives them, and none of them may scrape on it.
 export function here() {
 	const c = map.getCenter();
-	const b = map.getBounds();
-	const radiusKm = Math.max(
-		haversine(c.lat, c.lng, b.getNorth(), b.getEast()),
-		haversine(c.lat, c.lng, b.getSouth(), b.getWest()));
+	let radiusKm = NaN;
+	try {
+		const b = map.getBounds();
+		radiusKm = Math.max(
+			haversine(c.lat, c.lng, b.getNorth(), b.getEast()),
+			haversine(c.lat, c.lng, b.getSouth(), b.getWest()));
+	} catch (_) { /* no bounds to be had; radiusKm stays NaN */ }
 	return { lat: c.lat, lon: c.lng, radiusKm };
 }

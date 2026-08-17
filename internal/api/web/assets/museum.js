@@ -11,11 +11,17 @@ import { el, clear, link, shortDate } from "./util.js";
 export const card = new Card({ modifier: "card--museum", onClose: () => {
 	globe.select(null);
 	scrape.stop("museum");
+	inFlight?.abort();
+	inFlight = null;
 	open = null;
 	onChange?.(null);
 } });
 
 let open = null, onChange = null;
+// Superseded requests are cancelled rather than left to arrive and be ignored:
+// clicking along a row of dots is a request per dot, and only the last one has
+// anywhere to be drawn.
+let inFlight = null;
 
 export function onOpenChange(handler) {
 	onChange = handler;
@@ -38,8 +44,16 @@ export async function show(id) {
 	rememberFocus();
 	card.setTitle("…").open().busy();
 
-	const result = await api.museum(id);
+	inFlight?.abort();
+	const controller = new AbortController();
+	inFlight = controller;
+
+	const result = await api.museum(id, controller.signal);
+	if (controller !== inFlight) return;
+	inFlight = null;
+
 	if (!result.ok) {
+		if (result.aborted) return;
 		card.failed(result.error || "Could not load this museum.", () => show(id));
 		return;
 	}
@@ -130,20 +144,33 @@ async function loadShows(museum) {
 
 	// Whatever the area card already fetched, if this museum is inside the
 	// place being shown. Opening five museums in a city used to mean five more
-	// requests for listings that were already in hand.
+	// requests for listings that were already in hand. The area hands over its
+	// coverage report with them, so the answer here does not depend on whether
+	// that card happens to be open.
 	const known = area.listingsFor(museum);
 	if (known) {
-		paintShows(box, known, null, museum);
+		paintShows(box, known.shows, known.report, museum);
 		return;
 	}
 
+	inFlight?.abort();
+	const controller = new AbortController();
+	inFlight = controller;
+
 	const spot = { lat: museum.latitude, lon: museum.longitude, radiusKm: 1 };
-	const result = await api.exhibitionsNear(spot);
-	if (open !== museum) return;
+	const result = await api.exhibitionsNear(spot, controller.signal);
+	if (controller !== inFlight || open !== museum) return;
+	inFlight = null;
 
 	if (!result.ok) {
+		if (result.aborted) return;
+		// A failure that cannot be retried is a dead end: this is the panel a
+		// reader is sitting in front of, and one slow answer used to end the
+		// question for as long as the museum stayed open.
 		clear(box).append(el("h3", {}, "What's on"),
-			el("div", { class: "meta" }, result.error || "Could not load."));
+			el("div", { class: "meta" }, result.error || "Could not load."),
+			el("div", {}, el("button", { class: "linkish", type: "button",
+				onclick: () => loadShows(museum) }, "Try again")));
 		return;
 	}
 

@@ -34,12 +34,13 @@ globe.map.on("load", () => {
 	// One handler for "the view settled", debounced. Zooming fires moveend for
 	// every notch of the wheel, and asking the server on each one put dozens of
 	// requests in flight that nothing would ever read.
+	//
+	// Only the request is debounced. Deciding whether to offer a read is local
+	// arithmetic on the camera, and waiting 200 ms to do it meant waiting on a
+	// timer — which a background tab throttles to seconds.
 	globe.map.on("moveend", () => {
 		clearTimeout(moveTimer);
-		moveTimer = setTimeout(() => {
-			globe.loadPoints();
-			offerToLook();
-		}, 200);
+		moveTimer = setTimeout(globe.loadPoints, 200);
 	});
 });
 
@@ -74,18 +75,48 @@ const pill = document.getElementById("look");
 // size. It is a request to read strangers' websites, so it is offered rather
 // than taken — which is also the only way somebody learns the feature exists,
 // and the only way to ask again after a refusal.
+//
+// offerToLook works the answer out from the map itself and remembers nothing,
+// so it is safe to call at any time and from anywhere. Everywhere the answer
+// can change calls it.
 function offerToLook() {
 	const spot = globe.here();
 	pill.hidden = !(scrape.worthScraping(spot, globe.map.getZoom()) && !scrape.alreadyAsked(spot));
 }
+
+// Worked out now, and again on every signal that can change it — none of it
+// inside the map's load handler.
+//
+// The offer used to exist only inside a debounced moveend registered in that
+// handler, which left it wrong in four ways. A link straight to a city arrives
+// with the camera already where it belongs and fires no moveend at all, so the
+// feature was invisible until somebody happened to pan. A backgrounded tab runs
+// no animation frames and throttles timers to seconds, so the flyTo that would
+// settle and the timer that would notice both arrive late or never — and `load`
+// is itself waiting on a first render that such a tab never performs, which is
+// why nothing here depends on it. Pressing the button hides it, so a refused
+// read — a full queue, a blip — took the only way of asking again off screen.
+// And a read started from a museum's panel left the button offering an area
+// that was already being read.
+offerToLook();
+globe.map.on("moveend", offerToLook);
+scrape.onAskedChange(offerToLook);
+document.addEventListener("visibilitychange", () => {
+	if (!document.hidden) offerToLook();
+});
 
 pill.addEventListener("click", async () => {
 	const spot = globe.here();
 	pill.hidden = true;
 
 	// Reading an area is what the area card is for, so opening it is how the
-	// progress and the results get somewhere to appear.
-	if (!area.area()) {
+	// progress and the results get somewhere to appear — and it has to be a card
+	// about this area. A card is not closed by moving the map away from it, so
+	// "here" was whatever place the open card was still about: pressing this in
+	// Karlskrona sent the read to Kalmar, listed Kalmar's exhibitions with
+	// Kalmar's distances underneath a map of Karlskrona, and marked Kalmar's
+	// cell as asked — leaving the button offering to read Karlskrona again.
+	if (!area.covers(spot)) {
 		await area.show({
 			name: "This area",
 			latitude: spot.lat,
@@ -93,7 +124,13 @@ pill.addEventListener("click", async () => {
 			radius_km: api.clampRadius(spot.radiusKm),
 		});
 	}
-	area.look();
+	await area.look();
+
+	// The press hid the button; whether it stays hidden is for the same rule
+	// that put it there to decide. A read that started marks the area as asked
+	// and it stays down — a read that was refused leaves the area askable, and
+	// the button comes back rather than making somebody pan the map to find it.
+	offerToLook();
 });
 
 /* ---- near you ----------------------------------------------------------- */

@@ -63,14 +63,31 @@ export function safeURL(url) {
 
 /* ---- the API ------------------------------------------------------------ */
 
+// TIMEOUT_MS bounds the wait. A request that is never answered — a dropped
+// connection, a proxy holding it open, a server reading a city's worth of rows
+// out of a Raspberry Pi — used to leave "Looking…" on the panel for as long as
+// the tab stayed open, which is the one state a reader cannot tell from a page
+// that is still working.
+const TIMEOUT_MS = 20000;
+
 // getJSON separates "the server said no" from "the server said nothing".
 //
 // The page used to return null for every failure, so a backend that was down
 // and a city with no museums produced the same empty panel. They need different
 // words on screen, so they need to be different answers here.
-export async function getJSON(url, options = {}) {
+export async function getJSON(url, { signal, timeout = TIMEOUT_MS, ...options } = {}) {
+	// Two ways to stop, kept apart on purpose. The caller's signal means "draw
+	// something newer instead", and the answer to it is silence; the deadline
+	// means "this is not coming", and the answer to that is a sentence and a
+	// retry. Reported as one, a timeout would look like the page superseding
+	// itself and leave the panel showing nothing at all.
+	const deadline = new AbortController();
+	const timer = setTimeout(() => deadline.abort(), timeout);
+	const relay = () => deadline.abort();
+	signal?.addEventListener("abort", relay);
+
 	try {
-		const res = await fetch(url, options);
+		const res = await fetch(url, { ...options, signal: deadline.signal });
 		if (!res.ok) {
 			return { ok: false, status: res.status, error: await errorText(res) };
 		}
@@ -78,8 +95,14 @@ export async function getJSON(url, options = {}) {
 	} catch (err) {
 		// An aborted request is this page superseding itself, not a failure to
 		// report: the caller that aborted it is already drawing something newer.
-		if (err.name === "AbortError") return { ok: false, aborted: true };
+		if (err.name === "AbortError") {
+			if (signal?.aborted) return { ok: false, aborted: true };
+			return { ok: false, timedOut: true, error: "The catalogue is taking too long to answer." };
+		}
 		return { ok: false, error: "Could not reach the catalogue." };
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", relay);
 	}
 }
 
