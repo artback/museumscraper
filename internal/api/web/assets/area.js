@@ -11,11 +11,14 @@ import * as scrape from "./scrape.js";
 import * as shows from "./exhibitions.js";
 import * as hud from "./hud.js";
 import { Card } from "./dock.js";
-import { el, clear, plural } from "./util.js";
+import { el, clear, plural, haversine } from "./util.js";
 
 export const card = new Card({ modifier: "card--area", onClose: () => {
 	globe.clearVenues();
 	scrape.stop("area");
+	inFlight?.abort();
+	inFlight = null;
+	loading = false;
 	current = null;
 } });
 
@@ -23,6 +26,11 @@ let current = null;   // { name, spot }
 let museums = [];
 let listings = [];
 let report = null;
+// What the listings are doing, as distinct from what they hold. An empty list
+// is an answer — this city has nothing on — and it must not be what a request
+// that failed, timed out, or has not come back yet looks like.
+let loading = false, failure = null;
+let inFlight = null;
 let tab = "museums";
 let filter = "now";
 let sort = "closing";
@@ -40,32 +48,96 @@ export async function show(place) {
 		lon: Number(place.longitude),
 		radiusKm: api.clampRadius(place.radius_km || 15),
 	};
-	current = { name: String(place.name || "").split(",")[0], spot };
-	tab = "museums";
+	// A look started at the last place stops being this card's business the
+	// moment the card is about somewhere else. Left running, its poll painted
+	// one city's progress into another city's panel, and the flag it left
+	// standing is what made "Look for exhibitions here" do nothing at the new
+	// place: look() refuses to start while a scrape it believes is its own is
+	// still going.
+	scrape.stop("area");
+	scraping = false;
+	progressBox = null;
 	// A different place has not been looked at, whatever happened at the last one.
 	looked = null;
 
+	current = { name: String(place.name || "").split(",")[0], spot };
+	tab = "museums";
+
+	// Superseded requests are cancelled rather than left to arrive and be
+	// ignored. Two cities asked for in quick succession are two full pages of
+	// listings still crossing the wire for a card that has moved on.
+	inFlight?.abort();
+	const controller = new AbortController();
+	inFlight = controller;
+
+	loading = true;
+	failure = null;
+	listings = [];
+	report = null;
 	card.setTitle(current.name).open().busy("Looking…");
 
 	// Both at once: the museums here, and everything on show, so each museum
 	// can say how much of it is theirs.
 	const [nearby, onShow] = await Promise.all([
-		api.museumsNear(spot),
-		api.exhibitionsNear(spot),
+		api.museumsNear(spot, 200, controller.signal),
+		api.exhibitionsNear(spot, controller.signal),
 	]);
-	if (!current || current.spot !== spot) return; // a newer place is showing
+	if (controller !== inFlight || current?.spot !== spot) return; // a newer place is showing
+	inFlight = null;
+	loading = false;
 
 	if (!nearby.ok) {
+		if (nearby.aborted) return;
 		card.failed(nearby.error || "Could not load this area.", () => show(place));
 		return;
 	}
 
 	museums = nearby.data.museums || [];
-	listings = onShow.ok ? (onShow.data.exhibitions || []) : [];
-	report = onShow.ok ? onShow.data.coverage : null;
+	takeListings(onShow);
 
-	globe.showVenues(listings);
 	hud.summarise(current.name, nearby.data.total);
+	paint();
+}
+
+// takeListings records one answer about what is on, whatever kind of answer it
+// was. The panel reads these three together, so they are only ever written
+// together — an error left behind by the last attempt sitting above a list that
+// has since loaded is its own kind of wrong.
+function takeListings(result) {
+	if (result.ok) {
+		listings = result.data.exhibitions || [];
+		report = result.data.coverage || null;
+		failure = null;
+	} else {
+		listings = [];
+		report = null;
+		failure = result.error || "Could not load what is on here.";
+	}
+	globe.showVenues(listings);
+}
+
+// reload asks again for the listings alone. The museums in a city are a settled
+// fact that rarely fails; what is on there is read live and is what a retry is
+// actually for.
+async function reload() {
+	if (!current || loading) return;
+	const spot = current.spot;
+
+	inFlight?.abort();
+	const controller = new AbortController();
+	inFlight = controller;
+
+	loading = true;
+	failure = null;
+	paint();
+
+	const onShow = await api.exhibitionsNear(spot, controller.signal);
+	if (controller !== inFlight || current?.spot !== spot) return;
+	inFlight = null;
+	loading = false;
+
+	if (onShow.aborted) return;
+	takeListings(onShow);
 	paint();
 }
 
@@ -169,6 +241,20 @@ function museumList() {
 function showList() {
 	const out = el("div", {});
 
+	// Three things a reader must be able to tell apart, and only one of them is
+	// a list. This tab used to render nothing at all when the request failed —
+	// same blank space as a city with nothing on, and no way to ask again.
+	if (loading) {
+		return el("div", { class: "empty", "data-glyph": "⋯" }, "Looking for what's on…");
+	}
+	if (failure) {
+		return el("div", { class: "empty", "data-glyph": "!" }, [
+			failure,
+			el("div", {}, el("button", { class: "linkish", type: "button", onclick: reload },
+				"Try again")),
+		]);
+	}
+
 	const kept = listings.filter(shows.FILTERS[filter].keep);
 	const summary = shows.coverage(report, listings, {
 		scraping: scraping,
@@ -251,12 +337,24 @@ let scraping = false, progressBox = null, looked = null;
 export async function look() {
 	if (!current || scraping) return;
 
+	// The place this look is about, held rather than read back from current: a
+	// read takes minutes, and every step of it after this one has to be able to
+	// tell whether the card is still about the same place.
+	const spot = current.spot;
+
 	scraping = true;
 	looked = null;
 	progressBox = scrape.progress(null);
+	// Where the reading is happening is where it should be watched. A look
+	// started from the pill left the card on its museums tab, so the bar, the
+	// site counter and every word about what was going on were drawn into a tab
+	// nobody was looking at: pressing "Look for exhibitions here" appeared to do
+	// nothing for the minutes it took.
+	tab = "shows";
 	paint();
 
-	const started = await scrape.start(current.spot);
+	const started = await scrape.start(spot);
+	if (current?.spot !== spot) return;
 	if (!started.ok) {
 		scraping = false;
 		progressBox = el("div", { class: "coverage" }, [
@@ -271,53 +369,109 @@ export async function look() {
 	if (!api.running(started.status)) {
 		// Nothing to wait for: either the area was read recently enough that the
 		// server declined, or there was nothing here to read at all.
-		finish(started.status.state);
+		finish(spot, started.status.state);
 		return;
 	}
 
 	progressBox = scrape.progress(started.status);
 	paint();
 
-	scrape.watch("area", current.spot, {
+	scrape.watch("area", spot, {
 		onUpdate: status => {
+			if (current?.spot !== spot) return;
 			scrape.announce(status);
 			progressBox = scrape.progress(status);
 			paint();
 		},
-		onDone: status => finish(status ? status.state : "done"),
+		onDone: status => finish(spot, status ? status.state : "done"),
 	});
 }
 
-async function finish(state = "done") {
+async function finish(spot, state = "done") {
+	if (current?.spot !== spot) return;
+
 	looked = state;
-	scraping = false;
-	progressBox = null;
 	hud.setNote("");
 
-	if (!current) return;
-	const onShow = await api.exhibitionsNear(current.spot);
-	if (!current || !onShow.ok) { paint(); return; }
-
-	listings = onShow.data.exhibitions || [];
-	report = onShow.data.coverage;
-	globe.showVenues(listings);
-	hud.say(listings.length
-		? "Finished reading. " + plural(listings.length, "show") + " found."
-		: "Finished reading. Nothing on show was found here.");
+	// The read is over, but what it found is still one request away, and until
+	// it lands this counts as still reading: the bar stays up, and nothing draws
+	// a verdict from the listings fetched before the read began. "Nothing was
+	// found here just now", printed over results that are on their way, is a
+	// wrong answer with half a second to live — and it is the half second
+	// somebody who just pressed the button is watching.
+	progressBox = scrape.progress(null);
 	tab = "shows";
+	paint();
+
+	inFlight?.abort();
+	const controller = new AbortController();
+	inFlight = controller;
+
+	const onShow = await api.exhibitionsNear(spot, controller.signal);
+	if (controller !== inFlight || current?.spot !== spot) return;
+	inFlight = null;
+	progressBox = null;
+	scraping = false;
+
+	if (onShow.aborted) { paint(); return; }
+	takeListings(onShow);
+
+	hud.say(failure ? "Finished reading, but the listings could not be loaded."
+		: listings.length
+			? "Finished reading. " + plural(listings.length, "show") + " found."
+			: "Finished reading. Nothing on show was found here.");
 	paint();
 }
 
 // listingsFor hands the museum card whatever has already been fetched for the
 // area, so opening a museum inside a city that is already loaded costs no
 // second request.
+//
+// Inside is the whole condition. A card stays open when the map moves on, so a
+// museum clicked in Karlskrona used to be answered out of the listings fetched
+// for Kalmar: nothing there is its, the filter came back empty, and the panel
+// said "nothing listed for this museum" without ever asking. Null is the answer
+// that sends the museum card to fetch for itself — which is also what a load
+// that failed or has not landed yet must return, since the shortcut is only
+// worth taking when there is a real answer to hand.
+//
+// The coverage report travels with the listings. Without it the museum card
+// could not tell "this city has been read and your museum lists nothing" from
+// "nobody has read this city yet", so opening a museum answered one way with
+// the area card open and the other way without it.
 export function listingsFor(museum) {
-	if (!current) return null;
+	if (!current || loading || failure) return null;
+	if (!holds(museum.latitude, museum.longitude)) return null;
+
 	const key = keyFor(museum);
-	return listings.filter(show =>
-		(show.museum_wikidata_id || normalise(show.museum)) === key);
+	return {
+		shows: listings.filter(show =>
+			(show.museum_wikidata_id || normalise(show.museum)) === key),
+		report,
+	};
 }
 
-export function area() {
-	return current;
+// covers says whether a view is still the area this card is about.
+//
+// The card is a question asked about one circle, and the map is free to leave
+// it. Anything that acts on "here" has to ask this first, or it acts on there.
+//
+// Where, not how big. A view is several times wider than the place at its
+// centre — searching a city leaves the map showing thirty kilometres around a
+// ten-kilometre town — so comparing the two radii would call the card stale the
+// moment it opened, and every look would throw away the name of the city that
+// was searched for. What is left is bounded anyway: nothing offers to read an
+// area wider than the API's own limit.
+export function covers(spot) {
+	return Boolean(current && spot) && holds(spot.lat, spot.lon);
+}
+
+// holds is "this point is in the card's circle".
+function holds(lat, lon) {
+	if (!current) return false;
+	if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+	// A quarter of the catalogue has no coordinates and serialises as 0,0, which
+	// is a real position in the Gulf of Guinea and belongs to no city's card.
+	if (!lat && !lon) return false;
+	return haversine(current.spot.lat, current.spot.lon, lat, lon) <= current.spot.radiusKm;
 }

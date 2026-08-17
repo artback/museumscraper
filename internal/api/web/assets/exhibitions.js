@@ -6,6 +6,7 @@
 // show in an area, which is the question somebody standing in a city actually
 // has.
 
+import { MAX_EXHIBITIONS } from "./api.js";
 import { el, link, when, plural, shortDate } from "./util.js";
 
 /* ---- which ones --------------------------------------------------------- */
@@ -181,8 +182,13 @@ export function coverage(report, shows, { onScrape, scraping, looked } = {}) {
 	const inArea = report.museums_in_area || 0;
 
 	if (shows.length) {
+		// A full page is the only signal that there were more: the API reports
+		// no total for exhibitions. "500 shows at 40 venues" for a city holding
+		// eight hundred is a number somebody plans a weekend around.
+		const capped = shows.length >= MAX_EXHIBITIONS;
 		return el("div", { class: "coverage" }, [
-			plural(shows.length, "show") + " at " + plural(venues, "venue"),
+			(capped ? "The first " : "") + plural(shows.length, "show") +
+				" at " + plural(venues, "venue"),
 			el("span", { class: "meta" },
 				" · read from " + withSite + " of " + plural(inArea, "museum") + " with a website" +
 				(report.last_scraped ? " · checked " + shortDate(report.last_scraped) : "")),

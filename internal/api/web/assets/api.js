@@ -37,8 +37,8 @@ export function points(bbox, signal) {
 	return getJSON("/v1/points?" + query, { signal });
 }
 
-export function museum(id) {
-	return getJSON("/v1/museums/" + encodeURIComponent(id));
+export function museum(id, signal) {
+	return getJSON("/v1/museums/" + encodeURIComponent(id), { signal });
 }
 
 export function museumsNear(spot, limit = 200, signal) {
