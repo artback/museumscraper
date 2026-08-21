@@ -53,6 +53,10 @@ type Exhibition struct {
 	// result can be traced back.
 	SourcePage string `json:"source_page"`
 
+	// Provenance is how the entry was read, so the cost of a sweep can be told
+	// from its output. See Provenance.
+	Provenance Provenance `json:"provenance,omitempty"`
+
 	// MuseumWikidataID identifies the venue, where the museum record had one.
 	MuseumWikidataID string `json:"museum_wikidata_id,omitempty"`
 	// Latitude and Longitude are the venue's position, copied onto the
@@ -64,6 +68,44 @@ type Exhibition struct {
 	// stale the answer is.
 	ScrapedAt time.Time `json:"scraped_at"`
 }
+
+// Provenance is how an exhibition came to be read.
+//
+// The ladder in readSite runs cheapest first and stops at the first rung that
+// yields anything, so which rung answered is the only measure of what a sweep
+// actually cost. Without it the four are indistinguishable downstream: a
+// listing a CSS selector found for nothing and one a model was invoked to
+// learn how to read arrive as the same record, and the question the fallback
+// exists to answer — how much of the catalogue still needs it — cannot be put
+// to the data.
+//
+// It describes the reading, not the record. The existing "source" column says
+// where a row came from at all (scraped, or one day submitted); this says how
+// the scraper managed it.
+type Provenance string
+
+const (
+	// ProvenanceDeclared is schema.org event data the site published itself,
+	// which needs no interpretation and is the only rung that can be trusted
+	// as fact rather than as a lead.
+	ProvenanceDeclared Provenance = "declared"
+
+	// ProvenanceHeuristic is a listing page read structurally — link depth,
+	// path hints, and date text near a title. Most of the catalogue.
+	ProvenanceHeuristic Provenance = "heuristic"
+
+	// ProvenanceGenerated is a compiled extractor: a script a model wrote once
+	// for a site the heuristics could not read, executed since with no model
+	// involved. The rung whose ratio is worth watching, because it is the only
+	// one that ever costs a model invocation.
+	ProvenanceGenerated Provenance = "generated"
+
+	// ProvenanceDescription is the museum itself, standing in as a single
+	// permanent entry for a site that publishes no programme at all. It means
+	// the site was reached and understood to have nothing to list, which is
+	// not the same as a site that was read badly.
+	ProvenanceDescription Provenance = "description"
+)
 
 // Position reports the exhibition's location, satisfying geoindex.Located.
 func (e Exhibition) Position() (lat, lon float64, ok bool) {
@@ -289,6 +331,13 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 			// museum still gets its permanent display below.
 			log.Printf("exhibitions: fallback extractor for %s: %v", museum.Name, err)
 		default:
+			// Stamped here rather than trusted from the implementation. Every
+			// entry reaching this branch is by definition a generated
+			// extractor's, so the one place that knows it for certain is this
+			// one, and a Fallback wired in later cannot report otherwise.
+			for i := range generated {
+				generated[i].Provenance = ProvenanceGenerated
+			}
 			found = append(found, generated...)
 		}
 	}
@@ -410,6 +459,7 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 			Upcoming:         upcoming,
 			Permanent:        permanent,
 			SourcePage:       finalURL,
+			Provenance:       provenanceOf(candidate),
 			MuseumWikidataID: museum.WikidataID,
 			Latitude:         museum.Latitude,
 			Longitude:        museum.Longitude,
@@ -417,6 +467,14 @@ func (s *Scraper) harvest(ctx context.Context, listingURL string, base *url.URL,
 		})
 	}
 	return page, found
+}
+
+// provenanceOf says how a candidate was read off its listing page.
+func provenanceOf(c Candidate) Provenance {
+	if c.Declared {
+		return ProvenanceDeclared
+	}
+	return ProvenanceHeuristic
 }
 
 // permanentDisplay returns the museum itself as a single permanent entry, for
@@ -478,6 +536,7 @@ func (s *Scraper) permanentDisplay(ctx context.Context, base *url.URL, home home
 			Running:          true,
 			Permanent:        true,
 			SourcePage:       finalURL,
+			Provenance:       ProvenanceDescription,
 			MuseumWikidataID: museum.WikidataID,
 			Latitude:         museum.Latitude,
 			Longitude:        museum.Longitude,
@@ -513,6 +572,19 @@ func datedPermanent(dates DateRange) bool {
 // and taking a same-named dated listing's bounds would turn "always on" into a
 // run that ends.
 func widen(kept *Exhibition, other Exhibition) {
+	// Before the permanent short-circuit below, because provenance is a fact
+	// about the reading and holds whether or not the dates are widened.
+	//
+	// A merged entry the site declared anywhere is a declared entry: the two
+	// halves are the same exhibition, and the half that needed no
+	// interpretation is the one worth recording. Nothing else is promoted —
+	// in particular a generated extractor's entry never overwrites a
+	// heuristic one, or the ratio this field exists to measure would count
+	// the fallback for work the selectors did.
+	if other.Provenance == ProvenanceDeclared {
+		kept.Provenance = ProvenanceDeclared
+	}
+
 	if kept.Permanent {
 		return
 	}

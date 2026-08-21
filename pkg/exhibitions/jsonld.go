@@ -195,10 +195,11 @@ func candidateFromJSONLD(node map[string]any, base *url.URL) (Candidate, bool) {
 	}
 
 	return Candidate{
-		Title:   title,
-		URL:     resolved,
-		Context: title,
-		Dates:   dates,
+		Title:    title,
+		URL:      resolved,
+		Context:  title,
+		Dates:    dates,
+		Declared: true,
 	}, true
 }
 

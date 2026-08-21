@@ -353,8 +353,16 @@ rate-limiting a liveness probe turns a busy minute into a restart.
 
 ```json
 { "status": "ok", "museums": 84584, "with_coordinates": 65896,
-  "countries": 282, "exhibitions": 55, "last_updated": "2026-07-27T22:39:32Z" }
+  "countries": 282, "exhibitions": 55,
+  "exhibitions_by_provenance": { "declared": 4, "heuristic": 38,
+                                 "generated": 9, "description": 4 },
+  "last_updated": "2026-07-27T22:39:32Z" }
 ```
+
+`exhibitions_by_provenance` is the standing answer to how much of the catalogue
+each rung of the scraper is carrying — see [How an exhibition was
+read](#how-an-exhibition-was-read). Rows stored before provenance was recorded
+are counted under `unknown`.
 
 ```bash
 curl 'localhost:8090/v1/search?q=musee%20d%20orsay&limit=5'
@@ -707,6 +715,7 @@ fields rather than one display string so a caller can use the parts it needs:
       "end": "2027-01-03T00:00:00Z",
       "running": true,
       "permanent": false,
+      "provenance": "declared",
       "scraped_at": "2026-07-27T22:25:24Z"
     },
     {
@@ -717,6 +726,7 @@ fields rather than one display string so a caller can use the parts it needs:
       "start": "2020-11-07T00:00:00Z",
       "running": true,
       "permanent": true,
+      "provenance": "generated",
       "scraped_at": "2026-08-01T09:14:02Z"
     }
   ],
@@ -747,6 +757,40 @@ Museums sharing a website are scraped once: institutions nest, and the Musée Ch
 **This is heuristic and will never be complete.** JS-rendered listings yield little (one Berlin museum gave 8 of its exhibitions); bot-blocked sites yield nothing (MoMA answers `403`). Every exhibition carries the `url` it came from — treat results as leads and link out to the museum's own page rather than presenting the scrape as authoritative. Attribution is the record whose website was read: Tate publishes four galleries on one domain, so all appear under whichever Tate record was scraped.
 
 Scraping is polite: `robots.txt` honoured, one request per host per second, bodies capped, crawler identified.
+
+### How an exhibition was read
+
+The rungs above cost very different things — the first two cost nothing, the
+generated extractor below costs a model invocation the first time it meets a
+site — and their output is otherwise identical. So every exhibition records
+which rung produced it, in a `provenance` field carried through the API and
+stored alongside the listing:
+
+| `provenance` | What read it | What it costs |
+|---|---|---|
+| `declared` | schema.org JSON-LD the museum published | nothing, and needs no interpretation |
+| `heuristic` | the structural reading above | nothing |
+| `generated` | a compiled extractor, written once by a model | one model invocation per *site*, never per run |
+| `description` | the museum itself, for a site that lists no programme | two extra fetches |
+
+This is what makes the fallback's cost answerable rather than assumed. `museum
+refresh` ends with the tally for that run:
+
+```
+Refresh finished in 41m18s: found 9148 exhibitions, stored 9148, lost 0
+Read by: declared 214 (2.3%), heuristic 8395 (91.8%), generated 402 (4.4%), description 137 (1.5%)
+```
+
+and `/health` reports the standing shares across everything stored, so a
+fallback that has started answering for sites the selectors used to read shows
+up as a rising `generated` share rather than as a larger bill.
+
+It describes the *reading*, not the record — distinct from the storage-level
+`source` column, which says whether a row was scraped or submitted. Listings
+stored before the field existed carry no provenance and are reported as
+`unknown`: there is no way to tell after the fact which rung produced them, and
+backfilling a guess would put a number on the fallback that no sweep ever
+measured.
 
 ---
 

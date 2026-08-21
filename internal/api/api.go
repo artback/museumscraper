@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"museum/internal/postgres"
+	"museum/pkg/exhibitions"
 )
 
 const (
@@ -445,10 +446,16 @@ type exhibitionHit struct {
 	// dates. Without it a caller reads the empty start and end as a listing the
 	// scraper failed on, and a caller asking what closes soonest would put an
 	// exhibition that has been up for thirty years at the top.
-	Permanent bool      `json:"permanent"`
-	Latitude  float64   `json:"latitude"`
-	Longitude float64   `json:"longitude"`
-	ScrapedAt time.Time `json:"scraped_at"`
+	Permanent bool `json:"permanent"`
+	// Provenance says how the listing was read — declared, heuristic,
+	// generated or description. A caller weighing how much to trust a result
+	// wants it: a declared entry is the museum's own event data, and a
+	// generated one was read by a script written for that site alone. Empty on
+	// rows stored before provenance was recorded.
+	Provenance exhibitions.Provenance `json:"provenance,omitempty"`
+	Latitude   float64                `json:"latitude"`
+	Longitude  float64                `json:"longitude"`
+	ScrapedAt  time.Time              `json:"scraped_at"`
 }
 
 // handleHealth reports both liveness and what the catalogue holds.
@@ -476,7 +483,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"with_coordinates": counts.WithCoordinates,
 		"countries":        counts.Countries,
 		"exhibitions":      counts.Exhibitions,
-		"last_updated":     counts.LastUpdated,
+		// How the stored exhibitions were read. The generated share is the
+		// running cost of the fallback: it is the only rung that ever invoked
+		// a model, and watching it is how one tells a fallback earning its
+		// keep from one quietly reading sites the selectors could handle.
+		"exhibitions_by_provenance": counts.ByProvenance,
+		"last_updated":              counts.LastUpdated,
 	})
 }
 
@@ -769,8 +781,9 @@ func (s *Server) handleExhibitions(w http.ResponseWriter, r *http.Request) {
 			DistanceKm:       round2(hit.DistanceKm),
 			Start:            hit.Start, End: hit.End,
 			Running: hit.Running, Upcoming: hit.Upcoming,
-			Permanent: hit.Permanent,
-			Latitude:  hit.Latitude, Longitude: hit.Longitude,
+			Permanent:  hit.Permanent,
+			Provenance: hit.Provenance,
+			Latitude:   hit.Latitude, Longitude: hit.Longitude,
 			ScrapedAt: hit.ScrapedAt,
 		})
 	}
@@ -813,8 +826,9 @@ func (s *Server) searchExhibitions(w http.ResponseWriter, r *http.Request, text 
 			DistanceKm:       round2(hit.DistanceKm),
 			Start:            hit.Start, End: hit.End,
 			Running: hit.Running, Upcoming: hit.Upcoming,
-			Permanent: hit.Permanent,
-			Latitude:  hit.Latitude, Longitude: hit.Longitude,
+			Permanent:  hit.Permanent,
+			Provenance: hit.Provenance,
+			Latitude:   hit.Latitude, Longitude: hit.Longitude,
 			ScrapedAt: hit.ScrapedAt,
 		})
 	}

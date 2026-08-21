@@ -725,6 +725,13 @@ type Counts struct {
 	Exhibitions     int64
 	Countries       int64
 	LastUpdated     *time.Time
+
+	// ByProvenance counts the stored exhibitions by how they were read, which
+	// is what says how much of the catalogue the generated-extractor fallback
+	// is carrying. Rows written before provenance was recorded are counted
+	// under "unknown" rather than silently folded into a rung they may not
+	// have come from.
+	ByProvenance map[string]int64
 }
 
 // Counts returns the summary, cached briefly.
@@ -775,7 +782,44 @@ SELECT
 	if err != nil {
 		return counts, fmt.Errorf("counts: %w", err)
 	}
+
+	byProvenance, err := s.countByProvenance(ctx)
+	if err != nil {
+		return counts, err
+	}
+	counts.ByProvenance = byProvenance
 	return counts, nil
+}
+
+// countByProvenance groups the stored exhibitions by how they were read.
+//
+// One grouped scan rather than a filtered count per rung, so adding a rung
+// needs no change here, and an unexpected value in the column shows up as
+// itself instead of vanishing into a bucket nobody wrote.
+func (s *Store) countByProvenance(ctx context.Context) (map[string]int64, error) {
+	const stmt = `
+SELECT CASE WHEN provenance = '' THEN 'unknown' ELSE provenance END, count(*)
+FROM exhibitions
+GROUP BY 1`
+
+	rows, err := s.pool.Query(ctx, stmt)
+	if err != nil {
+		return nil, fmt.Errorf("counts by provenance: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var (
+			provenance string
+			n          int64
+		)
+		if err := rows.Scan(&provenance, &n); err != nil {
+			return nil, fmt.Errorf("scan provenance count: %w", err)
+		}
+		counts[provenance] = n
+	}
+	return counts, rows.Err()
 }
 
 // execBatch runs a prepared batch and reports how many rows it wrote.
@@ -797,11 +841,11 @@ func (s *Store) execBatch(ctx context.Context, batch *pgx.Batch) (int64, error) 
 // SaveExhibitions upserts scraped listings, keyed by URL.
 func (s *Store) SaveExhibitions(ctx context.Context, found []exhibitions.Exhibition) (int64, error) {
 	const stmt = `
-INSERT INTO exhibitions (url, title, museum, museum_wikidata_id, starts_on, ends_on, location, source_page, scraped_at, permanent, site, first_seen_at, last_seen_at)
+INSERT INTO exhibitions (url, title, museum, museum_wikidata_id, starts_on, ends_on, location, source_page, scraped_at, permanent, site, provenance, first_seen_at, last_seen_at)
 VALUES ($1, $2, $3, $4, $5, $6,
         CASE WHEN $7::double precision IS NULL THEN NULL
              ELSE ST_SetSRID(ST_MakePoint($8::double precision, $7::double precision), 4326)::geography END,
-        $9, $10, $11, $12, $10, $10)
+        $9, $10, $11, $12, $13, $10, $10)
 ON CONFLICT (url) DO UPDATE SET
     title      = EXCLUDED.title,
     museum     = EXCLUDED.museum,
@@ -809,6 +853,10 @@ ON CONFLICT (url) DO UPDATE SET
     ends_on    = EXCLUDED.ends_on,
     permanent  = EXCLUDED.permanent,
     site       = EXCLUDED.site,
+    -- Overwritten rather than kept, and never coalesced onto a blank: a site
+    -- that has just been read by a generated extractor is a site the
+    -- heuristics no longer read, and the ratio should follow the move.
+    provenance = EXCLUDED.provenance,
     location   = coalesce(EXCLUDED.location, exhibitions.location),
     scraped_at = EXCLUDED.scraped_at,
     -- first_seen_at is never moved forward: it is what "new since Tuesday"
@@ -853,7 +901,8 @@ ON CONFLICT (url) DO UPDATE SET
 
 		args := []any{validUTF8(e.URL), validUTF8(e.Title), validUTF8(e.Museum),
 			validUTF8(e.MuseumWikidataID),
-			e.Start, e.End, lat, lon, validUTF8(e.SourcePage), scraped, e.Permanent, site}
+			e.Start, e.End, lat, lon, validUTF8(e.SourcePage), scraped, e.Permanent, site,
+			string(e.Provenance)}
 
 		queries = append(queries, args)
 		batch.Queue(stmt, args...)
@@ -904,7 +953,7 @@ type ExhibitionHit struct {
 func (s *Store) ExhibitionsNearby(ctx context.Context, lat, lon, radiusKm float64, includeUpcoming bool, limit int) ([]ExhibitionHit, error) {
 	const stmt = `
 SELECT url, title, coalesce(museum,''), coalesce(museum_wikidata_id,''),
-       starts_on, ends_on, coalesce(source_page,''), scraped_at, permanent,
+       starts_on, ends_on, coalesce(source_page,''), scraped_at, permanent, provenance,
        ST_Y(location::geometry), ST_X(location::geometry),
        ST_Distance(location, $1::geography) / 1000.0 AS distance_km
 FROM exhibitions
@@ -935,7 +984,7 @@ LIMIT $4`
 			lat, lon *float64
 		)
 		if err := rows.Scan(&hit.URL, &hit.Title, &hit.Museum, &hit.MuseumWikidataID,
-			&hit.Start, &hit.End, &hit.SourcePage, &hit.ScrapedAt, &hit.Permanent,
+			&hit.Start, &hit.End, &hit.SourcePage, &hit.ScrapedAt, &hit.Permanent, &hit.Provenance,
 			&lat, &lon, &hit.DistanceKm); err != nil {
 			return nil, fmt.Errorf("scan exhibition: %w", err)
 		}
@@ -974,7 +1023,7 @@ func (s *Store) SearchExhibitions(ctx context.Context, query string, lat, lon, r
 	const stmt = `
 WITH q AS (SELECT $1::text AS term)
 SELECT url, title, coalesce(museum,''), coalesce(museum_wikidata_id,''),
-       starts_on, ends_on, coalesce(source_page,''), scraped_at, permanent,
+       starts_on, ends_on, coalesce(source_page,''), scraped_at, permanent, provenance,
        ST_Y(location::geometry), ST_X(location::geometry),
        CASE WHEN $2::boolean THEN ST_Distance(location, $3::geography) / 1000.0 ELSE 0 END AS distance_km,
        count(*) OVER () AS total,
@@ -1021,7 +1070,7 @@ LIMIT $6 OFFSET $7`
 			score    float64
 		)
 		if err := rows.Scan(&hit.URL, &hit.Title, &hit.Museum, &hit.MuseumWikidataID,
-			&hit.Start, &hit.End, &hit.SourcePage, &hit.ScrapedAt, &hit.Permanent,
+			&hit.Start, &hit.End, &hit.SourcePage, &hit.ScrapedAt, &hit.Permanent, &hit.Provenance,
 			&lat, &lon, &hit.DistanceKm, &total, &score); err != nil {
 			return nil, 0, fmt.Errorf("scan exhibition: %w", err)
 		}
