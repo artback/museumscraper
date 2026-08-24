@@ -83,10 +83,18 @@ func (r DateRange) Upcoming(on time.Time) bool {
 // IsZero reports whether no date at all could be read.
 func (r DateRange) IsZero() bool { return r.Start == nil && r.End == nil }
 
-// months maps month names to numbers. English is listed first because these
-// are English-language listings by default, followed by the languages that
-// appear most in European museum sites; matching is on the first three letters
-// so both "January" and "Jan" resolve.
+// months maps month names to numbers.
+//
+// Matching is on the whole word first and then on the first four and three
+// letters, so "January", "januari" and "Jan" all resolve from one entry. Where
+// a language's forms would collide with another's under that prefix rule, the
+// full inflected forms are listed instead and no prefix is registered — see
+// lookupMonth and ambiguousMonths.
+//
+// This table is the single place the catalogue knows what a month is called.
+// Generated extractors reach it through museum.dates, so a language added here
+// is a language every stored extractor can suddenly read, without regenerating
+// any of them.
 var months = map[string]time.Month{
 	"jan": time.January, "feb": time.February, "mar": time.March,
 	"apr": time.April, "may": time.May, "jun": time.June,
@@ -117,6 +125,103 @@ var months = map[string]time.Month{
 	// every Scandinavian listing. That gap is why each extractor generated for
 	// a Swedish museum wrote its own month table instead of using this one.
 	"maj": time.May, "des": time.December,
+
+	// Finnish. "marraskuu" is November and would resolve to March on the
+	// three-letter rule, so the four-letter prefixes carry this language and
+	// none of its three-letter ones are registered.
+	"tamm": time.January, "helm": time.February, "maal": time.March,
+	"huht": time.April, "touk": time.May, "kesä": time.June,
+	"kesa": time.June, "hein": time.July, "elok": time.August,
+	"syys": time.September, "loka": time.October, "marr": time.November,
+	"joul": time.December,
+
+	// Hungarian. Only the accented forms are missing; "january", "február",
+	// "augusztus", "október", "november" and "december" already resolve.
+	"már": time.March, "ápr": time.April, "máj": time.May,
+	"jún": time.June, "júl": time.July, "szep": time.September,
+
+	// Romanian
+	"ian": time.January, "iun": time.June, "iul": time.July,
+	"noi": time.November,
+
+	// Polish, in the genitive a date is written in. "lipca" (July) and
+	// "listopada" (November) are spelled exactly as Croatian months meaning
+	// something else; see ambiguousMonths for what happens to those.
+	"styc": time.January, "lut": time.February, "kwie": time.April,
+	"czer": time.June, "lipca": time.July, "lipiec": time.July,
+	"sier": time.August, "wrze": time.September, "paźd": time.October,
+	"pazd": time.October, "grud": time.December,
+
+	// Czech. "červen" (June) and "červenec" (July) share four letters, so
+	// both are listed in full and no červ- prefix is registered — a prefix
+	// here would date half the Czech summer a month early.
+	"led": time.January, "únor": time.February, "unor": time.February,
+	"února": time.February, "unora": time.February,
+	"břez": time.March, "brez": time.March, "dub": time.April,
+	"květ": time.May, "kvet": time.May,
+	"červen": time.June, "června": time.June,
+	"cerven": time.June, "cervna": time.June,
+	"červenec": time.July, "července": time.July,
+	"cervenec": time.July, "cervence": time.July,
+	"srpen": time.August, "srpna": time.August,
+	"září": time.September, "zari": time.September,
+	"říjen": time.October, "října": time.October,
+	"rijen": time.October, "rijna": time.October,
+	"listopadu": time.November,
+	"pros":      time.December,
+
+	// Croatian. Its July and August are spelled almost as Czech's August and
+	// September, so like Czech these are listed in full rather than by prefix.
+	"sije": time.January, "siječ": time.January, "velj": time.February,
+	"ožuj": time.March, "ozuj": time.March, "trav": time.April,
+	"svib": time.May, "lipanj": time.June, "lipnja": time.June,
+	"srpanj": time.July, "srpnja": time.July, "kolo": time.August,
+	"rujan": time.September, "rujna": time.September,
+	"stud": time.November,
+
+	// Russian, in the genitive a date is written in.
+	"янва": time.January, "янв": time.January, "февр": time.February,
+	"март": time.March, "мар": time.March, "апре": time.April,
+	"апр": time.April, "мая": time.May, "май": time.May,
+	"июня": time.June, "июнь": time.June, "июля": time.July,
+	"июль": time.July, "авгу": time.August, "авг": time.August,
+	"сент": time.September, "октя": time.October, "окт": time.October,
+	"нояб": time.November, "ноя": time.November, "дека": time.December,
+	"дек": time.December,
+
+	// Greek, in the genitive a date is written in. "Ιουνίου" and "Ιουλίου"
+	// share three letters, so this language is carried on four-letter
+	// prefixes only.
+	"ιανο": time.January, "φεβρ": time.February, "μαρτ": time.March,
+	"απρι": time.April, "μαΐο": time.May, "μαιο": time.May,
+	"ιουν": time.June, "ιουλ": time.July, "αυγο": time.August,
+	"σεπτ": time.September, "οκτω": time.October, "νοεμ": time.November,
+	"δεκε": time.December,
+
+	// Turkish
+	"oca": time.January, "şub": time.February, "sub": time.February,
+	"nisa": time.April, "mayı": time.May, "mayi": time.May,
+	"hazi": time.June, "temm": time.July, "ağus": time.August,
+	"agus": time.August, "eylü": time.September, "eylu": time.September,
+	"eki": time.October, "kası": time.November, "kasi": time.November,
+	"aral": time.December,
+}
+
+// ambiguousMonths are spellings that name different months in different
+// languages, and are refused rather than guessed at.
+//
+// "listopada" is November in Polish and October in Croatian — the same nine
+// letters, and nothing in a listing's text says which language it is in.
+// Resolving it either way would date one of the two a month wrong, silently,
+// on every listing that used it. A missing date drops the entry, which is
+// visible as an absence; a wrong one is published as fact.
+//
+// The other near-collisions are not here because the languages spell their
+// inflected forms differently — Polish "lipca" against Croatian "lipnja",
+// Czech "srpna" against Croatian "srpnja" — and are listed in months in full.
+var ambiguousMonths = map[string]bool{
+	"listopad":  true,
+	"listopada": true,
 }
 
 var (
@@ -136,8 +241,24 @@ var (
 	// isoDate matches "2026-03-12".
 	isoDate = regexp.MustCompile(`\b(\d{4})-(\d{2})-(\d{2})\b`)
 
+	// cjkDate matches "2026年9月3日" and the Korean "2026년 9월 3일".
+	//
+	// No month table can help here: the month is a number and the character
+	// after it says which field it is. That makes this the one date form that
+	// needs no language knowledge at all, and it covers Japanese, Chinese and
+	// Korean listings together.
+	cjkDate = regexp.MustCompile(`(\d{4})\s*[年년]\s*(\d{1,2})\s*[月월]\s*(\d{1,2})\s*[日일]`)
+
+	// yearMonthDay matches "2026. szeptember 3.", the Hungarian order, which
+	// no other pattern here reads: the year leads and the day trails.
+	//
+	// Safe despite how loose it looks, because the middle group has to resolve
+	// to a month name for the match to be used at all — any other word between
+	// a year and a number fails the lookup and the match is discarded.
+	yearMonthDay = regexp.MustCompile(`\b(\d{4})\.?\s+([\p{L}]{3,12})\.?\s+(\d{1,2})\b`)
+
 	// separators are the dashes and words that divide the two ends of a range.
-	separators = regexp.MustCompile(`(?i)\s*(?:–|—|-|‒|to|until|till|through|bis|jusqu'au|hasta|fino al|t/m)\s*`)
+	separators = regexp.MustCompile(`(?i)\s*(?:–|—|-|‒|〜|～|ー|to|until|till|through|bis|jusqu'au|hasta|fino al|t/m)\s*`)
 
 	// openEnded marks a listing that gives only a closing date.
 	//
@@ -177,7 +298,7 @@ func ParseDateRange(text string, now time.Time) DateRange {
 		return DateRange{}
 	}
 
-	dates := findDates(text, now)
+	dates, unread := findDates(text, now)
 
 	if ongoing.MatchString(text) {
 		// The opening date is kept when the text gives one. "Permanent
@@ -212,6 +333,25 @@ func ParseDateRange(text string, now time.Time) DateRange {
 			return DateRange{End: &single}
 		case openStart.MatchString(lead):
 			return DateRange{Start: &single}
+		case len(unread) > 0:
+			// Half a range: one bound read, and a second date-shaped run whose
+			// month this table does not know. Collapsing that into a
+			// single-day event is the worst of the three readings available —
+			// it invents a closing date, and reads as a one-day event, which
+			// the caller then discards as not being an exhibition at all.
+			//
+			// A Romanian listing showed the shape. "3 septembrie 2026 -
+			// 15 ianuarie 2027" resolved September through the "sep" prefix
+			// and nothing for "ianuarie", and a four-month run was recorded as
+			// one day in September. Every language with partial coverage here
+			// does the same, which is why the unread bound is reported rather
+			// than dropped: the run is open at the end this parser could not
+			// read, and open is true.
+			if dates[0].at < unread[0] {
+				return DateRange{Start: &single}
+			}
+			return DateRange{End: &single}
+
 		default:
 			// A bare date on a listing is its closing date more often than not,
 			// but without a qualifier the safe reading is a single-day event.
@@ -246,6 +386,7 @@ func ParseDateRange(text string, now time.Time) DateRange {
 // located is a date and where in the text it was written.
 type located struct {
 	at   int
+	to   int
 	when time.Time
 }
 
@@ -253,8 +394,7 @@ type located struct {
 //
 // The trailing year is shared backwards: "12 March – 7 September 2026" gives
 // the year only once, and the opening date has to borrow it.
-func findDates(text string, now time.Time) []located {
-	var found []located
+func findDates(text string, now time.Time) (found []located, unread []int) {
 	claimed := make([]bool, len(text)+1)
 
 	claim := func(start, end int) bool {
@@ -277,7 +417,19 @@ func findDates(text string, now time.Time) []located {
 		month, _ := strconv.Atoi(text[m[4]:m[5]])
 		day, _ := strconv.Atoi(text[m[6]:m[7]])
 		if when, ok := makeDate(year, time.Month(month), day); ok {
-			found = append(found, located{at: m[0], when: when})
+			found = append(found, located{at: m[0], to: m[1], when: when})
+		}
+	}
+
+	for _, m := range cjkDate.FindAllStringSubmatchIndex(text, -1) {
+		if !claim(m[0], m[1]) {
+			continue
+		}
+		year, _ := strconv.Atoi(text[m[2]:m[3]])
+		month, _ := strconv.Atoi(text[m[4]:m[5]])
+		day, _ := strconv.Atoi(text[m[6]:m[7]])
+		if when, ok := makeDate(year, time.Month(month), day); ok {
+			found = append(found, located{at: m[0], to: m[1], when: when})
 		}
 	}
 
@@ -289,7 +441,7 @@ func findDates(text string, now time.Time) []located {
 		month, _ := strconv.Atoi(text[m[4]:m[5]])
 		year, _ := strconv.Atoi(text[m[6]:m[7]])
 		if when, ok := makeDate(year, time.Month(month), day); ok {
-			found = append(found, located{at: m[0], when: when})
+			found = append(found, located{at: m[0], to: m[1], when: when})
 		}
 	}
 
@@ -301,10 +453,11 @@ func findDates(text string, now time.Time) []located {
 		month, ok := lookupMonth(text[m[4]:m[5]])
 		year, _ := strconv.Atoi(text[m[6]:m[7]])
 		if !ok {
+			unread = append(unread, m[0])
 			continue
 		}
 		if when, ok := makeDate(year, month, day); ok {
-			found = append(found, located{at: m[0], when: when})
+			found = append(found, located{at: m[0], to: m[1], when: when})
 		}
 	}
 
@@ -316,10 +469,30 @@ func findDates(text string, now time.Time) []located {
 		day, _ := strconv.Atoi(text[m[4]:m[5]])
 		year, _ := strconv.Atoi(text[m[6]:m[7]])
 		if !ok {
+			unread = append(unread, m[0])
 			continue
 		}
 		if when, ok := makeDate(year, month, day); ok {
-			found = append(found, located{at: m[0], when: when})
+			found = append(found, located{at: m[0], to: m[1], when: when})
+		}
+	}
+
+	for _, m := range yearMonthDay.FindAllStringSubmatchIndex(text, -1) {
+		year, _ := strconv.Atoi(text[m[2]:m[3]])
+		month, ok := lookupMonth(text[m[4]:m[5]])
+		day, _ := strconv.Atoi(text[m[6]:m[7]])
+		if !ok {
+			// Not a date at all — a year, a word and a number that happen to
+			// sit together. Claiming the span first would eat text the
+			// year-less pass below can still read, so the claim is made only
+			// once the month has resolved.
+			continue
+		}
+		if !claim(m[0], m[1]) {
+			continue
+		}
+		if when, ok := makeDate(year, month, day); ok {
+			found = append(found, located{at: m[0], to: m[1], when: when})
 		}
 	}
 
@@ -336,10 +509,11 @@ func findDates(text string, now time.Time) []located {
 		day, _ := strconv.Atoi(text[m[2]:m[3]])
 		month, ok := lookupMonth(text[m[4]:m[5]])
 		if !ok {
+			unread = append(unread, m[0])
 			continue
 		}
 		if when, ok := makeDate(yearHint, month, day); ok {
-			found = append(found, located{at: m[0], when: when})
+			found = append(found, located{at: m[0], to: m[1], when: when})
 		}
 	}
 
@@ -350,7 +524,7 @@ func findDates(text string, now time.Time) []located {
 		}
 	}
 
-	return found
+	return found, unread
 }
 
 // firstDateIndex returns the byte offset of the first date-looking run in text,
@@ -371,6 +545,9 @@ func firstDateIndex(text string) int {
 // full names and abbreviations work.
 func lookupMonth(name string) (time.Month, bool) {
 	name = strings.ToLower(strings.Trim(name, ". "))
+	if ambiguousMonths[name] {
+		return 0, false
+	}
 	if month, ok := months[name]; ok {
 		return month, true
 	}

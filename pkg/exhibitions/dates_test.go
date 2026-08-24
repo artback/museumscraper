@@ -256,3 +256,128 @@ func TestParseDateRangeAcrossTheYear(t *testing.T) {
 		})
 	}
 }
+
+// TestParseDateRange_Languages covers the month table across the scripts the
+// catalogue actually meets. Each case is a range as a museum in that country
+// writes it, and every one of them read as nothing before the table was
+// widened — which meant the entry was dropped, since a listing that cannot be
+// placed in time is not kept.
+func TestParseDateRange_Languages(t *testing.T) {
+	now := time.Date(2026, 8, 24, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct{ name, text, start, end string }{
+		{"polish", "3 września 2026 - 15 stycznia 2027", "2026-09-03", "2027-01-15"},
+		{"czech", "3. září 2026 - 15. ledna 2027", "2026-09-03", "2027-01-15"},
+		{"hungarian", "2026. szeptember 3. - 2027. január 15.", "2026-09-03", "2027-01-15"},
+		{"finnish", "3. syyskuuta 2026 - 15. tammikuuta 2027", "2026-09-03", "2027-01-15"},
+		{"russian", "3 сентября 2026 - 15 января 2027", "2026-09-03", "2027-01-15"},
+		{"greek", "3 Σεπτεμβρίου 2026 - 15 Ιανουαρίου 2027", "2026-09-03", "2027-01-15"},
+		{"turkish", "3 Eylül 2026 - 15 Ocak 2027", "2026-09-03", "2027-01-15"},
+		{"romanian", "3 septembrie 2026 - 15 ianuarie 2027", "2026-09-03", "2027-01-15"},
+		{"croatian", "3. rujna 2026. - 15. siječnja 2027.", "2026-09-03", "2027-01-15"},
+		{"japanese", "2026年9月3日 - 2027年1月15日", "2026-09-03", "2027-01-15"},
+		{"korean", "2026년 9월 3일 - 2027년 1월 15일", "2026-09-03", "2027-01-15"},
+
+		// The traps. Each of these resolves to a different month under the
+		// three-letter prefix rule that carries English, and each is why its
+		// language is registered the way it is.
+		//
+		// Finnish "marraskuuta" is November, not March.
+		{"finnish november", "3. marraskuuta 2026 - 15. tammikuuta 2027", "2026-11-03", "2027-01-15"},
+		// Czech "června" and "července" share four letters and a month apart.
+		{"czech june and july", "3. června 2026 - 15. července 2026", "2026-06-03", "2026-07-15"},
+		// Polish July against Croatian July, which are different months in
+		// the other's language and are spelled differently in both.
+		{"polish july", "3 lipca 2026 - 15 sierpnia 2026", "2026-07-03", "2026-08-15"},
+		{"croatian july", "3. srpnja 2026. - 15. kolovoza 2026.", "2026-07-03", "2026-08-15"},
+		// Greek "Ιουνίου" and "Ιουλίου" share three letters.
+		{"greek june", "3 Ιουνίου 2026 - 15 Ιουλίου 2026", "2026-06-03", "2026-07-15"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseDateRange(tt.text, now)
+			if got.Start == nil || got.Start.Format("2006-01-02") != tt.start {
+				t.Errorf("Start = %v, want %s", got.Start, tt.start)
+			}
+			if got.End == nil || got.End.Format("2006-01-02") != tt.end {
+				t.Errorf("End = %v, want %s", got.End, tt.end)
+			}
+		})
+	}
+}
+
+// TestParseDateRange_AmbiguousMonthIsRefused holds the line on the one
+// spelling that names two different months. Reading it either way dates half
+// the listings that use it a month wrong, and does so silently.
+func TestParseDateRange_AmbiguousMonthIsRefused(t *testing.T) {
+	now := time.Date(2026, 8, 24, 0, 0, 0, 0, time.UTC)
+
+	// Croatian for "3 October 2026 to 15 November 2026"; the same word is
+	// November in Polish.
+	got := ParseDateRange("3. listopada 2026. - 15. studenoga 2026.", now)
+
+	if got.Start != nil {
+		t.Errorf("Start = %v, want nothing: \"listopada\" cannot be resolved without knowing the language", got.Start)
+	}
+	if got.End == nil || got.End.Format("2006-01-02") != "2026-11-15" {
+		t.Errorf("End = %v, want 2026-11-15: the bound that was readable should survive", got.End)
+	}
+}
+
+// TestParseDateRange_HalfReadRangeStaysOpen is the bug the widening exposed.
+//
+// One bound read and the other in a month this table does not know is a run
+// that is open at one end, not a one-day event. Recording it as a single day
+// invents a closing date and then loses the entry entirely, because a single
+// day is read as an event rather than an exhibition.
+func TestParseDateRange_HalfReadRangeStaysOpen(t *testing.T) {
+	now := time.Date(2026, 8, 24, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		text      string
+		wantStart string
+		wantEnd   string
+	}{
+		{
+			// Ukrainian, which is not in the table: the opening date reads
+			// and the closing one does not.
+			name:      "unknown month closes the run",
+			text:      "3 вересня 2026 - 15 sichnya 2027",
+			wantStart: "",
+			wantEnd:   "",
+		},
+		{
+			name:      "unknown month opens the run",
+			text:      "3 sichnya 2026 - 15 September 2026",
+			wantStart: "",
+			wantEnd:   "2026-09-15",
+		},
+		{
+			name:      "unknown month closes a run that opened readably",
+			text:      "3 September 2026 - 15 sichnya 2027",
+			wantStart: "2026-09-03",
+			wantEnd:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseDateRange(tt.text, now)
+
+			switch {
+			case tt.wantStart == "" && got.Start != nil:
+				t.Errorf("Start = %v, want nothing", got.Start)
+			case tt.wantStart != "" && (got.Start == nil || got.Start.Format("2006-01-02") != tt.wantStart):
+				t.Errorf("Start = %v, want %s", got.Start, tt.wantStart)
+			}
+			switch {
+			case tt.wantEnd == "" && got.End != nil:
+				t.Errorf("End = %v, want nothing: a half-read range must not invent the other bound", got.End)
+			case tt.wantEnd != "" && (got.End == nil || got.End.Format("2006-01-02") != tt.wantEnd):
+				t.Errorf("End = %v, want %s", got.End, tt.wantEnd)
+			}
+		})
+	}
+}
