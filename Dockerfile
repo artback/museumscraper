@@ -8,7 +8,16 @@ WORKDIR /src
 
 # Dependencies are copied first so the module download layer is reused whenever
 # only application code has changed.
+#
+# The nested module's manifests come too, and must: the root go.mod replaces
+# github.com/artback/museumscraper/extract with ./extract, so "go mod download"
+# reads extract/go.mod before it reads anything from the network. Without them
+# it fails in about a second with "reading extract/go.mod: no such file or
+# directory" — which is what broke every deploy from the day the extract module
+# landed, while the tests stayed green because a checkout has the directory and
+# a build context of two files does not.
 COPY go.mod go.sum ./
+COPY extract/go.mod extract/go.sum ./extract/
 RUN go mod download
 
 COPY . .
