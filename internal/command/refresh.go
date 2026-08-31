@@ -101,6 +101,12 @@ func runRefresh(ctx context.Context, args []string) error {
 		written int64
 		found   int
 		failed  int
+
+		// How this run read what it found, counted as it is scraped rather
+		// than queried back afterwards: the stored table mixes this run's
+		// rows with every previous run's, and the question the fallback
+		// raises — how many sites needed it tonight — is about this one.
+		byProvenance = make(map[exhibitions.Provenance]int)
 	)
 
 	flush := func() {
@@ -149,6 +155,9 @@ func runRefresh(ctx context.Context, args []string) error {
 		}
 
 		found += len(batch)
+		for _, e := range batch {
+			byProvenance[e.Provenance]++
+		}
 		buffer = append(buffer, batch...)
 		if len(buffer) >= checkpointSize {
 			flush()
@@ -190,7 +199,37 @@ func runRefresh(ctx context.Context, args []string) error {
 
 	log.Printf("Refresh finished in %s: found %d exhibitions, stored %d, lost %d",
 		time.Since(start).Round(time.Second), found, written, failed)
+	log.Printf("Read by: %s", provenanceSummary(byProvenance, found))
 	return nil
+}
+
+// provenanceRungs are reported in the order the scraper tries them, so the
+// summary reads as the ladder it describes rather than as whatever order a map
+// happened to yield.
+var provenanceRungs = []exhibitions.Provenance{
+	exhibitions.ProvenanceDeclared,
+	exhibitions.ProvenanceHeuristic,
+	exhibitions.ProvenanceGenerated,
+	exhibitions.ProvenanceDescription,
+}
+
+// provenanceSummary renders one run's tally as counts and shares.
+//
+// Every rung is named even at zero. A rung missing from the line is
+// indistinguishable from a rung nobody looked at, and "generated 0" is the
+// most informative thing this can say on a run where the heuristics coped
+// with everything.
+func provenanceSummary(tally map[exhibitions.Provenance]int, total int) string {
+	if total == 0 {
+		return "nothing found"
+	}
+
+	parts := make([]string, 0, len(provenanceRungs))
+	for _, rung := range provenanceRungs {
+		n := tally[rung]
+		parts = append(parts, fmt.Sprintf("%s %d (%.1f%%)", rung, n, 100*float64(n)/float64(total)))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // errNoArea means the caller gave no area to refresh.

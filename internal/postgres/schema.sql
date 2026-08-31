@@ -260,6 +260,21 @@ ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS retired_at timestamptz;
 -- museum's site.
 ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'scraped';
 
+-- How the listing was read: declared (schema.org the site published),
+-- heuristic (its markup read structurally), generated (a compiled extractor,
+-- written once by a model for a site nothing else could read), or description
+-- (the museum standing in for a site with no programme at all).
+--
+-- Distinct from the "source" column above, which says where the row came from
+-- rather than how it was managed. The two answer different questions and a
+-- scraped row has both.
+--
+-- Empty for every row written before the column existed, and deliberately not
+-- backfilled: there is no way to tell after the fact which rung produced a
+-- stored listing, and guessing would put a number on the fallback that no
+-- sweep ever measured. The ratio is read off rows written since.
+ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS provenance text NOT NULL DEFAULT '';
+
 -- The host the listing was read from, which is the unit a sweep works in:
 -- museums share websites, so the site is what gets fetched, not the museum.
 ALTER TABLE exhibitions ADD COLUMN IF NOT EXISTS site text NOT NULL DEFAULT '';

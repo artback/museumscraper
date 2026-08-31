@@ -351,3 +351,71 @@ func TestMerger_StillMergesOnADistinctiveAlias(t *testing.T) {
 		t.Errorf("Sources = %v, want both", museums[0].Sources)
 	}
 }
+
+// TestMerger_FoldsEditionsWritingDifferentScripts is the guarantee that adding
+// Wikipedia editions grows the catalogue rather than duplicating it.
+//
+// A museum written up in Arabic, Urdu, Thai and English is four articles about
+// one building, and the name is no help: nothing normalises "المتحف المصري" onto
+// "Egyptian Museum". What holds them together is the Wikidata id, which every
+// edition carries in its pageprops, so the category crawler supplies it
+// whichever language it read.
+func TestMerger_FoldsEditionsWritingDifferentScripts(t *testing.T) {
+	m := NewMerger()
+
+	for _, name := range []string{
+		"Egyptian Museum",   // en
+		"المتحف المصري",     // ar
+		"مصری عجائب گھر",    // ur
+		"พิพิธภัณฑ์อียิปต์", // th
+	} {
+		m.Add(models.Museum{
+			Name:       name,
+			Country:    "Egypt",
+			WikidataID: "Q283413",
+			Sources:    []string{"wikipedia-category"},
+		})
+	}
+
+	museums := m.Museums()
+	if len(museums) != 1 {
+		t.Fatalf("got %d museums, want 1: four editions describing one building", len(museums))
+	}
+	if _, merged := m.Stats(); merged != 3 {
+		t.Errorf("merged = %d, want 3", merged)
+	}
+}
+
+// TestMerger_DifferentMuseumsInOneCountrySurviveTheSameEdition guards the
+// other direction: folding on the identifier must not fold on the country.
+func TestMerger_DifferentMuseumsInOneCountrySurviveTheSameEdition(t *testing.T) {
+	m := NewMerger()
+
+	m.Add(models.Museum{Name: "المتحف المصري", Country: "Egypt", WikidataID: "Q283413"})
+	m.Add(models.Museum{Name: "متحف النوبة", Country: "Egypt", WikidataID: "Q1142285"})
+
+	if museums := m.Museums(); len(museums) != 2 {
+		t.Fatalf("got %d museums, want 2 distinct ones: %+v", len(museums), museums)
+	}
+}
+
+// TestMerger_ArticleWithoutAnIdentifierStaysSeparate documents the one case
+// adding editions cannot fold, so it is a known shape rather than a surprise
+// in the counts.
+//
+// An article with no linked Wikidata item falls back to name-and-country
+// matching, and a name in another script never matches its English twin. The
+// record is kept — it may well be a museum nothing else in the catalogue has —
+// and the duplicate, if it is one, is caught later: the database merges rows
+// on the identifier once one arrives, and `museum verify` reports records
+// stored more than once.
+func TestMerger_ArticleWithoutAnIdentifierStaysSeparate(t *testing.T) {
+	m := NewMerger()
+
+	m.Add(models.Museum{Name: "Egyptian Museum", Country: "Egypt", WikidataID: "Q283413"})
+	m.Add(models.Museum{Name: "المتحف المصري", Country: "Egypt"})
+
+	if museums := m.Museums(); len(museums) != 2 {
+		t.Fatalf("got %d museums, want 2: an unidentified article cannot be folded by name", len(museums))
+	}
+}

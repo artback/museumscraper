@@ -159,6 +159,12 @@ type Candidate struct {
 	// they are used in place of reading the text.
 	Dates DateRange
 
+	// Declared marks an entry the site published as schema.org event data
+	// rather than one read out of its markup. It is the difference between
+	// being told and having guessed, and is carried through to the stored
+	// exhibition's Provenance.
+	Declared bool
+
 	// Vouched marks an entry admitted only because the page it sits on calls
 	// itself an exhibitions listing — its own path says nothing. The caller
 	// holds these to a higher standard, because the path test they skipped is

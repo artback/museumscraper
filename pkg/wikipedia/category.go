@@ -51,6 +51,11 @@ const RootMuseumCategory = "Category:Museums by country"
 // guessed title is not a wrong title, it is a silent one: "Category:国別の博物館"
 // is a plausible rendering of "Museums by country", it does not exist, and the
 // Japanese edition simply returned nothing at all.
+//
+// Titles also move. Turkish renamed its root from "Ülkelerine göre müzeler" to
+// "Ülkeye göre müzeler", and the old title kept resolving to an empty category
+// rather than to an error — an edition quietly contributing nothing, which is
+// exactly what TestRootCategoriesExist is for.
 var rootMuseumCategories = map[string]string{
 	"en": RootMuseumCategory,
 	"es": "Categoría:Museos por país",
@@ -69,7 +74,30 @@ var rootMuseumCategories = map[string]string{
 	"fi": "Luokka:Museot maittain",
 	"da": "Kategori:Museer efter land",
 	"ko": "분류:나라별 박물관",
-	"tr": "Kategori:Ülkelerine göre müzeler",
+	"tr": "Kategori:Ülkeye göre müzeler",
+
+	// The editions above are Europe, Japan, Korea and China, which is where
+	// Wikidata is already strongest. These are the ones that cover where it is
+	// weakest: Wikidata holds 12 museums for Ethiopia, 23 for Kenya and 554
+	// for India, against 8,924 for Italy, and no amount of walking European
+	// editions changes that. The number after each is how many per-country
+	// subcategories its tree held when it was added, which is the best
+	// available measure of whether an edition is worth the crawl.
+	//
+	// Hindi was measured and left out: its tree has two country
+	// subcategories, so walking it costs a crawl and returns almost nothing.
+	//
+	// No African-language edition is here because none has this tree —
+	// Swahili has no langlink for the English root at all. Africa's gap
+	// cannot be closed from Wikipedia, only from OpenStreetMap.
+	"ur": "زمرہ:عجائب گھر بلحاظ ملک",                // 220 countries
+	"ar": "تصنيف:متاحف حسب البلد",                   // 154
+	"fa": "رده:موزه‌ها بر پایه کشور",                // 105
+	"th": "หมวดหมู่:พิพิธภัณฑ์แบ่งตามประเทศ",        // 77
+	"id": "Kategori:Museum menurut negara",          // 66
+	"bn": "বিষয়শ্রেণী:দেশ অনুযায়ী জাদুঘর",         // 46
+	"vi": "Thể loại:Bảo tàng theo quốc gia",         // 36
+	"ta": "பகுப்பு:நாடு வாரியாக அருங்காட்சியகங்கள்", // 30
 }
 
 // RootCategoryFor returns the museum category tree's root in one edition, and
