@@ -644,11 +644,18 @@ This is not a gap the crawler can fix by trying harder at the same sources, and 
 Strongest evidence first:
 
 1. **Wikidata ID** — exact and authoritative. Both Wikipedia sources expose it via `pageprops`, and OSM often carries a `wikidata` tag, so this catches most of the overlap.
-2. **Normalised name + country** — punctuation, case and spacing ignored, so `Musée d'Orsay` and `Musee d Orsay` match. *Every* name a source supplied is tried, not just the primary one: OSM names a museum in the local language while Wikidata labels it in English, and without the alternatives the two records never meet. Surviving alternatives are kept as `also_known_as`.
+2. **Normalised name + country + town** — the stronger fallback, for the very common case of a name that is not unique within a country.
+3. **Normalised name + country** — punctuation, case and spacing ignored, so `Musée d'Orsay` and `Musee d Orsay` match. *Every* name a source supplied is tried, not just the primary one: OSM names a museum in the local language while Wikidata labels it in English, and without the alternatives the two records never meet. Surviving alternatives are kept as `also_known_as`.
 
-A name alone is never enough — without a known country the record stays separate, because "City Museum" names dozens of unrelated institutions. Coordinates are deliberately *not* used for matching: museum campuses put genuinely distinct museums metres apart.
+A name alone is never enough — without a known country the record stays separate, because "City Museum" names dozens of unrelated institutions.
 
-Later sources fill gaps without overwriting established facts, with one exception: Wikidata's `country` overrides one inferred by the category crawl, which derives it from an ancestor category and so gets satellites wrong (`Centre Pompidou Hanwha` sits under a French category but stands in South Korea).
+A match is then **vetoed** if the two records are more than 25 km apart. Coordinates are deliberately not used to *make* a match — museum campuses put genuinely distinct museums metres apart, so being close is no evidence of being the same — but being far apart is strong evidence of the opposite, and the veto is what stops the two dense sources doing real damage. Overture and the American register contribute some 200,000 records, almost none carrying a Wikidata ID, into countries with dozens of museums called "Heritage Museum"; matching on name and country alone folded the one in Portland and the one in Springfield into a single record holding one of the two positions, with nothing downstream able to tell. 25 km is generous on purpose: a geocoder that could only place a museum's town puts it at the town's centre, which in a rural district is several kilometres out.
+
+The town key earns its place immediately afterwards. Once two "Heritage Museum" records are correctly kept apart, the plain name key is poisoned as ambiguous — it now identifies neither — and every later record naming that museum is locked out of both. Keeping them apart is only half the job; a Wikidata record that names Portland has to reach the Portland one, or the catalogue is safe and useless.
+
+**What a merged record gains.** Later sources fill gaps without overwriting established facts: the website from whichever source has one, the position from whichever knows it, `also_known_as` accumulating every name any source used, and `sources` and `classes` unioned. That is the point of overlap rather than a cost of it — a museum found in Wikidata, Overture and the American register ends up with the Wikipedia article from one, the position and website from another, and its local-language name from a third.
+
+There is one exception to gap-filling: Wikidata's `country` overrides one inferred by the category crawl, which derives it from an ancestor category and so gets satellites wrong (`Centre Pompidou Hanwha` sits under a French category but stands in South Korea).
 
 ---
 
