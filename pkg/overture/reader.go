@@ -31,9 +31,23 @@ import (
 
 const (
 	// coalesceGap is how far apart two wanted column chunks may be before it is
-	// worth issuing separate requests for them. A range request costs a
-	// round trip, so reading a little of what we do not need is cheaper than
-	// another trip to us-west-2.
+	// worth issuing separate requests for them.
+	//
+	// Measured against one release file's metadata, per file:
+	//
+	//	gap        fetched   requests
+	//	exact       203 MB      2,816
+	//	16 KB       203 MB      1,280
+	//	64 KB       226 MB        785
+	//	128 KB      227 MB        768
+	//	1 MB        452 MB        259
+	//
+	// 16 KB is the knee for bytes — it merges the chunks that are already
+	// adjacent and fetches nothing extra — but the last stretch to 128 KB
+	// trades 24 MB for 512 fewer round trips, and at a round trip to us-west-2
+	// per request that is the better side of the trade on any connection this
+	// runs on. Past 128 KB the gap starts swallowing whole columns we do not
+	// want, and 1 MB doubles the transfer for nothing.
 	coalesceGap = 128 << 10
 
 	// maxSegments bounds what a reader holds at once. Chunks are fetched per
