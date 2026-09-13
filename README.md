@@ -170,7 +170,7 @@ Run `museum <command> -h` for the full flag list.
 ### `museum crawl` — build the catalogue
 
 ```bash
-museum crawl                                        # wikidata, category, lists
+museum crawl                                        # wikidata, category, lists, registers
 museum crawl -sources wikidata                       # fastest single source
 museum crawl -sources all                            # maximum coverage — adds osm
 museum crawl -sources all -languages all             # ... and every Wikipedia edition
@@ -549,8 +549,26 @@ No single catalogue is complete, and none is a superset of the others.
 | **Wikipedia categories** | `category` | tens of thousands | Museums with an English article that Wikidata has not typed as a museum |
 | **Wikipedia lists** | `lists` | ~7,000 | Museums *named* in a "List of museums in X" article but with no article of their own |
 | **OpenStreetMap** | `osm` | tens of thousands | Small local museums that never reached either wiki; mapped on the ground, so nearly all have coordinates |
+| **Public registers** | `registers` | 15,094 (13,878 US + 1,216 FR) | Museums a government lists because it funds or accredits them — the county museum with no article, no map pin and a website from 2009 |
 
-The first three are on by default. OSM is opt-in — much slower (one Overpass query per area, countries and territories alike) and its records are thinner.
+All but OSM are on by default. OSM is opt-in — much slower (one Overpass query per area, countries and territories alike) and its records are thinner.
+
+### Public registers
+
+The other three sources describe museums somebody chose to write about: Wikidata and Wikipedia hold what an editor thought notable, OpenStreetMap what a mapper stood in front of. A national register is a different kind of evidence — an administrative list, kept by the body that funds or accredits the institutions — and it is strongest exactly where the others are weakest.
+
+| Register | Museums | Licence |
+| --- | --- | --- |
+| [IMLS Museum Data Files](https://www.imls.gov/research-evaluation/data/museum-data-files) (United States) | 13,878 | Public domain — a work of the US government |
+| [Muséofile](https://www.data.gouv.fr/datasets/musees-de-france-base-museofile) (France) | 1,216 | Licence Ouverte 2.0 |
+
+It is also the cheapest source by an order of magnitude: **two HTTP requests for 15,094 museums in about four seconds**, against an hour of Overpass queries. 15,054 of them carry coordinates and 8,897 carry a website, which is the field the exhibition sweep runs on — so this is the source that most directly feeds `sweep`.
+
+Two things to know about it:
+
+**The American file is a 2018 snapshot and IMLS has said there will be no more.** It will slowly fill with museums that have since closed. That is a real cost, and the reason to accept it is that nothing else covers small American museums at all; a museum that closed in 2021 is a better catalogue entry than one that was never listed, and enrichment and the sweep are what find out which is which.
+
+**Only six of the nine IMLS disciplines are admitted** — art, children's, general, history, natural history and science, 13,878 of 30,178 rows. Left out: historical societies and historic preservation (14,785), botanical gardens and nature centres (1,029), and zoos and aquariums (465). That is the same line the OSM query draws at arts centres and archaeological sites — things that sit next to a museum without being one, which nothing downstream could tell apart afterwards. A historical society may well run a museum; the file does not say which do.
 
 ### How records are merged
 
@@ -620,9 +638,11 @@ honouring the number by holding a worker for an hour would not serve it either.
 | Wikidata | CC0 1.0 | nothing |
 | Wikipedia | CC BY-SA 4.0 | attribution, share-alike |
 | OpenStreetMap (incl. Nominatim geocoding) | ODbL 1.0 | attribution, share-alike |
+| IMLS museum file (US) | public domain, a US government work | nothing; acknowledgement asked for and given |
+| Muséofile (FR) | Licence Ouverte 2.0 | attribution |
 | Museum websites | listings recorded as facts, with the page they came from | — |
 
-Two of these require a credit wherever the data is shown, and the catalogue
+Several of these require a credit wherever the data is shown, and the catalogue
 mixes them per record, so the credit is derived per record rather than declared
 once. Every `/v1/museums` response carries an `attribution` array covering the
 sources that page actually drew on, `/v1/attribution` states the whole set, and

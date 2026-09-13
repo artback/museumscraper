@@ -15,6 +15,7 @@ import (
 	"museum/internal/postgres"
 	"museum/pkg/graceful"
 	"museum/pkg/osm"
+	"museum/pkg/registers"
 	"museum/pkg/wikidata"
 	"museum/pkg/wikipedia"
 )
@@ -31,15 +32,15 @@ func crawlCommand() Command {
 	return Command{
 		Name:    "crawl",
 		Summary: "Build the catalogue from Wikidata, Wikipedia and OpenStreetMap",
-		Usage:   "[-sources wikidata,category,lists,osm|all]",
+		Usage:   "[-sources wikidata,category,lists,osm,registers|all]",
 		Run:     runCrawl,
 	}
 }
 
 func runCrawl(ctx context.Context, args []string) error {
-	fs := newFlagSet("crawl", "[-sources wikidata,category,lists,osm|all] [-languages en,es,…]", os.Stderr)
-	sources := fs.String("sources", "wikidata,category,lists",
-		"comma-separated sources: wikidata, category, lists, osm; or \"all\"")
+	fs := newFlagSet("crawl", "[-sources wikidata,category,lists,osm,registers|all] [-languages en,es,…]", os.Stderr)
+	sources := fs.String("sources", "wikidata,category,lists,registers",
+		"comma-separated sources: wikidata, category, lists, osm, registers; or \"all\"")
 	// English only by default. Every extra edition is a full category walk and
 	// roughly doubles the crawl's Wikipedia traffic, so widening coverage is a
 	// decision to make deliberately rather than something a routine crawl does
@@ -540,6 +541,9 @@ func museumsFrom(ctx context.Context, name string, wiki *wikipedia.Client) <-cha
 	case "osm":
 		return osm.NewService(osm.NewClient()).Museums(ctx)
 
+	case "registers":
+		return registers.NewService().Museums(ctx)
+
 	case "lists":
 		svc := wikipedia.NewCategoryService(wiki)
 		processor := wikipedia.NewCategoryProcessor(svc, wikipedia.NewMuseumExtractor(nil))
@@ -577,7 +581,7 @@ func parseLanguages(raw string) []string {
 }
 
 // allSources is every source, in the order a crawl should start them.
-var allSources = []string{"wikidata", "category", "lists", "osm"}
+var allSources = []string{"wikidata", "category", "lists", "osm", "registers"}
 
 // parseSources validates and de-duplicates the -sources flag.
 //
@@ -587,7 +591,7 @@ var allSources = []string{"wikidata", "category", "lists", "osm"}
 // out, and a source added later would not reach anyone who had written it out
 // somewhere.
 func parseSources(raw string) []string {
-	known := map[string]bool{"wikidata": true, "category": true, "lists": true, "osm": true}
+	known := map[string]bool{"wikidata": true, "category": true, "lists": true, "osm": true, "registers": true}
 
 	if strings.EqualFold(strings.TrimSpace(raw), "all") {
 		return slices.Clone(allSources)

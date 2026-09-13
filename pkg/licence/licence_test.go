@@ -100,3 +100,31 @@ func TestAllCoversEverySourceTheCatalogueUses(t *testing.T) {
 		}
 	}
 }
+
+// TestRegisterLicences: the two published registers carry different terms and
+// the difference is the point — a US government work is outside copyright
+// altogether, while Licence Ouverte makes attribution a condition. Collapsing
+// them onto one "open data" notice would misstate both.
+func TestRegisterLicences(t *testing.T) {
+	imls, ok := For("imls")
+	if !ok {
+		t.Fatal("the United States register has no licence")
+	}
+	if imls.ShareAlike {
+		t.Error("a US government work was marked share-alike")
+	}
+	if imls.Attribution == "" {
+		t.Error("IMLS asks that reuse be acknowledged, so the credit line should be there")
+	}
+
+	fr, ok := For("museofile")
+	if !ok {
+		t.Fatal("the French register has no licence")
+	}
+	if fr.Name != "Licence Ouverte 2.0" || fr.Attribution == "" {
+		t.Errorf("unexpected French register licence: %+v", fr)
+	}
+	if fr.ShareAlike {
+		t.Error("Licence Ouverte puts no terms on derived work; marking it share-alike overstates it")
+	}
+}

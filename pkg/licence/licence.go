@@ -56,6 +56,22 @@ var (
 		Name: "CC0 1.0",
 		URL:  "https://creativecommons.org/publicdomain/zero/1.0/",
 	}
+	// publicDomain covers the United States museum file. It is a work of the
+	// US government, which places it outside copyright entirely; IMLS asks only
+	// that reuse be acknowledged, which costs nothing and is worth doing.
+	publicDomain = Licence{
+		Name:        "Public domain (US Government work)",
+		URL:         "https://www.imls.gov/about/privacy-terms",
+		Attribution: "Museum data from the Institute of Museum and Library Services",
+	}
+	// licenceOuverte covers the French register. Attribution is a condition
+	// rather than a courtesy, and unlike ODbL and CC BY-SA it puts no terms on
+	// what is built from the data.
+	licenceOuverte = Licence{
+		Name:        "Licence Ouverte 2.0",
+		URL:         "https://www.etalab.gouv.fr/licence-ouverte-open-licence/",
+		Attribution: "Muséofile — Ministère de la Culture",
+	}
 	// museumWebsite covers what a museum publishes about its own programme.
 	// Exhibition titles and dates are facts and are recorded as such, with the
 	// page they were read from kept alongside them; the attribution is the
@@ -92,6 +108,10 @@ func For(source string) (Licence, bool) {
 		l = wikipedia
 	case name == "wikidata":
 		l = wikidata
+	case name == "imls":
+		l = publicDomain
+	case name == "museofile":
+		l = licenceOuverte
 	case name == "website", name == "harvest":
 		l = museumWebsite
 	default:
@@ -130,7 +150,7 @@ func ForSources(sources []string) []Licence {
 // All returns every licence this catalogue redistributes under, for the
 // attribution endpoint.
 func All() []Licence {
-	sources := []string{"wikidata", "wikipedia", "openstreetmap", "nominatim", "website"}
+	sources := []string{"wikidata", "wikipedia", "openstreetmap", "nominatim", "imls", "museofile", "website"}
 	out := make([]Licence, 0, len(sources))
 	for _, s := range sources {
 		if l, ok := For(s); ok {
