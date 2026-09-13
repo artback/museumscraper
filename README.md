@@ -538,7 +538,7 @@ No single catalogue is complete, and none is a superset of the others.
 | **Wikipedia lists** | `lists` | ~7,000 | Museums *named* in a "List of museums in X" article but with no article of their own |
 | **OpenStreetMap** | `osm` | tens of thousands | Small local museums that never reached either wiki; mapped on the ground, so nearly all have coordinates |
 
-The first three are on by default. OSM is opt-in — much slower (one Overpass query per country) and its records are thinner.
+The first three are on by default. OSM is opt-in — much slower (one Overpass query per area, countries and territories alike) and its records are thinner.
 
 ### How records are merged
 
@@ -550,6 +550,80 @@ Strongest evidence first:
 A name alone is never enough — without a known country the record stays separate, because "City Museum" names dozens of unrelated institutions. Coordinates are deliberately *not* used for matching: museum campuses put genuinely distinct museums metres apart.
 
 Later sources fill gaps without overwriting established facts, with one exception: Wikidata's `country` overrides one inferred by the category crawl, which derives it from an ancestor category and so gets satellites wrong (`Centre Pompidou Hanwha` sits under a French category but stands in South Korea).
+
+---
+
+## Using the sources legally
+
+Everything here is collected from sources that permit it, at rates they
+publish, and served on under the terms they attach. Those are three separate
+obligations and this section is about all three, because getting any of them
+wrong is the kind of mistake that surfaces weeks later as a block.
+
+### Being identifiable
+
+Wikimedia's user-agent policy and Nominatim's usage policy both require a
+crawler to say who it is and how to reach whoever runs it. Set `MUSEUM_CONTACT`
+to an email address or a URL; it is composed into the User-Agent every source
+sees, and the crawler says so in its log on startup when it is unset.
+
+A contact nobody can reach is the same as none. Four clients used to carry
+their own constant naming `github.com/example/museum`, an address that does not
+exist — a placeholder passes review precisely because it looks like an answer.
+
+### Rates
+
+| Source | Rate | Enforced by |
+| --- | --- | --- |
+| Wikipedia action API | 5/s, backing off to 1 per 5s on `429` | one limiter shared across every edition and both wiki sources |
+| Wikidata Query Service | 1 per 1.2s | per-process limiter |
+| Overpass | 1 per 3s, three instances tried in turn | per-process limiter |
+| Nominatim | 1 per 1.1s, widening to 30s under refusal | per-process limiter, shared by the enricher's concurrent stages |
+| Museum websites | 1 per host per second, or the site's own `Crawl-delay` if longer | per-host, in the fetcher |
+
+The limiters are per *endpoint*, not per client object, which is the shape the
+rate limits themselves have. Two clients each honouring the interval
+independently run at twice it — that is how a crawl of "Lists of museums in the
+United States" was once thrown away.
+
+### robots.txt
+
+Museum websites are read through one fetcher, and it reads `robots.txt` first:
+the group naming this crawler where a site wrote one, the `*` group otherwise,
+`Allow`/`Disallow` with `*` and `$` wildcards, and `Crawl-delay`. A site with no
+`robots.txt` is crawlable, which is the convention.
+
+A site that refuses is **parked rather than retried**. A refusal is not a
+failure that might come good, and the sweep's failure path would otherwise ask
+it six more times on the way to the same answer.
+
+A `Crawl-delay` longer than 60 seconds is treated as a refusal too. A site
+asking for one request an hour has said no to a sweep of this shape, and
+honouring the number by holding a worker for an hour would not serve it either.
+
+### Licences, and what they ask of you
+
+| Source | Licence | Requires |
+| --- | --- | --- |
+| Wikidata | CC0 1.0 | nothing |
+| Wikipedia | CC BY-SA 4.0 | attribution, share-alike |
+| OpenStreetMap (incl. Nominatim geocoding) | ODbL 1.0 | attribution, share-alike |
+| Museum websites | listings recorded as facts, with the page they came from | — |
+
+Two of these require a credit wherever the data is shown, and the catalogue
+mixes them per record, so the credit is derived per record rather than declared
+once. Every `/v1/museums` response carries an `attribution` array covering the
+sources that page actually drew on, `/v1/attribution` states the whole set, and
+the map credits its data as well as its tiles.
+
+Note the one that is easy to miss: an **approximate position carries ODbL**
+however the museum was found. It is a position Nominatim supplied, and Nominatim
+geocodes against OpenStreetMap — so a page of CC0 Wikidata records placed by the
+geocoder is ODbL data all the same.
+
+If you serve these records on, you take on the same obligations. That is what
+`/v1/attribution` is for: it is machine-readable so a client can comply without
+guessing.
 
 ---
 
@@ -958,8 +1032,11 @@ That means cross-site reuse fires zero per cent of the time on this sample — f
 | `KAFKA_BROKER_LOCAL` | Bootstrap the app uses |
 | `KAFKA_TOPIC` | Topic MinIO publishes to and `enrich` reads |
 | `KAFKA_GROUP_ID` | Consumer group for `enrich` |
+| `MUSEUM_CONTACT` | **Set this.** An email address or URL that reaches whoever runs the crawler, composed into the User-Agent every source sees |
+| `MUSEUM_USER_AGENT` | Replaces the composed header outright |
 | `NOMINATIM_USER_AGENT` | Sent to Nominatim, which rejects generic agents |
 | `WIKIDATA_USER_AGENT` | Sent to the Wikidata Query Service |
+| `WIKIPEDIA_USER_AGENT` | Sent to the Wikipedia action API |
 | `OVERPASS_USER_AGENT` | Sent to the Overpass API |
 | `EXHIBITIONS_USER_AGENT` | Sent when reading museum websites |
 
@@ -1052,7 +1129,7 @@ go test ./internal/harvest/ -run TestLiveCompile -harvest.live -v -timeout 50m
 
 ## Notes
 
-- Country extraction is heuristic, from page and category titles. `pkg/geo` recognises UN member states plus the naming variants Wikipedia uses interchangeably.
+- Country extraction is heuristic, from page and category titles. `pkg/geo` recognises UN member states, the 44 territories that have their own ISO 3166-1 code and their own museums (Wikidata attributes 22 to the Isle of Man, 22 to Greenland, 21 to Jersey), and the naming variants Wikipedia uses interchangeably.
 - Object keys are slugs: lowercased, non-alphanumeric runs collapsed to dashes, accents preserved. Two museums in one country whose names slugify identically collide, and the second is skipped — measured at 1 in 3,970 on German museums (0.03%).
 
 ## License
