@@ -31,15 +31,15 @@ func crawlCommand() Command {
 	return Command{
 		Name:    "crawl",
 		Summary: "Build the catalogue from Wikidata, Wikipedia and OpenStreetMap",
-		Usage:   "[-sources wikidata,category,lists,osm]",
+		Usage:   "[-sources wikidata,category,lists,osm|all]",
 		Run:     runCrawl,
 	}
 }
 
 func runCrawl(ctx context.Context, args []string) error {
-	fs := newFlagSet("crawl", "[-sources wikidata,category,lists,osm] [-languages en,es,…]", os.Stderr)
+	fs := newFlagSet("crawl", "[-sources wikidata,category,lists,osm|all] [-languages en,es,…]", os.Stderr)
 	sources := fs.String("sources", "wikidata,category,lists",
-		"comma-separated sources: wikidata, category, lists, osm")
+		"comma-separated sources: wikidata, category, lists, osm; or \"all\"")
 	// English only by default. Every extra edition is a full category walk and
 	// roughly doubles the crawl's Wikipedia traffic, so widening coverage is a
 	// decision to make deliberately rather than something a routine crawl does
@@ -576,9 +576,22 @@ func parseLanguages(raw string) []string {
 	return editions
 }
 
+// allSources is every source, in the order a crawl should start them.
+var allSources = []string{"wikidata", "category", "lists", "osm"}
+
 // parseSources validates and de-duplicates the -sources flag.
+//
+// "all" selects every source, which is what -languages already means by it.
+// Worth a word of its own because the widest crawl is the one most likely to be
+// asked for and was the one hardest to type: the full list had to be written
+// out, and a source added later would not reach anyone who had written it out
+// somewhere.
 func parseSources(raw string) []string {
 	known := map[string]bool{"wikidata": true, "category": true, "lists": true, "osm": true}
+
+	if strings.EqualFold(strings.TrimSpace(raw), "all") {
+		return slices.Clone(allSources)
+	}
 
 	var enabled []string
 	for _, name := range strings.Split(raw, ",") {

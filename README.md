@@ -172,18 +172,30 @@ Run `museum <command> -h` for the full flag list.
 ```bash
 museum crawl                                        # wikidata, category, lists
 museum crawl -sources wikidata                       # fastest single source
-museum crawl -sources wikidata,category,lists,osm    # maximum coverage
+museum crawl -sources all                            # maximum coverage — adds osm
+museum crawl -sources all -languages all             # ... and every Wikipedia edition
 ```
 
 Sources run concurrently into a shared merger, then everything is written at once.
 
-> **The `lists` source is currently ineffective.** All four sources run
+> **The `lists` source used to be throttled into uselessness.** All sources run
 > concurrently, and `wikidata`, `category` and `lists` all draw on the Wikipedia
-> and Wikidata APIs at once. In the last full crawl `lists` was rate-limited to
-> 14 candidates — "Lists of museums in the United States" and "Lists of museums
-> in England by county" were both skipped after four 429s. Running the
-> Wikipedia-backed sources sequentially, or sharing one rate limiter between
-> them, would fix it. `category` and `osm` were unaffected.
+> and Wikidata APIs at once. Each client spaced its own requests correctly and
+> together they ran at twice the rate the API tolerates, so in one full crawl
+> `lists` was cut to 14 candidates — "Lists of museums in the United States" and
+> "Lists of museums in England by county" both skipped after four 429s. The
+> limiter is now process-wide rather than per client, which is where a rate
+> limit belongs when the limit belongs to the endpoint. Worth checking against
+> the next full crawl's candidate count, which is where it would show.
+
+> **Two sources are off by default, and both are large.** `osm` adds the small
+> local museums that never reached either wiki — mapped on the ground, so nearly
+> all have coordinates — at one Overpass query per area. `-languages all` walks
+> every Wikipedia edition, and the gap it covers is not small: 35,352 museums
+> have an article in some language and none in English, against 19,802 with an
+> English one. Both are off because each multiplies the crawl's traffic against
+> rate-limited public services, which is a decision to make on purpose rather
+> than one a routine weekly crawl makes by accident.
 
 > **Run the sources together in one invocation.** Merging happens *within* a run. Two runs of different sources produce two independent record sets, and the second skips keys that already exist — so the same museum can end up stored twice under different names (`raw_data/france/army-museum-paris.json` from the list crawl and `raw_data/france/musee-de-l-armee.json` from Wikidata).
 
