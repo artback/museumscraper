@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"time"
+
 	"museum/internal/models"
 	"museum/pkg/geo"
 )
@@ -34,8 +36,8 @@ func (s *Service) Museums(ctx context.Context) <-chan models.Museum {
 	go func() {
 		defer close(out)
 
-		countries := geo.CrawlAreas()
-		log.Printf("osm: querying %d areas", len(countries))
+		countries := rotate(geo.CrawlAreas(), time.Now())
+		log.Printf("osm: querying %d areas, starting at %s", len(countries), countries[0])
 
 		total, failed := 0, 0
 		for _, country := range countries {
@@ -72,6 +74,28 @@ func (s *Service) Museums(ctx context.Context) <-chan models.Museum {
 	}()
 
 	return out
+}
+
+// rotate returns the areas starting from a different one each day.
+//
+// The walk is one Overpass query per area and there are 244 of them, so a
+// crawl that is cut short — and on the Pi they are, this is the slowest source
+// by an order of magnitude — stops partway through. Walked alphabetically that
+// is not an even loss: it is always the same tail that goes missing, and the
+// tail is Tanzania, Togo, Tunisia, Uganda, Vietnam, Yemen, Zambia, Zimbabwe.
+// A source whose whole purpose is to reach the places the wiki sources cannot
+// would systematically fail to reach them, run after run, and nothing in the
+// output would say so.
+//
+// Rotating by the day means every area is eventually near the front. The
+// order is still deterministic — the same day gives the same walk, so a run is
+// reproducible from its log — it is just not the same order every time.
+func rotate(areas []string, now time.Time) []string {
+	if len(areas) == 0 {
+		return areas
+	}
+	offset := now.YearDay() % len(areas)
+	return slices.Concat(areas[offset:], areas[:offset])
 }
 
 // CountryMuseums returns every museum OpenStreetMap records inside a country.

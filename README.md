@@ -170,10 +170,9 @@ Run `museum <command> -h` for the full flag list.
 ### `museum crawl` — build the catalogue
 
 ```bash
-museum crawl                                        # wikidata, category, lists, registers
+museum crawl                                        # everything: all five sources, all 26 editions
 museum crawl -sources wikidata                       # fastest single source
-museum crawl -sources all                            # maximum coverage — adds osm
-museum crawl -sources all -languages all             # ... and every Wikipedia edition
+museum crawl -sources wikidata,category,lists,registers -languages en   # the quick crawl
 ```
 
 Sources run concurrently into a shared merger, then everything is written at once.
@@ -188,14 +187,14 @@ Sources run concurrently into a shared merger, then everything is written at onc
 > limit belongs when the limit belongs to the endpoint. Worth checking against
 > the next full crawl's candidate count, which is where it would show.
 
-> **Two sources are off by default, and both are large.** `osm` adds the small
-> local museums that never reached either wiki — mapped on the ground, so nearly
-> all have coordinates — at one Overpass query per area. `-languages all` walks
-> every Wikipedia edition, and the gap it covers is not small: 35,352 museums
-> have an article in some language and none in English, against 19,802 with an
-> English one. Both are off because each multiplies the crawl's traffic against
-> rate-limited public services, which is a decision to make on purpose rather
-> than one a routine weekly crawl makes by accident.
+> **The default is everything, and narrowing is the deliberate act.** It used
+> to be the other way round — `osm` off, English only — on the reasoning that
+> widening the crawl multiplies its traffic. What that defaulted to in practice
+> was a catalogue of the places the English-speaking world writes about, because
+> the two switches left off are exactly the ones that reach everywhere else. See
+> [Where the world is missing](#where-the-world-is-missing). The narrow crawl is
+> still a sensible thing to run when you want a quick one; it is just no longer
+> what you get by not choosing.
 
 > **Run the sources together in one invocation.** Merging happens *within* a run. Two runs of different sources produce two independent record sets, and the second skips keys that already exist — so the same museum can end up stored twice under different names (`raw_data/france/army-museum-paris.json` from the list crawl and `raw_data/france/musee-de-l-armee.json` from Wikidata).
 
@@ -569,6 +568,29 @@ Two things to know about it:
 **The American file is a 2018 snapshot and IMLS has said there will be no more.** It will slowly fill with museums that have since closed. That is a real cost, and the reason to accept it is that nothing else covers small American museums at all; a museum that closed in 2021 is a better catalogue entry than one that was never listed, and enrichment and the sweep are what find out which is which.
 
 **Only six of the nine IMLS disciplines are admitted** — art, children's, general, history, natural history and science, 13,878 of 30,178 rows. Left out: historical societies and historic preservation (14,785), botanical gardens and nature centres (1,029), and zoos and aquariums (465). That is the same line the OSM query draws at arts centres and archaeological sites — things that sit next to a museum without being one, which nothing downstream could tell apart afterwards. A historical society may well run a museum; the file does not say which do.
+
+### Where the world is missing
+
+The catalogue is not evenly thin. Measured against Wikidata, which is the broadest of the sources:
+
+| | Museums in Wikidata |
+| --- | --- |
+| Italy | 8,924 |
+| **Africa, all 57 countries** | **1,201** |
+| India | 554 |
+| Kenya | 23 |
+| Ethiopia | 12 |
+| Somalia, Djibouti, Eritrea, Comoros | 1 each |
+
+This is not a gap the crawler can fix by trying harder at the same sources, and it is worth being precise about why, because each part of the world is missing for a different reason and has a different remedy.
+
+**Africa can only come from OpenStreetMap.** No Wikipedia edition in an African language has a museums-by-country tree — Swahili has no langlink for the English root at all — so the category crawl has nothing to walk. OSM is mapped on the ground and holds 58 museums in Kenya against Wikidata's 23. That is why `osm` is on by default despite being the slowest source by an order of magnitude: for one continent it is the only source there is.
+
+**Asia comes from the non-English editions.** Urdu, Arabic, Persian, Thai, Indonesian, Bengali, Vietnamese and Tamil each keep a museums-by-country tree, between 30 and 220 per-country subcategories apiece, covering regions no European edition reaches. They were added for exactly this and then left switched off by a default of `-languages en`; the default is now `all`.
+
+**The registers are a rich-country artefact, and must not become the backbone.** They exist because the United States and France run agencies that publish them. Searching for equivalents elsewhere: Japan's national facility dataset is licensed for non-commercial use only and cannot be redistributed here; South Korea's museum register requires a registered API key; no African country publishes a comparable register at all. So registers will keep making the countries that already have the best coverage look even better. They are worth having — 15,094 museums for two requests — but a catalogue that leaned on them would be measuring which governments publish open data, not where museums are.
+
+**A cut-short crawl must not always lose the same places.** The OSM walk is 244 Overpass queries and is routinely interrupted. Walked alphabetically, the tail that goes missing is always the same one, and it is Tanzania, Togo, Tunisia, Uganda, Vietnam, Yemen, Zambia, Zimbabwe. The walk now starts at a different area each day, so the loss moves around; the order is still deterministic, so a run is reproducible from its log.
 
 ### How records are merged
 

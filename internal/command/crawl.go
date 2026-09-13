@@ -39,13 +39,33 @@ func crawlCommand() Command {
 
 func runCrawl(ctx context.Context, args []string) error {
 	fs := newFlagSet("crawl", "[-sources wikidata,category,lists,osm,registers|all] [-languages en,es,…]", os.Stderr)
-	sources := fs.String("sources", "wikidata,category,lists,registers",
+	// Everything, by default.
+	//
+	// Both of these used to be narrowed — osm off, English only — on the
+	// reasoning that widening the crawl doubles its traffic and should be a
+	// deliberate act. What that defaulted to in practice was a catalogue of
+	// the places the English-speaking world writes about. The two switches
+	// left off are precisely the ones that cover everywhere else:
+	//
+	// OpenStreetMap is the only source that reaches Africa at all. Wikidata
+	// holds 1,201 museums for the whole continent across 57 countries — one
+	// each for Somalia, Djibouti, Eritrea and the Comoros — and no Wikipedia
+	// edition has a museums-by-country tree in an African language, so the
+	// category crawl cannot help either. OSM has 58 in Kenya against
+	// Wikidata's 23.
+	//
+	// The eighteen non-English editions do the same job for Asia: Urdu,
+	// Arabic, Persian, Thai, Indonesian, Bengali, Vietnamese and Tamil were
+	// added to this crawl for exactly that reason and then left switched off
+	// by a default of "en".
+	//
+	// So the default is now everything, and narrowing is the deliberate act:
+	// -sources wikidata,category,lists,registers -languages en is the old
+	// behaviour, and it is the right thing to run when what you want is a
+	// quick crawl rather than a complete one.
+	sources := fs.String("sources", "all",
 		"comma-separated sources: wikidata, category, lists, osm, registers; or \"all\"")
-	// English only by default. Every extra edition is a full category walk and
-	// roughly doubles the crawl's Wikipedia traffic, so widening coverage is a
-	// decision to make deliberately rather than something a routine crawl does
-	// by accident. "all" is the shorthand for every edition known.
-	languages := fs.String("languages", wikipedia.DefaultLanguage,
+	languages := fs.String("languages", "all",
 		"comma-separated Wikipedia editions for the category source, or \"all\"")
 	if err := fs.Parse(args); err != nil {
 		return err
