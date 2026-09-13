@@ -244,6 +244,125 @@ var countryISO = map[string]string{
 	"the Federated States of Micronesia": "FM",
 }
 
+// territories are the places that have their own ISO 3166-1 alpha-2 code and
+// their own museums without being UN member states: dependencies, overseas
+// collectivities and the two partially recognised states the sources name.
+//
+// They are kept apart from countries because they are not the same thing and
+// some callers care — but every lookup treats them alike, and the reason is
+// what the sources do. Wikidata attributes museums to them directly rather
+// than to the state they belong to: 22 on the Isle of Man, 22 in Greenland, 21
+// on Jersey, 11 in Aruba, 10 in Kosovo. With none of these names recognised,
+// every one of those records had a country the pipeline could not canonicalise
+// — so it was excluded from the coverage and consistency checks, which read
+// "not a country" as "nothing to check here", and keyed under a spelling
+// nothing else in the catalogue matched.
+//
+// Every code here was checked against OpenStreetMap: all 44 resolve to an area
+// the Overpass queries can select on.
+var territories = []string{
+	"Hong Kong",
+	"Macau",
+	"Puerto Rico",
+	"Greenland",
+	"Faroe Islands",
+	"Gibraltar",
+	"Isle of Man",
+	"Jersey",
+	"Guernsey",
+	"Aruba",
+	"Curaçao",
+	"Sint Maarten",
+	"Caribbean Netherlands",
+	"Cayman Islands",
+	"Bermuda",
+	"Turks and Caicos Islands",
+	"British Virgin Islands",
+	"Anguilla",
+	"Montserrat",
+	"Saint Helena, Ascension and Tristan da Cunha",
+	"Falkland Islands",
+	"Guam",
+	"Northern Mariana Islands",
+	"American Samoa",
+	"United States Virgin Islands",
+	"French Polynesia",
+	"New Caledonia",
+	"Réunion",
+	"Guadeloupe",
+	"Martinique",
+	"French Guiana",
+	"Mayotte",
+	"Saint Barthélemy",
+	"Saint Martin",
+	"Saint Pierre and Miquelon",
+	"Wallis and Futuna",
+	"Åland Islands",
+	"Kosovo",
+	"Western Sahara",
+	"Cook Islands",
+	"Niue",
+	"Norfolk Island",
+	"Christmas Island",
+	"Cocos (Keeling) Islands",
+}
+
+// territoryISO maps a territory to its ISO 3166-1 alpha-2 code.
+var territoryISO = map[string]string{
+	"Hong Kong":                "HK",
+	"Macau":                    "MO",
+	"Puerto Rico":              "PR",
+	"Greenland":                "GL",
+	"Faroe Islands":            "FO",
+	"Gibraltar":                "GI",
+	"Isle of Man":              "IM",
+	"Jersey":                   "JE",
+	"Guernsey":                 "GG",
+	"Aruba":                    "AW",
+	"Curaçao":                  "CW",
+	"Sint Maarten":             "SX",
+	"Caribbean Netherlands":    "BQ",
+	"Cayman Islands":           "KY",
+	"Bermuda":                  "BM",
+	"Turks and Caicos Islands": "TC",
+	"British Virgin Islands":   "VG",
+	"Anguilla":                 "AI",
+	"Montserrat":               "MS",
+	"Saint Helena, Ascension and Tristan da Cunha": "SH",
+	"Falkland Islands":             "FK",
+	"Guam":                         "GU",
+	"Northern Mariana Islands":     "MP",
+	"American Samoa":               "AS",
+	"United States Virgin Islands": "VI",
+	"French Polynesia":             "PF",
+	"New Caledonia":                "NC",
+	"Réunion":                      "RE",
+	"Guadeloupe":                   "GP",
+	"Martinique":                   "MQ",
+	"French Guiana":                "GF",
+	"Mayotte":                      "YT",
+	"Saint Barthélemy":             "BL",
+	"Saint Martin":                 "MF",
+	"Saint Pierre and Miquelon":    "PM",
+	"Wallis and Futuna":            "WF",
+	"Åland Islands":                "AX",
+	"Kosovo":                       "XK",
+	"Western Sahara":               "EH",
+	"Cook Islands":                 "CK",
+	"Niue":                         "NU",
+	"Norfolk Island":               "NF",
+	"Christmas Island":             "CX",
+	"Cocos (Keeling) Islands":      "CC",
+}
+
+// Territories returns every non-sovereign territory this package recognises,
+// sorted.
+func Territories() []string {
+	names := slices.Clone(territories)
+	slices.Sort(names)
+	return names
+}
+
 // countryAliases collapse the spellings that name the same country onto one of
 // them. Without this every consumer sees two countries: the merger keys a
 // museum in "Czechia" differently from one in "Czech Republic" and never folds
@@ -271,6 +390,18 @@ var countryAliases = map[string]string{
 	"north korea":                        "North Korea",
 	"vatican":                            "Vatican City",
 	"holy see":                           "Vatican City",
+	"macao":                              "Macau",
+	"curacao":                            "Curaçao",
+	"aland":                              "Åland Islands",
+	"aland islands":                      "Åland Islands",
+	"åland":                              "Åland Islands",
+	"saint barthelemy":                   "Saint Barthélemy",
+	"reunion":                            "Réunion",
+	"la réunion":                         "Réunion",
+	"us virgin islands":                  "United States Virgin Islands",
+	"u.s. virgin islands":                "United States Virgin Islands",
+	"saint helena":                       "Saint Helena, Ascension and Tristan da Cunha",
+	"bonaire":                            "Caribbean Netherlands",
 }
 
 // AmbiguousWithSubdivision lists names that are a country and also a
@@ -286,8 +417,8 @@ var AmbiguousWithSubdivision = map[string][]string{
 // countryIndex maps a lowercased country name to its canonical spelling, making
 // lookups constant time and case-insensitive.
 var countryIndex = func() map[string]string {
-	index := make(map[string]string, len(countries))
-	for _, c := range countries {
+	index := make(map[string]string, len(countries)+len(territories))
+	for _, c := range slices.Concat(countries, territories) {
 		index[strings.ToLower(c)] = c
 	}
 	return index
@@ -301,7 +432,10 @@ func ISOCode(country string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	code, ok := countryISO[canonical]
+	if code, ok := countryISO[canonical]; ok {
+		return code, true
+	}
+	code, ok := territoryISO[canonical]
 	return code, ok
 }
 
@@ -321,7 +455,24 @@ func Countries() []string {
 	return names
 }
 
-// IsCountry reports whether place names a known country, ignoring case.
+// CrawlAreas returns every area an area-keyed crawl should ask about:
+// countries and territories together, sorted.
+//
+// Countries alone leaves holes wherever a territory is mapped as its own area
+// rather than inside the state it belongs to, and which of the two a given
+// territory is cannot be read off the list — it depends on how the boundary
+// happens to be drawn. Asking for both costs one query per territory and does
+// not double-count: a crawl merges records within the run, so a territory that
+// is inside its parent's area returns museums that are already being collected
+// and they fold into the same records.
+func CrawlAreas() []string {
+	areas := slices.Concat(Countries(), Territories())
+	slices.Sort(areas)
+	return areas
+}
+
+// IsCountry reports whether place names a known country or territory, ignoring
+// case.
 func IsCountry(place string) bool {
 	_, ok := Canonical(place)
 	return ok

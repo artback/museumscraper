@@ -21,8 +21,8 @@ func NewService(client *Client) *Service {
 	return &Service{client: client}
 }
 
-// Museums streams the museums OpenStreetMap holds for every country this
-// build recognises, one country at a time.
+// Museums streams the museums OpenStreetMap holds for every area this build
+// recognises — countries and territories both — one area at a time.
 //
 // Overpass cannot answer a single global "all museums" query within its
 // execution budget, so the work is split by country area. The channel is
@@ -34,8 +34,8 @@ func (s *Service) Museums(ctx context.Context) <-chan models.Museum {
 	go func() {
 		defer close(out)
 
-		countries := geo.Countries()
-		log.Printf("osm: querying %d countries", len(countries))
+		countries := geo.CrawlAreas()
+		log.Printf("osm: querying %d areas", len(countries))
 
 		total, failed := 0, 0
 		for _, country := range countries {
@@ -68,7 +68,7 @@ func (s *Service) Museums(ctx context.Context) <-chan models.Museum {
 			}
 		}
 
-		log.Printf("osm: finished, %d museums (%d countries failed)", total, failed)
+		log.Printf("osm: finished, %d museums (%d areas failed)", total, failed)
 	}()
 
 	return out
