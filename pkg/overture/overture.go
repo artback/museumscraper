@@ -58,9 +58,9 @@ const (
 // inconsistency nothing downstream could explain.
 //
 // art_gallery is not here, but it is not simply excluded either — see
-// galleryIsMuseum. The category holds both kinds of gallery and the difference
-// matters: one is a room that puts on exhibitions, the other is a shop that
-// sells paintings.
+// galleryWorthReading. The category holds both kinds of gallery, and which one
+// a record is gets decided by reading its website rather than by guessing from
+// a category.
 var museumCategories = map[string]string{
 	"museum":                  "museum",
 	"history_museum":          "history museum",
@@ -91,35 +91,45 @@ var museumCategories = map[string]string{
 	"planetarium":             "planetarium",
 }
 
-// galleryIsMuseum reports whether an art_gallery is the kind worth cataloguing.
+// galleryWorthReading reports whether an art_gallery is worth putting in the
+// catalogue.
 //
-// The category is genuinely mixed, and at 140,650 records in the first full
-// pass — more than every other museum category put together — neither taking
-// all of it nor dropping all of it is right. Taking it admits the shops:
-// "UndARTground Concept Store", a gallery whose alternate category is
-// home_goods_store, one whose website is an Airbnb listing. Dropping it loses
-// Vidéochroniques and Provence Art Contemporain, which are exhibition spaces
-// by any reading.
+// The category is genuinely mixed and enormous — 140,650 records in the first
+// full pass, more than every other museum category put together. It holds the
+// room that puts on exhibitions and the shop that sells paintings, and the
+// small exhibiting gallery with no Wikipedia article and no map pin is
+// precisely the kind of thing this catalogue exists to find. Losing those to
+// keep out the shops is the wrong trade.
 //
-// Overture's own alternate categories separate them, and better than anything
-// this package could infer from a name. A gallery that is also classified as a
-// contemporary art museum, an art museum or simply a museum is the exhibiting
-// kind; one whose other categories are gift_shop, antique_store, boutique,
-// tea_room or bed_and_breakfast is not. Measured over 925 galleries, the rule
-// admits 23% of them.
+// So the test is not "is this a museum" but "is there any way to find out".
+// Two things qualify a gallery:
 //
-// The taxonomy hierarchy is no help here and it is worth saying so, because it
-// looks like it should be: every art_gallery in the release sits under
+//	A museum alternate category. Overture's own second opinion, and the
+//	strongest signal available without leaving the file: a gallery it also
+//	files as a contemporary art museum is the exhibiting kind.
+//
+//	A website. Not evidence of exhibiting — plenty of shops have one — but
+//	evidence that the question is answerable, because the sweep will read it.
+//	A gallery that publishes a programme has that programme in the catalogue
+//	within a sweep cycle, and one that publishes a shopping cart quietly never
+//	produces an exhibition. That is a far better answer than this function
+//	could give, and it is one the pipeline already knows how to get.
+//
+// What is left out is the gallery with neither: no second opinion, no site, no
+// way to ever learn anything more about it than a name and a pin.
+//
+// The taxonomy hierarchy is no help and it is worth saying so, because it looks
+// like it should be: every art_gallery in the release sits under
 // "arts_and_entertainment > arts_and_crafts_space > art_gallery", shops
 // included.
-//
-// It errs towards refusing. A serious commercial gallery whose only other
-// category is "arts_and_entertainment" is turned away along with the shops,
-// which loses some real exhibition programmes — the right way to be wrong,
-// given what admitting the rest would cost.
-func galleryIsMuseum(alternates []string) bool {
-	for _, alternate := range alternates {
+func galleryWorthReading(p place) bool {
+	for _, alternate := range p.Categories.Alternate {
 		if _, isMuseum := museumCategories[strings.TrimSpace(alternate)]; isMuseum {
+			return true
+		}
+	}
+	for _, site := range p.Websites {
+		if strings.TrimSpace(site) != "" {
 			return true
 		}
 	}
@@ -454,7 +464,7 @@ func toMuseum(p place, unknown map[string]int) (models.Museum, bool) {
 	switch {
 	case isMuseum:
 	// The one category decided by more than its own name.
-	case category == "art_gallery" && galleryIsMuseum(p.Categories.Alternate):
+	case category == "art_gallery" && galleryWorthReading(p):
 		class = "art gallery"
 	default:
 		if strings.Contains(category, "museum") {

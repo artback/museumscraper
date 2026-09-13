@@ -316,6 +316,8 @@ A display is taken as permanent when something says so — the entry's own text,
 
 Two readers run on every listing page. The first infers exhibitions from markup written for people, and is language-bound at every step; the second reads schema.org JSON-LD and `<time datetime>` attributes, which are ISO-8601 and identical in every language, and is believed over the first where it exists. Few sites publish either, but where they do the result is exact rather than inferred — reading them took the Technisches Museum Wien from 3 exhibitions to 15.
 
+
+**A site that has never listed anything is asked far less often.** The gallery admission above hands the sweep something like 136,000 sites whose only qualification is having a website worth reading, and most of them will turn out to be shops. At the ordinary two-month ceiling those shops would cost some 2,300 requests a day, forever, to confirm again that they list nothing. A site that has never produced a single exhibition falls to a six-month ceiling instead — a third of the traffic, aimed at small businesses' websites that never asked to be read. They are not parked: a gallery that starts exhibiting has no way to tell us, so the sweep keeps asking, just rarely. The moment one lists something it returns to the ordinary rhythm.
 ### `museum serve` — the HTTP API
 
 ```bash
@@ -579,7 +581,7 @@ No single catalogue is complete, and none is a superset of the others.
 | **Wikipedia lists** | `lists` | ~7,000 | Museums *named* in a "List of museums in X" article but with no article of their own |
 | **OpenStreetMap** | `osm` | tens of thousands | Small local museums that never reached either wiki; mapped on the ground, so nearly all have coordinates |
 | **Public registers** | `registers` | 15,094 (13,878 US + 1,216 FR) | Museums a government lists because it funds or accredits them — the county museum with no article, no map pin and a website from 2009 |
-| **Overture Maps** | `overture` | ~170,000 across 231 countries | Commercial POI data, pooled and opened. The only source with an even footprint: it covers Lagos the way it covers Lyon |
+| **Overture Maps** | `overture` | ~270,000 across 231 countries | Commercial POI data, pooled and opened. The only source with an even footprint: it covers Lagos the way it covers Lyon |
 
 All but OSM are on by default. OSM is opt-in — much slower (one Overpass query per area, countries and territories alike) and its records are thinner.
 
@@ -618,9 +620,18 @@ Two details do most of that work. Places are points, so `bbox` gives the positio
 
 It reported nine museum categories the reader had never heard of — state, national, contemporary art, decorative arts, cartooning, costume, civilization, textile and photography museums, 2,922 in all, every one real. That counter exists so a source cannot quietly stop seeing a kind of museum, and it paid for itself on the first run.
 
-And 140,650 records — more than every other museum category put together — were `art_gallery`. That category holds two different things: a room that puts on exhibitions, and a shop that sells paintings. Neither taking all of it nor dropping all of it is right, and Overture's own **alternate categories** separate them better than anything this code could infer from a name. A gallery also classified as a contemporary art museum, an art museum or a museum is the exhibiting kind; one whose other categories are `gift_shop`, `antique_store`, `tea_room` or `bed_and_breakfast` is not. That admits 23% of galleries and takes them from 51% of the source to 15%.
+And 140,650 records — more than every other museum category put together — were `art_gallery`. That category holds two different things: a room that puts on exhibitions, and a shop that sells paintings. Telling them apart from the file alone turned out not to be possible, and trying is the wrong instinct anyway — a small gallery with a real programme and no Wikipedia article is exactly what this catalogue is for, so losing those to keep the shops out is a bad trade.
 
-The rule errs towards refusing — a serious commercial gallery whose only other category is `arts_and_entertainment` is turned away with the shops — and it is a proxy rather than a judgement: some admitted galleries are plainly commercial, they are simply ones Overture itself also files as art museums. Every one is recorded with the class `art gallery` rather than `museum`, so anything downstream that wants only museums can say so. (The taxonomy hierarchy looks like it should help here and does not: every `art_gallery` in the release sits under the same path, shops included.)
+So the question a gallery has to answer is not "are you a museum" but "is there any way to find out". Two things qualify one:
+
+- **A museum alternate category.** Overture's own second opinion: a gallery it also files as a contemporary art museum is the exhibiting kind. This is the strongest signal available without leaving the file, and it admits 23% of galleries.
+- **A website.** Not evidence of exhibiting — plenty of shops have one — but evidence that the question is answerable, because the sweep will read it. 97% of galleries have one, so this is barely a filter; it is a handover to the part of the pipeline that can actually tell.
+
+What is left out is the gallery with neither: no second opinion, no site, nothing that could ever be learned about it beyond a name and a pin.
+
+The consequence is deliberate and worth stating plainly: **galleries are about half of what this source contributes**, and until each one has been swept there is no way to tell the gem from the shop. Every one carries the class `art gallery` rather than `museum`, so anything wanting only museums can say so — and once the sweep has read them, the ones with an exhibition programme have exhibitions in the catalogue and the shops do not. That is the distinction worth filtering on, and it is evidence rather than a guess.
+
+(The taxonomy hierarchy looks like it should be the discriminator and is not: every `art_gallery` in the release sits under the same path, shops included.)
 
 `museum crawl -sources overture` on its own is the way to run it, and the scheduler below means the full crawl will not read it twice for one release.
 

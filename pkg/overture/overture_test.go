@@ -185,13 +185,11 @@ func newPlace(name, category string, confidence float64, lat, lon float32,
 
 var _ = models.Museum{}
 
-// TestAGalleryWithNoSecondOpinionIsNotAMuseum: a gallery the source says
-// nothing else about is the default case and the default is no. The first full
-// pass found 140,650 art galleries, more than every other museum category put
-// together, and most of them sell things.
+// TestAGalleryNothingCanBeLearnedAboutIsDropped: no museum alternate and no
+// website means no way to ever find out whether it exhibits, so it stays out.
 func TestAGalleryWithNoSecondOpinionIsNotAMuseum(t *testing.T) {
 	if _, ok := toMuseum(newPlace("Galerie Au Chevalet", "art_gallery", 0.9, 1, 1, nil, "PF", "Papeete"), map[string]int{}); ok {
-		t.Error("an art gallery was admitted as a museum")
+		t.Error("a gallery with no website and no second opinion was admitted")
 	}
 	// An art *museum* is a different thing and stays.
 	if _, ok := toMuseum(newPlace("Musée d'Orsay", "art_museum", 0.9, 1, 1, nil, "FR", "Paris"), map[string]int{}); !ok {
@@ -229,10 +227,11 @@ func TestEveryCategoryHasAClass(t *testing.T) {
 	}
 }
 
-// TestGalleriesAreAdmittedOnTheSourcesOwnSecondOpinion: the art_gallery
-// category holds a room that puts on exhibitions and a shop that sells
-// paintings, and at 140,650 records neither taking all of it nor dropping all
-// of it is right. Overture's own alternate categories separate them.
+// TestGalleriesAreAdmittedWhenTheQuestionIsAnswerable: a gallery gets in on
+// Overture's own second opinion, or on having a website the sweep can read.
+// The small exhibiting gallery with no article and no map pin is what this
+// catalogue exists to find, so the test is not "is this a museum" but "is
+// there any way to find out".
 func TestGalleriesAreAdmittedOnTheSourcesOwnSecondOpinion(t *testing.T) {
 	exhibiting := newPlace("Vidéochroniques", "art_gallery", 0.98, 43.3, 5.4, nil, "FR", "Marseille")
 	exhibiting.Categories.Alternate = []string{"contemporary_art_museum", "art_museum"}
@@ -245,18 +244,28 @@ func TestGalleriesAreAdmittedOnTheSourcesOwnSecondOpinion(t *testing.T) {
 		t.Errorf("Classes = %v, want it recorded as a gallery", museum.Classes)
 	}
 
+	// A gallery with a website but no second opinion is admitted too: whether
+	// it exhibits is a question the sweep answers by reading the site, and
+	// "Galerie Alexis Pentcheff" is a real exhibition programme that the
+	// category alone would have thrown away.
+	unlabelled := newPlace("Galerie Alexis Pentcheff", "art_gallery", 0.98, 43.3, 5.4,
+		[]string{"http://www.galeriepentcheff.fr/"}, "FR", "Marseille")
+	unlabelled.Categories.Alternate = []string{"arts_and_entertainment"}
+	if _, ok := toMuseum(unlabelled, map[string]int{}); !ok {
+		t.Error("a gallery with a website the sweep could read was turned away")
+	}
+
+	// Neither a second opinion nor a site: nothing will ever be learned about
+	// it beyond a name and a pin.
 	for _, alternates := range [][]string{
-		{"home_goods_store", "arts_and_entertainment"}, // Wooden Gallery
-		{"flowers_and_gifts_shop"},                     // UndARTground Concept Store
-		{"bed_and_breakfast", "pop_up_shop"},           // whose website is an Airbnb listing
+		{"home_goods_store", "arts_and_entertainment"},
 		{"tea_room", "cafe"},
-		{"arts_and_entertainment"}, // the honest near miss: a real gallery, turned away
 		{},
 	} {
 		shop := newPlace("Some Gallery", "art_gallery", 0.98, 43.3, 5.4, nil, "FR", "Marseille")
 		shop.Categories.Alternate = alternates
 		if _, ok := toMuseum(shop, map[string]int{}); ok {
-			t.Errorf("a gallery with alternates %v was admitted", alternates)
+			t.Errorf("a gallery with alternates %v and no website was admitted", alternates)
 		}
 	}
 }

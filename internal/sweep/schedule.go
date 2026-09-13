@@ -85,6 +85,24 @@ const (
 	// never noticing that it finally did.
 	MaxInterval = 60 * 24 * time.Hour
 
+	// BarrenInterval is the ceiling for a site that has never listed a single
+	// exhibition.
+	//
+	// Admitting Overture's art galleries brings in something like 136,000 sites
+	// whose only qualification is that they have a website the sweep can read —
+	// which is the point, because the small gallery with a real programme and
+	// no Wikipedia article is exactly what this catalogue is for. Most of them
+	// will turn out to be shops that sell paintings, and at the ordinary
+	// ceiling those shops would be re-read every two months forever to confirm
+	// once again that they list nothing: some 2,300 requests a day spent
+	// learning nothing, aimed at small businesses' websites.
+	//
+	// They are not given up on, because a gallery that starts exhibiting has
+	// no way to tell us. They are just asked far less often, which cuts that
+	// traffic by two thirds and costs at most a few months' delay in noticing
+	// a programme that did not exist before.
+	BarrenInterval = 180 * 24 * time.Hour
+
 	// growth is how much an unchanged read lengthens the gap. Gentle on
 	// purpose: overshooting means missing a change for weeks, and the cost of
 	// being wrong is asymmetric with the cost of one more request.
@@ -118,6 +136,10 @@ type State struct {
 	Interval time.Duration
 	// ConsecutiveFailures is how many attempts in a row have failed.
 	ConsecutiveFailures int
+	// EverListed is whether this site has ever produced an exhibition. It is
+	// the difference between a site that is quiet and a site that is not a
+	// museum's site at all, and it is what BarrenInterval keys on.
+	EverListed bool
 }
 
 // Plan is when to come back to a site, and why.
@@ -191,9 +213,12 @@ func Next(state State, outcome Outcome, soonestClose *time.Time, now time.Time) 
 		// always differs from the nothing held before it.
 		reason = "first read, learning its rate"
 	case outcome == Unchanged:
-		interval = clamp(time.Duration(float64(interval) * growth))
+		interval = clampFor(state, time.Duration(float64(interval)*growth))
+		if !state.EverListed && interval >= BarrenInterval {
+			reason = "has never listed an exhibition, checking rarely"
+		}
 	case outcome == Changed:
-		interval = clamp(time.Duration(float64(interval) / shrink))
+		interval = clampFor(state, time.Duration(float64(interval)/shrink))
 		reason = "changed, checking sooner"
 	}
 
@@ -213,6 +238,15 @@ func Next(state State, outcome Outcome, soonestClose *time.Time, now time.Time) 
 // clamp holds an interval inside the floor and ceiling.
 func clamp(interval time.Duration) time.Duration {
 	return min(max(interval, MinInterval), MaxInterval)
+}
+
+// clampFor is clamp against the ceiling this particular site has earned.
+func clampFor(state State, interval time.Duration) time.Duration {
+	ceiling := MaxInterval
+	if !state.EverListed {
+		ceiling = BarrenInterval
+	}
+	return min(max(interval, MinInterval), ceiling)
 }
 
 // round trims a duration to something readable in a log line.
