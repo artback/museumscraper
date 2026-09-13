@@ -44,6 +44,15 @@ const (
 	Unchanged
 	// Failed means the site could not be read: refused, timed out, gone.
 	Failed
+	// Excluded means the site told us not to read it — robots.txt forbids the
+	// path, or it asked for a crawl rate this sweep will not keep to.
+	//
+	// Separate from Failed because it is not a failure and does not become one
+	// by being retried. A site that said no will say no the next five times as
+	// well, and the difference matters twice over: asking again is the thing
+	// robots.txt exists to prevent, and six pointless requests per excluded
+	// site are taken from museums that would have answered.
+	Excluded
 )
 
 func (o Outcome) String() string {
@@ -54,6 +63,8 @@ func (o Outcome) String() string {
 		return "unchanged"
 	case Failed:
 		return "failed"
+	case Excluded:
+		return "excluded"
 	}
 	return "unknown"
 }
@@ -136,6 +147,18 @@ func Next(state State, outcome Outcome, soonestClose *time.Time, now time.Time) 
 	interval := state.Interval
 	if interval <= 0 {
 		interval = FirstInterval
+	}
+
+	// A refusal is final: park the site on the spot rather than working through
+	// the failure backoff towards the same place.
+	if outcome == Excluded {
+		return Plan{
+			Interval:            interval,
+			DueAt:               now.Add(MaxInterval),
+			ConsecutiveFailures: state.ConsecutiveFailures,
+			Park:                true,
+			Reason:              "excluded by the site's robots.txt",
+		}
 	}
 
 	if outcome == Failed {

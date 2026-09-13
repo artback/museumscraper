@@ -252,6 +252,14 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 	now := s.now()
 	home := s.readHome(ctx, base)
 
+	// The site said not to read it. Returning that rather than an empty result
+	// is what lets the sweep park the site instead of trying the conventional
+	// listing paths against it and then coming back next week — every one of
+	// those requests is the thing robots.txt asked us not to make.
+	if !home.reached && home.refused != nil {
+		return Result{}, home.refused
+	}
+
 	var (
 		result  = Result{Reached: home.reached}
 		found   []Exhibition
@@ -611,14 +619,23 @@ type homePage struct {
 	// info are the links that look like the museum describing itself and what
 	// it holds, best first.
 	info []string
+	// refused carries the site's refusal when that is why no page was read —
+	// robots.txt forbidding the path, or a crawl rate this sweep will not keep
+	// to. A refusal and a timeout both leave reached false, and a sweep that
+	// cannot tell them apart retries the one site it has been asked not to.
+	refused error
 }
 
 // readHome fetches a site's front page and sorts its links. A front page that
 // cannot be read is not an error: the conventional paths are tried regardless.
 func (s *Scraper) readHome(ctx context.Context, base *url.URL) homePage {
+	var refused error
 	for _, candidate := range homeURLs(base) {
 		body, finalURL, err := s.fetcher.Get(ctx, candidate)
 		if err != nil {
+			if refused == nil && (errors.Is(err, ErrDisallowed) || errors.Is(err, ErrCrawlDelayTooLong)) {
+				refused = err
+			}
 			continue
 		}
 
@@ -633,7 +650,7 @@ func (s *Scraper) readHome(ctx context.Context, base *url.URL) homePage {
 			info:      FindInfoLinks(body, pageBase),
 		}
 	}
-	return homePage{}
+	return homePage{refused: refused}
 }
 
 // homeURLs returns where to look for a site's front page: the page the

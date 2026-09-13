@@ -177,3 +177,21 @@ func TestNext_RecoveryClearsTheFailureCount(t *testing.T) {
 		t.Error("a site that answered should not be parked")
 	}
 }
+
+// TestNextParksAnExcludedSiteImmediately: a site whose robots.txt forbids the
+// crawl is not a site that might come good. Working it through the failure
+// backoff would ask it five more times on the way to the same answer.
+func TestNextParksAnExcludedSiteImmediately(t *testing.T) {
+	now := time.Now()
+	plan := Next(State{Interval: 7 * 24 * time.Hour}, Excluded, nil, now)
+
+	if !plan.Park {
+		t.Error("an excluded site was not parked")
+	}
+	if plan.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d, want 0: a refusal is not a failure", plan.ConsecutiveFailures)
+	}
+	if plan.DueAt.Before(now.Add(MaxInterval)) {
+		t.Errorf("DueAt = %s, want at least MaxInterval out", plan.DueAt.Sub(now))
+	}
+}

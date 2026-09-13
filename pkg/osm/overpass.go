@@ -12,10 +12,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"museum/pkg/useragent"
 )
 
 // SourceName identifies records that came from OpenStreetMap.
@@ -31,10 +32,6 @@ var endpoints = []string{
 }
 
 const (
-	// defaultUserAgent identifies this client. Overpass asks that automated
-	// clients be identifiable.
-	defaultUserAgent = "museum-pipeline/1.0 (https://github.com/example/museum)"
-
 	// minRequestInterval respects the Overpass fair-use policy, which asks for
 	// a light touch from anonymous clients.
 	minRequestInterval = 3 * time.Second
@@ -57,15 +54,13 @@ type Client struct {
 }
 
 // NewClient returns a Client with rate limiting and a descriptive user agent.
-// Set OVERPASS_USER_AGENT to supply your own contact details.
+// Overpass asks that automated clients be identifiable; set MUSEUM_CONTACT so
+// the agent carries a way to reach you, or OVERPASS_USER_AGENT to state the
+// whole header yourself.
 func NewClient() *Client {
-	agent := os.Getenv("OVERPASS_USER_AGENT")
-	if agent == "" {
-		agent = defaultUserAgent
-	}
 	return &Client{
 		httpClient: &http.Client{Timeout: requestTimeout},
-		userAgent:  agent,
+		userAgent:  useragent.For("museum locations", "OVERPASS_USER_AGENT"),
 		endpoints:  endpoints,
 	}
 }

@@ -116,6 +116,11 @@ func (r *Runner) Read(ctx context.Context, target Target) Report {
 	record := Record{Site: target.Site}
 
 	switch {
+	case errors.Is(err, exhibitions.ErrDisallowed), errors.Is(err, exhibitions.ErrCrawlDelayTooLong):
+		// The site answered, and the answer was no. Recorded as its own
+		// outcome so it parks immediately instead of being retried as though
+		// it might come good.
+		outcome = Excluded
 	case err != nil && !errors.Is(err, exhibitions.ErrNoWebsite):
 		outcome = Failed
 	case err != nil:
@@ -148,7 +153,7 @@ func (r *Runner) Read(ctx context.Context, target Target) Report {
 
 	report := Report{Site: target.Site, Outcome: outcome}
 
-	if outcome != Failed && len(result.Exhibitions) > 0 {
+	if outcome != Failed && outcome != Excluded && len(result.Exhibitions) > 0 {
 		if _, err := r.store.SaveExhibitions(ctx, result.Exhibitions); err != nil {
 			log.Printf("sweep: %s: %v", target.Site, err)
 		}

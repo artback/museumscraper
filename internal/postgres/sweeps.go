@@ -235,7 +235,10 @@ ON CONFLICT (site) DO UPDATE SET
     due_reason     = EXCLUDED.due_reason,
     parked_reason  = EXCLUDED.parked_reason`
 
-	succeeded := record.Outcome != sweep.Failed
+	// An excluded site was not read, so it has no success to record; naming the
+	// outcomes that count as one keeps a new outcome from silently joining
+	// them.
+	succeeded := record.Outcome == sweep.Changed || record.Outcome == sweep.Unchanged
 	changed := record.Outcome == sweep.Changed
 
 	var parked string

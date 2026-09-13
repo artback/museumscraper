@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
+	"sync"
 	"time"
 
 	"museum/internal/ratelimit"
+	"museum/pkg/useragent"
 )
 
 // ErrNoResults means the query was valid but Nominatim matched nothing.
@@ -18,11 +19,6 @@ var ErrNoResults = errors.New("no results")
 const (
 	// baseURL is the public Nominatim instance.
 	baseURL = "https://nominatim.openstreetmap.org"
-
-	// defaultUserAgent identifies this application. Nominatim rejects requests
-	// carrying a generic agent such as Go's default "Go-http-client/1.1", which
-	// is why this must never be left empty. Override it with NOMINATIM_USER_AGENT.
-	defaultUserAgent = "museum-pipeline/1.0 (https://github.com/example/museum)"
 
 	// minInterval is the shortest gap allowed between requests, per Nominatim's
 	// usage policy of at most one request per second.
@@ -42,14 +38,13 @@ const (
 // httpClient is shared so connections are reused across lookups.
 var httpClient = &http.Client{Timeout: requestTimeout}
 
-// userAgent is resolved once, allowing deployments to supply their own contact
-// details as Nominatim's policy asks.
-var userAgent = func() string {
-	if ua := os.Getenv("NOMINATIM_USER_AGENT"); ua != "" {
-		return ua
-	}
-	return defaultUserAgent
-}()
+// userAgent is resolved once. Nominatim rejects a generic agent such as Go's
+// default "Go-http-client/1.1", and its usage policy asks for contact details,
+// which useragent composes from MUSEUM_CONTACT; NOMINATIM_USER_AGENT still
+// overrides the whole header.
+var userAgent = sync.OnceValue(func() string {
+	return useragent.For("geocoding", "NOMINATIM_USER_AGENT")
+})
 
 // gate serialises outbound requests to respect the rate limit. It is package
 // level because the limit applies per endpoint, not per caller: the enrichment
@@ -106,7 +101,7 @@ func doRequest(ctx context.Context, requestURL string, out any) (retryable bool,
 	if err != nil {
 		return false, 0, fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", userAgent())
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := httpClient.Do(req)
