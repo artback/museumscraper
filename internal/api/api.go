@@ -22,6 +22,7 @@ import (
 
 	"museum/internal/postgres"
 	"museum/pkg/exhibitions"
+	"museum/pkg/licence"
 )
 
 const (
@@ -120,6 +121,7 @@ func (s *Server) Routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
 	})
 	mux.HandleFunc("GET /readyz", s.handleReady)
+	mux.HandleFunc("GET /v1/attribution", s.handleAttribution)
 	mux.HandleFunc("GET /v1/museums", s.handleMuseums)
 	mux.HandleFunc("GET /v1/museums/{id}", s.handleMuseum)
 	mux.HandleFunc("GET /v1/points", s.handlePoints)
@@ -334,6 +336,29 @@ type museumResponse struct {
 	HasMore bool          `json:"has_more"`
 	Museums []museumHit   `json:"museums"`
 	Query   responseQuery `json:"query"`
+	// Attribution is what the records in this response have to be credited
+	// with. It travels with the data rather than sitting in documentation
+	// because that is what the licences ask for: a client holding a page of
+	// museums has the ODbL and CC BY-SA obligations for it whether or not
+	// anyone read the API docs, and the credit it needs is the one for the
+	// records it actually received.
+	Attribution []licence.Licence `json:"attribution,omitempty"`
+}
+
+// attributionFor works out what a page of results has to be credited with.
+//
+// An approximate position is one Nominatim supplied, which is OpenStreetMap
+// data however the museum itself was found — so a page of Wikidata records
+// placed by the geocoder carries ODbL even though Wikidata is CC0.
+func attributionFor(museums []museumHit) []licence.Licence {
+	sources := make([]string, 0, len(museums)+1)
+	for _, m := range museums {
+		sources = append(sources, m.Sources...)
+		if m.ApproximateLocation {
+			sources = append(sources, "nominatim")
+		}
+	}
+	return licence.ForSources(sources)
 }
 
 type museumHit struct {
@@ -529,11 +554,29 @@ func (s *Server) handleMuseums(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, museumResponse{
-		Count:   len(museums),
-		Total:   page.Total,
-		HasMore: int64(q.offset+len(museums)) < page.Total,
-		Museums: museums,
-		Query:   echo(q),
+		Count:       len(museums),
+		Total:       page.Total,
+		HasMore:     int64(q.offset+len(museums)) < page.Total,
+		Museums:     museums,
+		Query:       echo(q),
+		Attribution: attributionFor(museums),
+	})
+}
+
+// handleAttribution states what the catalogue is redistributing and under what
+// terms.
+//
+// One endpoint rather than a line in the README because the obligations are the
+// caller's too. Anyone serving these records on is bound by ODbL and CC BY-SA
+// exactly as this catalogue is, and a machine-readable statement of which
+// sources carry which terms is the difference between a client that can comply
+// and one that would have to guess.
+func (s *Server) handleAttribution(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"licences": licence.All(),
+		"note": "Museum records are assembled from these sources. Redistributing them " +
+			"carries the same obligations: credit the sources named here, and keep any " +
+			"share-alike terms with the data.",
 	})
 }
 

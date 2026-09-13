@@ -29,6 +29,17 @@ const TILE_ATTRIBUTION = window.MUSEUM_TILE_ATTRIBUTION ||
 	'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, ' +
 	'© <a href="https://carto.com/attributions">CARTO</a>';
 
+// The dots need crediting as well as the map under them, and it is easy to miss
+// that they are two different things: the tile credit above covers the
+// basemap, while every museum drawn on it comes from Wikidata, Wikipedia and
+// OpenStreetMap, two of which ask for attribution wherever their data is shown.
+// /v1/attribution is the machine-readable version of the same statement.
+const DATA_ATTRIBUTION =
+	'Museums from <a href="https://www.wikidata.org">Wikidata</a>, ' +
+	'<a href="https://www.wikipedia.org">Wikipedia</a> (CC BY-SA) and ' +
+	'<a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> (ODbL) — ' +
+	'<a href="/v1/attribution">terms</a>';
+
 // Glyphs are what lets the map draw text — without them any layer with a
 // text-field is rejected outright, which is what silently stopped the cluster
 // labels and every layer declared after them.
@@ -104,7 +115,7 @@ export const map = new maplibregl.Map({
 				// ratio instead fixes the labels without losing the level.
 				tileSize: 256,
 				maxzoom: 19,
-				attribution: TILE_ATTRIBUTION,
+				attribution: TILE_ATTRIBUTION + " | " + DATA_ATTRIBUTION,
 			},
 		},
 		layers: [
