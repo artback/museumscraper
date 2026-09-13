@@ -218,6 +218,7 @@ func leafColumns(schema *parquet.Schema) map[string]bool {
 		joined := strings.Join(path, ".")
 		for _, prefix := range []string{
 			"categories.primary",
+			"categories.alternate",
 			"names.primary",
 			"bbox.xmin",
 			"bbox.ymin",

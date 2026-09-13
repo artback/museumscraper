@@ -185,12 +185,11 @@ func newPlace(name, category string, confidence float64, lat, lon float32,
 
 var _ = models.Museum{}
 
-// TestArtGalleriesAreNotMuseums records the biggest judgement call in this
-// package. The first full pass found 140,650 art galleries against 134,627 of
-// everything else — admitting them would more than double the source with a
-// population that is mostly commercial, which is the mistake this catalogue
-// has already reasoned itself out of at arts centres and historical societies.
-func TestArtGalleriesAreNotMuseums(t *testing.T) {
+// TestAGalleryWithNoSecondOpinionIsNotAMuseum: a gallery the source says
+// nothing else about is the default case and the default is no. The first full
+// pass found 140,650 art galleries, more than every other museum category put
+// together, and most of them sell things.
+func TestAGalleryWithNoSecondOpinionIsNotAMuseum(t *testing.T) {
 	if _, ok := toMuseum(newPlace("Galerie Au Chevalet", "art_gallery", 0.9, 1, 1, nil, "PF", "Papeete"), map[string]int{}); ok {
 		t.Error("an art gallery was admitted as a museum")
 	}
@@ -227,5 +226,65 @@ func TestEveryCategoryHasAClass(t *testing.T) {
 		if class == "" {
 			t.Errorf("%s maps to no class", category)
 		}
+	}
+}
+
+// TestGalleriesAreAdmittedOnTheSourcesOwnSecondOpinion: the art_gallery
+// category holds a room that puts on exhibitions and a shop that sells
+// paintings, and at 140,650 records neither taking all of it nor dropping all
+// of it is right. Overture's own alternate categories separate them.
+func TestGalleriesAreAdmittedOnTheSourcesOwnSecondOpinion(t *testing.T) {
+	exhibiting := newPlace("Vidéochroniques", "art_gallery", 0.98, 43.3, 5.4, nil, "FR", "Marseille")
+	exhibiting.Categories.Alternate = []string{"contemporary_art_museum", "art_museum"}
+
+	museum, ok := toMuseum(exhibiting, map[string]int{})
+	if !ok {
+		t.Fatal("a gallery the source also calls a contemporary art museum was rejected")
+	}
+	if !slices.Equal(museum.Classes, []string{"art gallery"}) {
+		t.Errorf("Classes = %v, want it recorded as a gallery", museum.Classes)
+	}
+
+	for _, alternates := range [][]string{
+		{"home_goods_store", "arts_and_entertainment"}, // Wooden Gallery
+		{"flowers_and_gifts_shop"},                     // UndARTground Concept Store
+		{"bed_and_breakfast", "pop_up_shop"},           // whose website is an Airbnb listing
+		{"tea_room", "cafe"},
+		{"arts_and_entertainment"}, // the honest near miss: a real gallery, turned away
+		{},
+	} {
+		shop := newPlace("Some Gallery", "art_gallery", 0.98, 43.3, 5.4, nil, "FR", "Marseille")
+		shop.Categories.Alternate = alternates
+		if _, ok := toMuseum(shop, map[string]int{}); ok {
+			t.Errorf("a gallery with alternates %v was admitted", alternates)
+		}
+	}
+}
+
+// TestAdmittedGalleriesStillFaceEveryOtherCheck: the gallery path must not be
+// a way around the name and confidence rules.
+func TestAdmittedGalleriesStillFaceEveryOtherCheck(t *testing.T) {
+	unnamed := newPlace("  ", "art_gallery", 0.98, 43.3, 5.4, nil, "FR", "Marseille")
+	unnamed.Categories.Alternate = []string{"art_museum"}
+	if _, ok := toMuseum(unnamed, map[string]int{}); ok {
+		t.Error("an unnamed gallery was admitted")
+	}
+
+	doubtful := newPlace("Doubtful Gallery", "art_gallery", 0.05, 43.3, 5.4, nil, "FR", "Marseille")
+	doubtful.Categories.Alternate = []string{"art_museum"}
+	if _, ok := toMuseum(doubtful, map[string]int{}); ok {
+		t.Error("a gallery below the confidence floor was admitted")
+	}
+}
+
+// TestAlternatesDoNotRescueAnythingElse: the second-opinion rule is scoped to
+// galleries, where the population is genuinely mixed. Letting any category in
+// on an alternate would admit every restaurant that happens to carry one.
+func TestAlternatesDoNotRescueAnythingElse(t *testing.T) {
+	restaurant := newPlace("Museum Café", "restaurant", 0.98, 43.3, 5.4, nil, "FR", "Marseille")
+	restaurant.Categories.Alternate = []string{"museum", "art_museum"}
+
+	if _, ok := toMuseum(restaurant, map[string]int{}); ok {
+		t.Error("a restaurant was admitted on an alternate category")
 	}
 }

@@ -579,7 +579,7 @@ No single catalogue is complete, and none is a superset of the others.
 | **Wikipedia lists** | `lists` | ~7,000 | Museums *named* in a "List of museums in X" article but with no article of their own |
 | **OpenStreetMap** | `osm` | tens of thousands | Small local museums that never reached either wiki; mapped on the ground, so nearly all have coordinates |
 | **Public registers** | `registers` | 15,094 (13,878 US + 1,216 FR) | Museums a government lists because it funds or accredits them — the county museum with no article, no map pin and a website from 2009 |
-| **Overture Maps** | `overture` | ~137,500 across 231 countries | Commercial POI data, pooled and opened. The only source with an even footprint: it covers Lagos the way it covers Lyon |
+| **Overture Maps** | `overture` | ~170,000 across 231 countries | Commercial POI data, pooled and opened. The only source with an even footprint: it covers Lagos the way it covers Lyon |
 
 All but OSM are on by default. OSM is opt-in — much slower (one Overpass query per area, countries and territories alike) and its records are thinner.
 
@@ -609,12 +609,18 @@ It is published as **10.5 GB of Parquet**, which is not something to download on
 | | |
 | --- | --- |
 | Whole release | 10.5 GB |
-| The columns this reads | **3.9 GB over 12,336 range requests, 31 minutes** |
+| The columns this reads | **3.9 GB over 12,336 range requests, 31 minutes** (plus 0.2 GB for the alternate categories added since) |
 | Asking whether there is a new release at all | one request |
 
 Two details do most of that work. Places are points, so `bbox` gives the position and the `geometry` column — a third of the projection — is never transferred; the cost is that positions carry about seven digits rather than full precision, which is a tenth of a metre. And the reader fetches each row group's wanted column chunks by byte range, coalescing the ones that sit near each other: a single read-ahead window thrashes when parquet reads column by column, 380 MB per file against the 203 MB the columns actually occupy. `coalesceGap` in `reader.go` carries the measured trade-off between bytes and round trips.
 
-**What the first full pass found.** 275,277 records, all with coordinates and 72% with a website — and 140,650 of them, more than half, were `art_gallery`. Those are gone now: the population is mostly commercial, and admitting it would have been the mistake this catalogue has already reasoned itself out of at arts centres and historical societies. The pass also reported nine museum categories the reader had never heard of, 2,922 museums in all, every one real — that counter exists so a source cannot quietly stop seeing a kind of museum, and it paid for itself on the first run. What remains is about 137,500 museums.
+**What the first full pass found.** 275,277 records, all with coordinates and 72% with a website. Two things needed acting on.
+
+It reported nine museum categories the reader had never heard of — state, national, contemporary art, decorative arts, cartooning, costume, civilization, textile and photography museums, 2,922 in all, every one real. That counter exists so a source cannot quietly stop seeing a kind of museum, and it paid for itself on the first run.
+
+And 140,650 records — more than every other museum category put together — were `art_gallery`. That category holds two different things: a room that puts on exhibitions, and a shop that sells paintings. Neither taking all of it nor dropping all of it is right, and Overture's own **alternate categories** separate them better than anything this code could infer from a name. A gallery also classified as a contemporary art museum, an art museum or a museum is the exhibiting kind; one whose other categories are `gift_shop`, `antique_store`, `tea_room` or `bed_and_breakfast` is not. That admits 23% of galleries and takes them from 51% of the source to 15%.
+
+The rule errs towards refusing — a serious commercial gallery whose only other category is `arts_and_entertainment` is turned away with the shops — and it is a proxy rather than a judgement: some admitted galleries are plainly commercial, they are simply ones Overture itself also files as art museums. Every one is recorded with the class `art gallery` rather than `museum`, so anything downstream that wants only museums can say so. (The taxonomy hierarchy looks like it should help here and does not: every `art_gallery` in the release sits under the same path, shops included.)
 
 `museum crawl -sources overture` on its own is the way to run it, and the scheduler below means the full crawl will not read it twice for one release.
 

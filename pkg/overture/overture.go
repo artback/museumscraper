@@ -57,21 +57,10 @@ const (
 // science museums, and taking them from one source and not another would be an
 // inconsistency nothing downstream could explain.
 //
-// art_gallery is deliberately *not* here, and it is the single biggest
-// decision in this file. The first full pass found 140,650 of them against
-// 134,627 of everything else: admitting them would have more than doubled the
-// source with a population that is mostly commercial — "Galerie Au Chevalet",
-// "Manua Exquisite Tahitian Art", a gallery whose website sells prints. That
-// is the mistake this catalogue has already reasoned itself out of twice, at
-// arts centres in the OSM query and at historical societies in the American
-// register: a large class of nearly-right records that nothing downstream can
-// tell apart from the real ones.
-//
-// OpenStreetMap's tourism=gallery stays included, and the two are not in
-// tension. That tag is applied by mappers, is small, and is genuinely used for
-// museums in countries where the museum tag never got added; this is a
-// commercial directory's category for a shop that sells art. A museum
-// mis-categorised here is still reachable through OSM.
+// art_gallery is not here, but it is not simply excluded either — see
+// galleryIsMuseum. The category holds both kinds of gallery and the difference
+// matters: one is a room that puts on exhibitions, the other is a shop that
+// sells paintings.
 var museumCategories = map[string]string{
 	"museum":                  "museum",
 	"history_museum":          "history museum",
@@ -102,11 +91,47 @@ var museumCategories = map[string]string{
 	"planetarium":             "planetarium",
 }
 
+// galleryIsMuseum reports whether an art_gallery is the kind worth cataloguing.
+//
+// The category is genuinely mixed, and at 140,650 records in the first full
+// pass — more than every other museum category put together — neither taking
+// all of it nor dropping all of it is right. Taking it admits the shops:
+// "UndARTground Concept Store", a gallery whose alternate category is
+// home_goods_store, one whose website is an Airbnb listing. Dropping it loses
+// Vidéochroniques and Provence Art Contemporain, which are exhibition spaces
+// by any reading.
+//
+// Overture's own alternate categories separate them, and better than anything
+// this package could infer from a name. A gallery that is also classified as a
+// contemporary art museum, an art museum or simply a museum is the exhibiting
+// kind; one whose other categories are gift_shop, antique_store, boutique,
+// tea_room or bed_and_breakfast is not. Measured over 925 galleries, the rule
+// admits 23% of them.
+//
+// The taxonomy hierarchy is no help here and it is worth saying so, because it
+// looks like it should be: every art_gallery in the release sits under
+// "arts_and_entertainment > arts_and_crafts_space > art_gallery", shops
+// included.
+//
+// It errs towards refusing. A serious commercial gallery whose only other
+// category is "arts_and_entertainment" is turned away along with the shops,
+// which loses some real exhibition programmes — the right way to be wrong,
+// given what admitting the rest would cost.
+func galleryIsMuseum(alternates []string) bool {
+	for _, alternate := range alternates {
+		if _, isMuseum := museumCategories[strings.TrimSpace(alternate)]; isMuseum {
+			return true
+		}
+	}
+	return false
+}
+
 // place is the projection read out of each row. Its fields are the whole
 // reason a pass over the planet costs two gigabytes rather than ten.
 type place struct {
 	Categories struct {
-		Primary string `parquet:"primary"`
+		Primary   string   `parquet:"primary"`
+		Alternate []string `parquet:"alternate,list"`
 	} `parquet:"categories"`
 	Names struct {
 		Primary string `parquet:"primary"`
@@ -424,8 +449,14 @@ func (c *Client) size(ctx context.Context, url string) (int64, error) {
 // not take.
 func toMuseum(p place, unknown map[string]int) (models.Museum, bool) {
 	category := strings.TrimSpace(p.Categories.Primary)
+
 	class, isMuseum := museumCategories[category]
-	if !isMuseum {
+	switch {
+	case isMuseum:
+	// The one category decided by more than its own name.
+	case category == "art_gallery" && galleryIsMuseum(p.Categories.Alternate):
+		class = "art gallery"
+	default:
 		if strings.Contains(category, "museum") {
 			// A category upstream added that this build does not know. Counted
 			// rather than silently dropped: the alternative is a source that
@@ -435,13 +466,19 @@ func toMuseum(p place, unknown map[string]int) (models.Museum, bool) {
 		return models.Museum{}, false
 	}
 
-	name := strings.TrimSpace(p.Names.Primary)
-	if name == "" || p.Confidence < minConfidence {
+	// Applies to every path, galleries included: a record with no name is not a
+	// catalogue entry, and one the sources barely agree on is as often a closed
+	// museum or a duplicate as a real one.
+	if strings.TrimSpace(p.Names.Primary) == "" || p.Confidence < minConfidence {
 		return models.Museum{}, false
 	}
+	return museumFrom(p, class), true
+}
 
+// museumFrom builds the record, given the class its category resolved to.
+func museumFrom(p place, class string) models.Museum {
 	museum := models.Museum{
-		Name:    name,
+		Name:    strings.TrimSpace(p.Names.Primary),
 		Classes: []string{class},
 		Sources: []string{SourceName},
 	}
@@ -473,7 +510,7 @@ func toMuseum(p place, unknown map[string]int) (models.Museum, bool) {
 	if museum.Country == "" {
 		museum.Country = "unknown"
 	}
-	return museum, true
+	return museum
 }
 
 // countryName turns the ISO 3166-1 alpha-2 code Overture stores into the
