@@ -167,3 +167,87 @@ func TestEveryDatasetHasALicence(t *testing.T) {
 		}
 	}
 }
+
+// TestAnUnchangedRegisterIsNeitherDownloadedNorParsed is the point of carrying
+// validators: the American file has not changed since 2018 and its publisher
+// has said it never will, so every run from now on should cost one round trip
+// rather than three megabytes and a parse.
+func TestAnUnchangedRegisterIsNeitherDownloadedNorParsed(t *testing.T) {
+	var served, conditional int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"v1"`)
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			conditional++
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		served++
+		_, _ = w.Write([]byte("Nom_officiel|Ville|Coordonnees\nmusée de test|Lyon|45.5, 4.5\n"))
+	}))
+	defer srv.Close()
+
+	run := func(known map[string]string) (int, map[string]string) {
+		seen := map[string]string{}
+		s := &Service{
+			client: srv.Client(),
+			agent:  "test",
+			Known:  known,
+			Seen:   func(source, version string, _ bool) { seen[source] = version },
+			datasets: []Dataset{{
+				Source: "museofile", Country: "France", URL: srv.URL, Parse: parseMuseofile,
+			}},
+		}
+		count := 0
+		for range s.Museums(context.Background()) {
+			count++
+		}
+		return count, seen
+	}
+
+	first, versions := run(nil)
+	if first != 1 {
+		t.Fatalf("first run read %d museums, want 1", first)
+	}
+	if versions["museofile"] != `"v1"` {
+		t.Fatalf("validator = %q, want the ETag", versions["museofile"])
+	}
+
+	if second, _ := run(versions); second != 0 {
+		t.Errorf("second run read %d museums, want none — the register said 304", second)
+	}
+	if served != 1 || conditional != 1 {
+		t.Errorf("server served %d bodies and %d conditional requests, want 1 and 1", served, conditional)
+	}
+}
+
+// TestALastModifiedIsOfferedBackAsADate: a file host that sets no ETag still
+// gets a conditional request, using the header it does set.
+func TestALastModifiedIsOfferedBackAsADate(t *testing.T) {
+	const stamp = "Wed, 27 Aug 2025 10:00:00 GMT"
+
+	var sawIfModifiedSince string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawIfModifiedSince = r.Header.Get("If-Modified-Since")
+		w.Header().Set("Last-Modified", stamp)
+		_, _ = w.Write([]byte("Nom_officiel|Ville\nmusée de test|Lyon\n"))
+	}))
+	defer srv.Close()
+
+	s := &Service{
+		client: srv.Client(),
+		agent:  "test",
+		Known:  map[string]string{"museofile": stamp},
+		datasets: []Dataset{{
+			Source: "museofile", Country: "France", URL: srv.URL, Parse: parseMuseofile,
+		}},
+	}
+	for range s.Museums(context.Background()) {
+	}
+
+	if sawIfModifiedSince != stamp {
+		t.Errorf("If-Modified-Since = %q, want %q", sawIfModifiedSince, stamp)
+	}
+	if r := s.Known["museofile"]; r == "" {
+		t.Error("the stored validator was lost")
+	}
+}

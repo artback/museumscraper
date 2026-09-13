@@ -22,6 +22,7 @@ package registers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -68,6 +69,19 @@ type Service struct {
 	client   *http.Client
 	agent    string
 	datasets []Dataset
+
+	// Known are the validators each register gave last time it was read, keyed
+	// by dataset source. A register that has not changed answers a conditional
+	// request with 304 and no body at all, which costs one round trip instead
+	// of a download and a parse — and for the American file, which its
+	// publisher has said will never be updated again, that is every run from
+	// now on.
+	Known map[string]string
+
+	// Seen is called once per register with the validator it is now serving,
+	// and whether it had anything new. The caller stores these for next time;
+	// a nil Seen means nobody is keeping track, and every run is a full one.
+	Seen func(source, version string, changed bool)
 }
 
 // NewService returns a Service reading every known register.
@@ -78,6 +92,10 @@ func NewService() *Service {
 		datasets: Datasets,
 	}
 }
+
+// errUnchanged means the register answered that we already hold its current
+// contents.
+var errUnchanged = errors.New("unchanged since last read")
 
 // Museums streams every museum the registers hold.
 //
@@ -98,6 +116,10 @@ func (s *Service) Museums(ctx context.Context) <-chan models.Museum {
 			}
 
 			museums, err := s.read(ctx, dataset)
+			if errors.Is(err, errUnchanged) {
+				log.Printf("registers: %s unchanged since last crawl, not downloaded", dataset.Source)
+				continue
+			}
 			if err != nil {
 				log.Printf("registers: skipping %s: %v", dataset.Source, err)
 				continue
@@ -128,14 +150,39 @@ func (s *Service) read(ctx context.Context, dataset Dataset) ([]models.Museum, e
 	}
 	req.Header.Set("User-Agent", s.agent)
 
+	// Offer back what the register gave us last time. Which header it is
+	// depends on what that register serves: an ETag is exact, a Last-Modified
+	// is the fallback for a file host that does not set one.
+	known := s.Known[dataset.Source]
+	switch {
+	case strings.HasPrefix(known, "\"") || strings.HasPrefix(known, "W/"):
+		req.Header.Set("If-None-Match", known)
+	case known != "":
+		req.Header.Set("If-Modified-Since", known)
+	}
+
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s: %w", dataset.URL, err)
 	}
 	defer resp.Body.Close()
 
+	version := resp.Header.Get("ETag")
+	if version == "" {
+		version = resp.Header.Get("Last-Modified")
+	}
+
+	if resp.StatusCode == http.StatusNotModified {
+		if s.Seen != nil {
+			s.Seen(dataset.Source, known, false)
+		}
+		return nil, errUnchanged
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch %s: status %s", dataset.URL, resp.Status)
+	}
+	if s.Seen != nil {
+		s.Seen(dataset.Source, version, true)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes))

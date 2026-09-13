@@ -72,6 +72,21 @@ var (
 		URL:         "https://www.etalab.gouv.fr/licence-ouverte-open-licence/",
 		Attribution: "Muséofile — Ministère de la Culture",
 	}
+	// overture covers the Overture Maps places theme.
+	//
+	// Which licence applies is not a detail: Overture's other themes — base,
+	// buildings, divisions, transportation — are ODbL, and places is not. Its
+	// contributors license under CDLA Permissive 2.0, with Foursquare's share
+	// under Apache 2.0 and AllThePlaces' under CC0. All three are permissive
+	// and none is share-alike, which is what makes this theme redistributable
+	// here on the same terms as the rest of the catalogue. Recording it as
+	// ODbL by association with the Overture name would overstate what a caller
+	// taking these records takes on.
+	overture = Licence{
+		Name:        "CDLA Permissive 2.0",
+		URL:         "https://cdla.dev/permissive-2-0/",
+		Attribution: "Overture Maps Foundation, overturemaps.org",
+	}
 	// museumWebsite covers what a museum publishes about its own programme.
 	// Exhibition titles and dates are facts and are recorded as such, with the
 	// page they were read from kept alongside them; the attribution is the
@@ -108,6 +123,8 @@ func For(source string) (Licence, bool) {
 		l = wikipedia
 	case name == "wikidata":
 		l = wikidata
+	case name == "overture":
+		l = overture
 	case name == "imls":
 		l = publicDomain
 	case name == "museofile":
@@ -150,7 +167,8 @@ func ForSources(sources []string) []Licence {
 // All returns every licence this catalogue redistributes under, for the
 // attribution endpoint.
 func All() []Licence {
-	sources := []string{"wikidata", "wikipedia", "openstreetmap", "nominatim", "imls", "museofile", "website"}
+	sources := []string{"wikidata", "wikipedia", "openstreetmap", "nominatim",
+		"overture", "imls", "museofile", "website"}
 	out := make([]Licence, 0, len(sources))
 	for _, s := range sources {
 		if l, ok := For(s); ok {

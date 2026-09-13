@@ -198,6 +198,36 @@ Sources run concurrently into a shared merger, then everything is written at onc
 
 > **Run the sources together in one invocation.** Merging happens *within* a run. Two runs of different sources produce two independent record sets, and the second skips keys that already exist — so the same museum can end up stored twice under different names (`raw_data/france/army-museum-paris.json` from the list crawl and `raw_data/france/musee-de-l-armee.json` from Wikidata).
 
+### What it skips, and why
+
+The sources do not go stale at the same rate and it is not close. Wikidata is edited every minute; the American museum register was last updated in 2018 and its publisher has said it never will be again. One cadence for all of them means either reading 2 GB of Overture eleven times a year to find eleven copies of what we already had, or making a Wikipedia edit wait a month.
+
+So a crawl asks two questions per source, in order, and both are answered before anything starts:
+
+**Is it due?** — from the clock, against a cadence per source.
+
+| Source | Cadence | Why |
+| --- | --- | --- |
+| `wikidata`, `category` | 7 days | Edited continuously |
+| `lists`, `osm` | 14 days | List articles move slowly; OSM is 244 Overpass queries |
+| `registers`, `overture` | 30 days | Published files, republished monthly at most |
+
+**Has it changed?** — by asking the upstream in the cheapest way it can be asked.
+
+- **Overture** publishes monthly and never rewrites a release, so the release identifier is an exact answer. One listing request decides whether to spend the 2 GB behind it.
+- **The registers** answer a conditional request. An unchanged file replies `304` with no body at all: no transfer, no parse. For the American file, that is now every run.
+- **Wikidata, Wikipedia and OSM** offer no cheap global handle, so the cadence is all there is for them.
+
+A source can be due *and* unchanged, which is the case worth catching: it costs one request to find out and saves everything behind it. State lives in the bucket under `crawl_state/`, one object per source, recording when it last ran, when it last had something new, and what version it read — so a source that is being polled fruitlessly, or has quietly stopped finding anything, is visible as exactly that.
+
+```bash
+museum crawl                  # everything that is due and has something new
+museum crawl -force           # read it all anyway, after changing a reader
+museum crawl -sources overture   # or split the sources across separate jobs
+```
+
+Splitting the schedule across jobs works too and needs nothing here: `-sources` takes any subset, and each source keeps its own state, so a nightly `-sources wikidata,category` and a monthly `-sources overture` cooperate without knowing about each other. The job spec lives in the IaC repository rather than this one.
+
 Interrupting with Ctrl-C stops collecting but still stores what the sources returned: the persistence phase runs on its own context so a cancelled crawl does not discard an hour of work.
 
 ### `museum enrich` — geocode stored museums
@@ -549,6 +579,7 @@ No single catalogue is complete, and none is a superset of the others.
 | **Wikipedia lists** | `lists` | ~7,000 | Museums *named* in a "List of museums in X" article but with no article of their own |
 | **OpenStreetMap** | `osm` | tens of thousands | Small local museums that never reached either wiki; mapped on the ground, so nearly all have coordinates |
 | **Public registers** | `registers` | 15,094 (13,878 US + 1,216 FR) | Museums a government lists because it funds or accredits them — the county museum with no article, no map pin and a website from 2009 |
+| **Overture Maps** | `overture` | ~150,000 | Commercial POI data, pooled and opened. The only source with an even footprint: it covers Lagos the way it covers Lyon |
 
 All but OSM are on by default. OSM is opt-in — much slower (one Overpass query per area, countries and territories alike) and its records are thinner.
 
@@ -568,6 +599,22 @@ Two things to know about it:
 **The American file is a 2018 snapshot and IMLS has said there will be no more.** It will slowly fill with museums that have since closed. That is a real cost, and the reason to accept it is that nothing else covers small American museums at all; a museum that closed in 2021 is a better catalogue entry than one that was never listed, and enrichment and the sweep are what find out which is which.
 
 **Only six of the nine IMLS disciplines are admitted** — art, children's, general, history, natural history and science, 13,878 of 30,178 rows. Left out: historical societies and historic preservation (14,785), botanical gardens and nature centres (1,029), and zoos and aquariums (465). That is the same line the OSM query draws at arts centres and archaeological sites — things that sit next to a museum without being one, which nothing downstream could tell apart afterwards. A historical society may well run a museum; the file does not say which do.
+
+### Overture Maps
+
+Every other source is, in part, a measurement of who writes things down. Wikidata holds what an editor thought notable, OpenStreetMap what a mapper stood in front of, and the registers exist only where a government publishes one. Overture is pooled commercial POI data, and its footprint is the most even of anything open.
+
+It is published as **10.5 GB of Parquet**, which is not something to download onto a Raspberry Pi every month. It does not have to be. Parquet is columnar, and of the forty-odd columns a museum record needs six:
+
+| | |
+| --- | --- |
+| Whole release | 10.5 GB |
+| The six columns this reads | ~2 GB |
+| Asking whether there is a new release at all | one request |
+
+Two details do most of that work. Places are points, so `bbox` gives the position and the `geometry` column — a third of the projection — is never transferred; the cost is that positions carry about seven digits rather than full precision, which is a tenth of a metre. And the reader fetches each row group's wanted column chunks by byte range, coalescing the ones that sit near each other: a single read-ahead window thrashes when parquet reads column by column, measured at 380 MB per file against the 131 MB the columns actually occupy.
+
+`museum crawl -sources overture` on its own is the way to run it, and the scheduler below means the full crawl will not read it twice for one release.
 
 ### Where the world is missing
 
@@ -660,6 +707,7 @@ honouring the number by holding a worker for an hour would not serve it either.
 | Wikidata | CC0 1.0 | nothing |
 | Wikipedia | CC BY-SA 4.0 | attribution, share-alike |
 | OpenStreetMap (incl. Nominatim geocoding) | ODbL 1.0 | attribution, share-alike |
+| Overture Maps places | CDLA Permissive 2.0 | attribution |
 | IMLS museum file (US) | public domain, a US government work | nothing; acknowledgement asked for and given |
 | Muséofile (FR) | Licence Ouverte 2.0 | attribution |
 | Museum websites | listings recorded as facts, with the page they came from | — |

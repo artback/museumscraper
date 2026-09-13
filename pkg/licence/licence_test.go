@@ -128,3 +128,23 @@ func TestRegisterLicences(t *testing.T) {
 		t.Error("Licence Ouverte puts no terms on derived work; marking it share-alike overstates it")
 	}
 }
+
+// TestOvertureLicence: Overture publishes most themes under ODbL and the
+// places theme under CDLA Permissive, which is the reason the places theme can
+// be redistributed here. Recording the wrong one would misstate what a caller
+// taking these records takes on.
+func TestOvertureLicence(t *testing.T) {
+	l, ok := For("overture")
+	if !ok {
+		t.Fatal("overture has no licence entry")
+	}
+	if l.Name != "CDLA Permissive 2.0" {
+		t.Errorf("Name = %q", l.Name)
+	}
+	if l.Attribution == "" {
+		t.Error("CDLA requires attribution, so a credit line is required")
+	}
+	if l.ShareAlike {
+		t.Error("CDLA Permissive puts no terms on derived work; marking it share-alike overstates it")
+	}
+}
