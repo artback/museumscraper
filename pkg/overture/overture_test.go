@@ -184,3 +184,48 @@ func newPlace(name, category string, confidence float64, lat, lon float32,
 }
 
 var _ = models.Museum{}
+
+// TestArtGalleriesAreNotMuseums records the biggest judgement call in this
+// package. The first full pass found 140,650 art galleries against 134,627 of
+// everything else — admitting them would more than double the source with a
+// population that is mostly commercial, which is the mistake this catalogue
+// has already reasoned itself out of at arts centres and historical societies.
+func TestArtGalleriesAreNotMuseums(t *testing.T) {
+	if _, ok := toMuseum(newPlace("Galerie Au Chevalet", "art_gallery", 0.9, 1, 1, nil, "PF", "Papeete"), map[string]int{}); ok {
+		t.Error("an art gallery was admitted as a museum")
+	}
+	// An art *museum* is a different thing and stays.
+	if _, ok := toMuseum(newPlace("Musée d'Orsay", "art_museum", 0.9, 1, 1, nil, "FR", "Paris"), map[string]int{}); !ok {
+		t.Error("an art museum was rejected")
+	}
+}
+
+// TestTheCategoriesTheFirstFullPassFound: these nine were reported by the
+// unrecognised-category counter on the first pass over the whole release —
+// 2,922 museums that would otherwise have been dropped in silence. They are
+// here so that a later edit cannot quietly lose them again.
+func TestTheCategoriesTheFirstFullPassFound(t *testing.T) {
+	for _, category := range []string{
+		"state_museum", "national_museum", "contemporary_art_museum",
+		"decorative_arts_museum", "cartooning_museum", "costume_museum",
+		"civilization_museum", "textile_museum", "photography_museum",
+	} {
+		unknown := map[string]int{}
+		if _, ok := toMuseum(newPlace("Some Museum", category, 0.9, 1, 1, nil, "FR", "Paris"), unknown); !ok {
+			t.Errorf("%s was rejected", category)
+		}
+		if len(unknown) != 0 {
+			t.Errorf("%s is still counted as unrecognised", category)
+		}
+	}
+}
+
+// TestEveryCategoryHasAClass: the class is what a record says it is, so a
+// category mapped to an empty string would produce a museum that says nothing.
+func TestEveryCategoryHasAClass(t *testing.T) {
+	for category, class := range museumCategories {
+		if class == "" {
+			t.Errorf("%s maps to no class", category)
+		}
+	}
+}

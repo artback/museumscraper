@@ -47,38 +47,59 @@ const (
 // museumCategories are the Overture categories this catalogue treats as
 // museums.
 //
-// Overture names a specific category per place, so the set is enumerated
-// rather than matched on the substring "museum": that would admit
-// "museum_store" and miss "planetarium", and a category added upstream would
-// join the catalogue silently. Anything unrecognised is logged once and
-// skipped, which is what makes a new category visible instead of invisible.
+// Enumerated rather than matched on the substring "museum": that would admit
+// "museum_store" and miss "planetarium". Anything unrecognised whose name
+// contains "museum" is counted and logged at the end of a pass, which is how
+// this list was corrected — the first full pass reported nine categories it
+// had never heard of, 2,922 museums in all, every one of them real.
 //
-// art_gallery is included because the OSM source already takes tourism=gallery
-// for the same reason — in several countries a museum's only tag is the
-// gallery one. planetarium is included because the American register counts
-// planetariums as science museums, and a catalogue that took them from one
-// source and not another would be inconsistent in a way nothing downstream
-// could explain.
+// planetarium is here because the American register counts planetariums as
+// science museums, and taking them from one source and not another would be an
+// inconsistency nothing downstream could explain.
+//
+// art_gallery is deliberately *not* here, and it is the single biggest
+// decision in this file. The first full pass found 140,650 of them against
+// 134,627 of everything else: admitting them would have more than doubled the
+// source with a population that is mostly commercial — "Galerie Au Chevalet",
+// "Manua Exquisite Tahitian Art", a gallery whose website sells prints. That
+// is the mistake this catalogue has already reasoned itself out of twice, at
+// arts centres in the OSM query and at historical societies in the American
+// register: a large class of nearly-right records that nothing downstream can
+// tell apart from the real ones.
+//
+// OpenStreetMap's tourism=gallery stays included, and the two are not in
+// tension. That tag is applied by mappers, is small, and is genuinely used for
+// museums in countries where the museum tag never got added; this is a
+// commercial directory's category for a shop that sells art. A museum
+// mis-categorised here is still reachable through OSM.
 var museumCategories = map[string]string{
-	"museum":                 "museum",
-	"history_museum":         "history museum",
-	"art_museum":             "art museum",
-	"modern_art_museum":      "modern art museum",
-	"asian_art_museum":       "art museum",
-	"science_museum":         "science museum",
-	"childrens_museum":       "children's museum",
-	"community_museum":       "community museum",
-	"computer_museum":        "computer museum",
-	"sports_museum":          "sports museum",
-	"design_museum":          "design museum",
-	"natural_history_museum": "natural history museum",
-	"military_museum":        "military museum",
-	"railroad_museum":        "railway museum",
-	"maritime_museum":        "maritime museum",
-	"aviation_museum":        "aviation museum",
-	"wax_museum":             "wax museum",
-	"art_gallery":            "art gallery",
-	"planetarium":            "planetarium",
+	"museum":                  "museum",
+	"history_museum":          "history museum",
+	"art_museum":              "art museum",
+	"modern_art_museum":       "modern art museum",
+	"contemporary_art_museum": "contemporary art museum",
+	"asian_art_museum":        "art museum",
+	"decorative_arts_museum":  "decorative arts museum",
+	"design_museum":           "design museum",
+	"photography_museum":      "photography museum",
+	"textile_museum":          "textile museum",
+	"costume_museum":          "costume museum",
+	"cartooning_museum":       "cartooning museum",
+	"science_museum":          "science museum",
+	"natural_history_museum":  "natural history museum",
+	"childrens_museum":        "children's museum",
+	"community_museum":        "community museum",
+	"civilization_museum":     "civilization museum",
+	"national_museum":         "national museum",
+	"state_museum":            "state museum",
+	"computer_museum":         "computer museum",
+	"sports_museum":           "sports museum",
+	"military_museum":         "military museum",
+	"railroad_museum":         "railway museum",
+	"maritime_museum":         "maritime museum",
+	"aviation_museum":         "aviation museum",
+	"wax_museum":              "wax museum",
+	"planetarium":             "planetarium",
 }
 
 // place is the projection read out of each row. Its fields are the whole

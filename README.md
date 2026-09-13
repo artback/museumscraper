@@ -579,7 +579,7 @@ No single catalogue is complete, and none is a superset of the others.
 | **Wikipedia lists** | `lists` | ~7,000 | Museums *named* in a "List of museums in X" article but with no article of their own |
 | **OpenStreetMap** | `osm` | tens of thousands | Small local museums that never reached either wiki; mapped on the ground, so nearly all have coordinates |
 | **Public registers** | `registers` | 15,094 (13,878 US + 1,216 FR) | Museums a government lists because it funds or accredits them — the county museum with no article, no map pin and a website from 2009 |
-| **Overture Maps** | `overture` | ~150,000 | Commercial POI data, pooled and opened. The only source with an even footprint: it covers Lagos the way it covers Lyon |
+| **Overture Maps** | `overture` | ~137,500 across 231 countries | Commercial POI data, pooled and opened. The only source with an even footprint: it covers Lagos the way it covers Lyon |
 
 All but OSM are on by default. OSM is opt-in — much slower (one Overpass query per area, countries and territories alike) and its records are thinner.
 
@@ -604,15 +604,17 @@ Two things to know about it:
 
 Every other source is, in part, a measurement of who writes things down. Wikidata holds what an editor thought notable, OpenStreetMap what a mapper stood in front of, and the registers exist only where a government publishes one. Overture is pooled commercial POI data, and its footprint is the most even of anything open.
 
-It is published as **10.5 GB of Parquet**, which is not something to download onto a Raspberry Pi every month. It does not have to be. Parquet is columnar, and of the forty-odd columns a museum record needs six:
+It is published as **10.5 GB of Parquet**, which is not something to download onto a Raspberry Pi every month. It does not have to be. Parquet is columnar, and a museum record needs eleven of its leaf columns. Measured over a full pass of release `2026-08-19.0`:
 
 | | |
 | --- | --- |
 | Whole release | 10.5 GB |
-| The six columns this reads | ~2 GB |
+| The columns this reads | **3.9 GB over 12,336 range requests, 31 minutes** |
 | Asking whether there is a new release at all | one request |
 
-Two details do most of that work. Places are points, so `bbox` gives the position and the `geometry` column — a third of the projection — is never transferred; the cost is that positions carry about seven digits rather than full precision, which is a tenth of a metre. And the reader fetches each row group's wanted column chunks by byte range, coalescing the ones that sit near each other: a single read-ahead window thrashes when parquet reads column by column, measured at 380 MB per file against the 131 MB the columns actually occupy.
+Two details do most of that work. Places are points, so `bbox` gives the position and the `geometry` column — a third of the projection — is never transferred; the cost is that positions carry about seven digits rather than full precision, which is a tenth of a metre. And the reader fetches each row group's wanted column chunks by byte range, coalescing the ones that sit near each other: a single read-ahead window thrashes when parquet reads column by column, 380 MB per file against the 203 MB the columns actually occupy. `coalesceGap` in `reader.go` carries the measured trade-off between bytes and round trips.
+
+**What the first full pass found.** 275,277 records, all with coordinates and 72% with a website — and 140,650 of them, more than half, were `art_gallery`. Those are gone now: the population is mostly commercial, and admitting it would have been the mistake this catalogue has already reasoned itself out of at arts centres and historical societies. The pass also reported nine museum categories the reader had never heard of, 2,922 museums in all, every one real — that counter exists so a source cannot quietly stop seeing a kind of museum, and it paid for itself on the first run. What remains is about 137,500 museums.
 
 `museum crawl -sources overture` on its own is the way to run it, and the scheduler below means the full crawl will not read it twice for one release.
 
@@ -631,7 +633,23 @@ The catalogue is not evenly thin. Measured against Wikidata, which is the broade
 
 This is not a gap the crawler can fix by trying harder at the same sources, and it is worth being precise about why, because each part of the world is missing for a different reason and has a different remedy.
 
-**Africa can only come from OpenStreetMap.** No Wikipedia edition in an African language has a museums-by-country tree — Swahili has no langlink for the English root at all — so the category crawl has nothing to walk. OSM is mapped on the ground and holds 58 museums in Kenya against Wikidata's 23. That is why `osm` is on by default despite being the slowest source by an order of magnitude: for one continent it is the only source there is.
+Overture changes this picture more than anything else here. Measured against Wikidata, per country:
+
+| | Wikidata | Overture |
+| --- | --- | --- |
+| South Africa | 155 | **1,419** |
+| Egypt | 155 | **637** |
+| Morocco | 72 | **318** |
+| Nigeria | 119 | **210** |
+| Kenya | 23 | **128** |
+| Tanzania | 0 | **52** |
+| Zimbabwe | 0 | **42** |
+| Zambia | 0 | **21** |
+| Cameroon | **83** | 33 |
+
+Not uniformly — Cameroon is better in Wikidata, and that is worth remembering before treating any one source as the answer — but Tanzania, Zimbabwe and Zambia go from nothing to something, and most of the continent improves severalfold.
+
+**Africa can also come from OpenStreetMap.** No Wikipedia edition in an African language has a museums-by-country tree — Swahili has no langlink for the English root at all — so the category crawl has nothing to walk. OSM is mapped on the ground and holds 58 museums in Kenya against Wikidata's 23. That is why `osm` is on by default despite being the slowest source by an order of magnitude: for one continent it is the only source there is.
 
 **Asia comes from the non-English editions.** Urdu, Arabic, Persian, Thai, Indonesian, Bengali, Vietnamese and Tamil each keep a museums-by-country tree, between 30 and 220 per-country subcategories apiece, covering regions no European edition reaches. They were added for exactly this and then left switched off by a default of `-languages en`; the default is now `all`.
 
