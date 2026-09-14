@@ -136,6 +136,88 @@ func TestDueSites_CarriesValidatorsForward(t *testing.T) {
 	}
 }
 
+// TestRecordScrape_CarriesTheReplaySetForward: the pages a read took its
+// exhibitions from are what the next read goes straight to instead of finding
+// them from the home page again, so they have to survive the round trip — and
+// a discovery that finds no permanent page must clear the one recorded before,
+// or the site is asked forever for a page it no longer has.
+func TestRecordScrape_CarriesTheReplaySetForward(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if _, err := store.SaveMuseums(ctx, []models.Museum{
+		{Name: "M", Website: "https://replay.example/", Latitude: 48.86, Longitude: 2.35, WikidataID: "Q1"},
+	}); err != nil {
+		t.Fatalf("save museums: %v", err)
+	}
+
+	if err := store.RecordScrape(ctx, sweep.Record{
+		Site: "replay.example", Outcome: sweep.Changed, FoundCount: 4,
+		Plan:           sweep.Plan{Interval: time.Hour, DueAt: now.Add(-time.Hour)},
+		ListingURL:     "https://replay.example/whats-on",
+		ListingPages:   []string{"https://replay.example/whats-on"},
+		PermanentPages: []string{"https://replay.example/permanent"},
+		Discovered:     true,
+	}, now); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	due, err := store.DueSites(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("due sites: %v", err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("got %d due, want 1", len(due))
+	}
+	if got := due[0].ListingPages; len(got) != 1 || got[0] != "https://replay.example/whats-on" {
+		t.Errorf("ListingPages = %v", got)
+	}
+	if got := due[0].PermanentPages; len(got) != 1 || got[0] != "https://replay.example/permanent" {
+		t.Errorf("PermanentPages = %v", got)
+	}
+	if due[0].DiscoveredAt.IsZero() {
+		t.Error("DiscoveredAt was not recorded, so the site is never rediscovered")
+	}
+
+	// A later discovery finds the listing page and no permanent page: the site
+	// took it down.
+	if err := store.RecordScrape(ctx, sweep.Record{
+		Site: "replay.example", Outcome: sweep.Changed, FoundCount: 2,
+		Plan:         sweep.Plan{Interval: time.Hour, DueAt: now.Add(-time.Hour)},
+		ListingURL:   "https://replay.example/whats-on",
+		ListingPages: []string{"https://replay.example/whats-on"},
+		Discovered:   true,
+	}, now); err != nil {
+		t.Fatalf("record second: %v", err)
+	}
+
+	due, err = store.DueSites(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("due sites: %v", err)
+	}
+	if len(due[0].PermanentPages) != 0 {
+		t.Errorf("PermanentPages = %v, want cleared by a discovery that did not find one", due[0].PermanentPages)
+	}
+
+	// A replayed read says nothing about where the pages are, and must not
+	// blank them.
+	if err := store.RecordScrape(ctx, sweep.Record{
+		Site: "replay.example", Outcome: sweep.Unchanged,
+		Plan:         sweep.Plan{Interval: time.Hour, DueAt: now.Add(-time.Hour)},
+		ListingPages: []string{"https://replay.example/whats-on"},
+	}, now); err != nil {
+		t.Fatalf("record third: %v", err)
+	}
+	due, err = store.DueSites(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("due sites: %v", err)
+	}
+	if len(due[0].ListingPages) != 1 {
+		t.Errorf("ListingPages = %v, want the replay set kept", due[0].ListingPages)
+	}
+}
+
 // TestRecordScrape_KeepsTheLastGoodAnswerThroughAFailure: a site that fails
 // must not lose the listing URL that worked, or the next sweep after it
 // recovers has to rediscover it from scratch.

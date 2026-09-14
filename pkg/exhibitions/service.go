@@ -181,6 +181,20 @@ func (s *Scraper) ForMuseum(ctx context.Context, museum models.Museum) ([]Exhibi
 type Known struct {
 	ListingURL string
 	Validators Validators
+
+	// ListingPages and PermanentPages are the pages the last successful read
+	// actually took its exhibitions from, separated because the second kind is
+	// read differently: a page a home page labelled "Fasta utställningar" lists
+	// entries that never repeat the claim, and reading it as an ordinary
+	// listing drops every one of them for having no dates.
+	//
+	// They are what makes a repeat visit cheap without making it narrower. The
+	// home page is fetched to find these and for nothing else, so a site whose
+	// programme lives where it lived last week costs one request instead of
+	// two — and the fast path above cannot do that job, because it needs cache
+	// validators and most museum sites send none.
+	ListingPages   []string
+	PermanentPages []string
 }
 
 // Result is one site's worth of a sweep.
@@ -191,6 +205,24 @@ type Result struct {
 	// are its cache tags, to be offered back next time.
 	ListingURL string
 	Validators Validators
+
+	// ListingPages and PermanentPages are every page this read took
+	// exhibitions from, to be offered back as Known next time so the next read
+	// can go straight to them. Empty when nothing was found on a listing page
+	// at all, which is deliberate: there is then nothing worth replaying, and a
+	// site whose only entry came from its own description page must go through
+	// full discovery again rather than be re-read as a listing forever.
+	ListingPages   []string
+	PermanentPages []string
+
+	// Discovered is true when this read found its pages from the home page
+	// rather than replaying the ones it was given.
+	//
+	// A caller records when discovery last ran so it can make it run again. A
+	// replayed read never looks at the home page, so a site that has added a
+	// permanent-displays page beside a listing page that still works would
+	// otherwise never be seen to have done so.
+	Discovered bool
 
 	// Reached is true when at least one page was successfully fetched.
 	//
@@ -235,7 +267,104 @@ func (s *Scraper) ForSite(ctx context.Context, museum models.Museum, known Known
 		}
 	}
 
+	// The site had nothing to say about whether it had changed, which is the
+	// ordinary case — of three museum sites checked by hand, none sent an ETag
+	// or a Last-Modified. Read the pages that worked last time before paying to
+	// find them again.
+	if result, ok := s.replay(ctx, museum, known); ok {
+		return result, nil
+	}
+
 	return s.readSite(ctx, museum)
+}
+
+// replay re-reads the pages a previous successful read took its exhibitions
+// from, reporting whether that answered the question.
+//
+// This is the cheap half of every steady-state sweep, and what it saves is the
+// home page: discovery exists to find which page holds the programme, and that
+// is a thing a site changes far more rarely than it changes the programme
+// itself. On a site whose listing is where it was, a read costs one request
+// instead of two.
+//
+// It is a shortcut and never a narrowing. Anything short of the same pages
+// yielding something falls through to full discovery, so a site that has moved
+// its programme is rediscovered on the same visit — at the cost of one wasted
+// request, paid by the minority that moved rather than by the majority that
+// did not. And the pages are replayed as they were read, permanent ones
+// included, so a replayed read cannot come back with less than discovery would
+// have found and retire a museum's standing displays for it.
+func (s *Scraper) replay(ctx context.Context, museum models.Museum, known Known) (Result, bool) {
+	if len(known.ListingPages) == 0 {
+		return Result{}, false
+	}
+
+	base, err := url.Parse(strings.TrimSpace(museum.Website))
+	if err != nil || base.Host == "" {
+		return Result{}, false
+	}
+	if base.Scheme == "" {
+		base.Scheme = "https"
+	}
+
+	var (
+		now     = s.now()
+		result  Result
+		found   []Exhibition
+		visited = make(map[string]struct{})
+	)
+
+	read := func(pages []string, limit int, permanent bool) bool {
+		for _, listingURL := range pages {
+			if ctx.Err() != nil {
+				return false
+			}
+			if limit <= 0 {
+				return true
+			}
+			if _, seen := visited[listingURL]; seen {
+				continue
+			}
+			visited[listingURL] = struct{}{}
+			limit--
+
+			page, entries := s.harvest(ctx, listingURL, base, museum, now, permanent, visited)
+			if page.URL == "" {
+				// A page that was there last time and is not there now is
+				// exactly the case discovery has to re-run for.
+				return false
+			}
+			result.Reached = true
+			found = append(found, entries...)
+
+			if permanent {
+				result.PermanentPages = append(result.PermanentPages, listingURL)
+				continue
+			}
+			result.ListingPages = append(result.ListingPages, listingURL)
+			if result.ListingURL == "" {
+				result.ListingURL, result.Validators = page.URL, page.Validators
+			}
+		}
+		return true
+	}
+
+	if !read(known.ListingPages, maxListingPages, false) {
+		return Result{}, false
+	}
+	if !read(known.PermanentPages, maxPermanentPages, true) {
+		return Result{}, false
+	}
+
+	// Nothing found is not an answer this path may give. It is the one outcome
+	// indistinguishable from "the programme moved", and treating it as a site
+	// with nothing on would retire everything the site still lists.
+	if len(found) == 0 {
+		return Result{}, false
+	}
+
+	result.Exhibitions = dedupe(found)
+	return result, true
 }
 
 // readSite performs full discovery: home page, listing pages, permanent pages,
@@ -261,7 +390,7 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 	}
 
 	var (
-		result  = Result{Reached: home.reached}
+		result  = Result{Reached: home.reached, Discovered: true}
 		found   []Exhibition
 		visited = make(map[string]struct{})
 	)
@@ -285,8 +414,11 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 		if len(found) > 0 {
 			// The programme was found; no need to try further candidates.
 			// Remember which page it came from, and what it was tagged with, so
-			// the next sweep can ask this page directly whether it has moved.
+			// the next sweep can ask this page directly whether it has moved —
+			// and, where the site answers nothing about that, read it directly
+			// without rediscovering it from the home page. See replay.
 			result.ListingURL, result.Validators = page.URL, page.Validators
+			result.ListingPages = []string{page.URL}
 			break
 		}
 	}
@@ -321,6 +453,14 @@ func (s *Scraper) readSite(ctx context.Context, museum models.Museum) (Result, e
 		page, entries := s.harvest(ctx, listingURL, base, museum, now, true, visited)
 		result.Reached = result.Reached || page.URL != ""
 		found = append(found, entries...)
+
+		// Recorded on being read rather than on yielding something, unlike the
+		// listing pages above. A permanent page that is briefly empty is still
+		// the page this site keeps its standing displays on, and dropping it
+		// from the replay set would mean never looking at it again.
+		if page.URL != "" {
+			result.PermanentPages = append(result.PermanentPages, page.URL)
+		}
 	}
 
 	// Everything above is free and language-bound. When it has come back with

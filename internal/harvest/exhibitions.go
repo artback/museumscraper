@@ -231,6 +231,15 @@ func (f *ExhibitionFallback) define(ctx context.Context, name, site string) (ext
 		return source, nil
 	}
 	if err != nil {
+		// A page with nothing on it cost no model time, so it costs no budget
+		// either. The cap exists to bound how many minutes of generation one
+		// run spends; spending a slot on a site the generator refused without
+		// asking the model would let a handful of JavaScript-rendered sites
+		// starve every compilable site behind them.
+		if errors.Is(err, extract.ErrNotExtractable) {
+			f.releaseCompile()
+		}
+
 		// The source is left defined even though compiling failed, so that the
 		// operator can see it, inspect the attempts, and retry by hand rather
 		// than having to rediscover which sites were tried.
@@ -262,6 +271,15 @@ func (f *ExhibitionFallback) claimCompile() bool {
 	}
 	f.compiled++
 	return true
+}
+
+// releaseCompile gives a claimed unit of the budget back.
+func (f *ExhibitionFallback) releaseCompile() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.compiled > 0 {
+		f.compiled--
+	}
 }
 
 func (f *ExhibitionFallback) budget() int {
