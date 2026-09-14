@@ -170,22 +170,63 @@ Run `museum <command> -h` for the full flag list.
 ### `museum crawl` — build the catalogue
 
 ```bash
-museum crawl                                        # wikidata, category, lists
+museum crawl                                        # everything: all five sources, all 26 editions
 museum crawl -sources wikidata                       # fastest single source
-museum crawl -sources wikidata,category,lists,osm    # maximum coverage
+museum crawl -sources wikidata,category,lists,registers -languages en   # the quick crawl
 ```
 
 Sources run concurrently into a shared merger, then everything is written at once.
 
-> **The `lists` source is currently ineffective.** All four sources run
+> **The `lists` source used to be throttled into uselessness.** All sources run
 > concurrently, and `wikidata`, `category` and `lists` all draw on the Wikipedia
-> and Wikidata APIs at once. In the last full crawl `lists` was rate-limited to
-> 14 candidates — "Lists of museums in the United States" and "Lists of museums
-> in England by county" were both skipped after four 429s. Running the
-> Wikipedia-backed sources sequentially, or sharing one rate limiter between
-> them, would fix it. `category` and `osm` were unaffected.
+> and Wikidata APIs at once. Each client spaced its own requests correctly and
+> together they ran at twice the rate the API tolerates, so in one full crawl
+> `lists` was cut to 14 candidates — "Lists of museums in the United States" and
+> "Lists of museums in England by county" both skipped after four 429s. The
+> limiter is now process-wide rather than per client, which is where a rate
+> limit belongs when the limit belongs to the endpoint. Worth checking against
+> the next full crawl's candidate count, which is where it would show.
+
+> **The default is everything, and narrowing is the deliberate act.** It used
+> to be the other way round — `osm` off, English only — on the reasoning that
+> widening the crawl multiplies its traffic. What that defaulted to in practice
+> was a catalogue of the places the English-speaking world writes about, because
+> the two switches left off are exactly the ones that reach everywhere else. See
+> [Where the world is missing](#where-the-world-is-missing). The narrow crawl is
+> still a sensible thing to run when you want a quick one; it is just no longer
+> what you get by not choosing.
 
 > **Run the sources together in one invocation.** Merging happens *within* a run. Two runs of different sources produce two independent record sets, and the second skips keys that already exist — so the same museum can end up stored twice under different names (`raw_data/france/army-museum-paris.json` from the list crawl and `raw_data/france/musee-de-l-armee.json` from Wikidata).
+
+### What it skips, and why
+
+The sources do not go stale at the same rate and it is not close. Wikidata is edited every minute; the American museum register was last updated in 2018 and its publisher has said it never will be again. One cadence for all of them means either reading 2 GB of Overture eleven times a year to find eleven copies of what we already had, or making a Wikipedia edit wait a month.
+
+So a crawl asks two questions per source, in order, and both are answered before anything starts:
+
+**Is it due?** — from the clock, against a cadence per source.
+
+| Source | Cadence | Why |
+| --- | --- | --- |
+| `wikidata`, `category` | 7 days | Edited continuously |
+| `lists`, `osm` | 14 days | List articles move slowly; OSM is 244 Overpass queries |
+| `registers`, `overture` | 30 days | Published files, republished monthly at most |
+
+**Has it changed?** — by asking the upstream in the cheapest way it can be asked.
+
+- **Overture** publishes monthly and never rewrites a release, so the release identifier is an exact answer. One listing request decides whether to spend the 2 GB behind it.
+- **The registers** answer a conditional request. An unchanged file replies `304` with no body at all: no transfer, no parse. For the American file, that is now every run.
+- **Wikidata, Wikipedia and OSM** offer no cheap global handle, so the cadence is all there is for them.
+
+A source can be due *and* unchanged, which is the case worth catching: it costs one request to find out and saves everything behind it. State lives in the bucket under `crawl_state/`, one object per source, recording when it last ran, when it last had something new, and what version it read — so a source that is being polled fruitlessly, or has quietly stopped finding anything, is visible as exactly that.
+
+```bash
+museum crawl                  # everything that is due and has something new
+museum crawl -force           # read it all anyway, after changing a reader
+museum crawl -sources overture   # or split the sources across separate jobs
+```
+
+Splitting the schedule across jobs works too and needs nothing here: `-sources` takes any subset, and each source keeps its own state, so a nightly `-sources wikidata,category` and a monthly `-sources overture` cooperate without knowing about each other. The job spec lives in the IaC repository rather than this one.
 
 Interrupting with Ctrl-C stops collecting but still stores what the sources returned: the persistence phase runs on its own context so a cancelled crawl does not discard an hour of work.
 
@@ -275,6 +316,8 @@ A display is taken as permanent when something says so — the entry's own text,
 
 Two readers run on every listing page. The first infers exhibitions from markup written for people, and is language-bound at every step; the second reads schema.org JSON-LD and `<time datetime>` attributes, which are ISO-8601 and identical in every language, and is believed over the first where it exists. Few sites publish either, but where they do the result is exact rather than inferred — reading them took the Technisches Museum Wien from 3 exhibitions to 15.
 
+
+**A site that has never listed anything is asked far less often.** The gallery admission above hands the sweep something like 136,000 sites whose only qualification is having a website worth reading, and most of them will turn out to be shops. At the ordinary two-month ceiling those shops would cost some 2,300 requests a day, forever, to confirm again that they list nothing. A site that has never produced a single exhibition falls to a six-month ceiling instead — a third of the traffic, aimed at small businesses' websites that never asked to be read. They are not parked: a gallery that starts exhibiting has no way to tell us, so the sweep keeps asking, just rarely. The moment one lists something it returns to the ordinary rhythm.
 ### `museum serve` — the HTTP API
 
 ```bash
@@ -537,19 +580,194 @@ No single catalogue is complete, and none is a superset of the others.
 | **Wikipedia categories** | `category` | tens of thousands | Museums with an English article that Wikidata has not typed as a museum |
 | **Wikipedia lists** | `lists` | ~7,000 | Museums *named* in a "List of museums in X" article but with no article of their own |
 | **OpenStreetMap** | `osm` | tens of thousands | Small local museums that never reached either wiki; mapped on the ground, so nearly all have coordinates |
+| **Public registers** | `registers` | 15,094 (13,878 US + 1,216 FR) | Museums a government lists because it funds or accredits them — the county museum with no article, no map pin and a website from 2009 |
+| **Overture Maps** | `overture` | ~270,000 across 231 countries | Commercial POI data, pooled and opened. The only source with an even footprint: it covers Lagos the way it covers Lyon |
 
-The first three are on by default. OSM is opt-in — much slower (one Overpass query per country) and its records are thinner.
+All but OSM are on by default. OSM is opt-in — much slower (one Overpass query per area, countries and territories alike) and its records are thinner.
+
+### Public registers
+
+The other three sources describe museums somebody chose to write about: Wikidata and Wikipedia hold what an editor thought notable, OpenStreetMap what a mapper stood in front of. A national register is a different kind of evidence — an administrative list, kept by the body that funds or accredits the institutions — and it is strongest exactly where the others are weakest.
+
+| Register | Museums | Licence |
+| --- | --- | --- |
+| [IMLS Museum Data Files](https://www.imls.gov/research-evaluation/data/museum-data-files) (United States) | 13,878 | Public domain — a work of the US government |
+| [Muséofile](https://www.data.gouv.fr/datasets/musees-de-france-base-museofile) (France) | 1,216 | Licence Ouverte 2.0 |
+
+It is also the cheapest source by an order of magnitude: **two HTTP requests for 15,094 museums in about four seconds**, against an hour of Overpass queries. 15,054 of them carry coordinates and 8,897 carry a website, which is the field the exhibition sweep runs on — so this is the source that most directly feeds `sweep`.
+
+Two things to know about it:
+
+**The American file is a 2018 snapshot and IMLS has said there will be no more.** It will slowly fill with museums that have since closed. That is a real cost, and the reason to accept it is that nothing else covers small American museums at all; a museum that closed in 2021 is a better catalogue entry than one that was never listed, and enrichment and the sweep are what find out which is which.
+
+**Only six of the nine IMLS disciplines are admitted** — art, children's, general, history, natural history and science, 13,878 of 30,178 rows. Left out: historical societies and historic preservation (14,785), botanical gardens and nature centres (1,029), and zoos and aquariums (465). That is the same line the OSM query draws at arts centres and archaeological sites — things that sit next to a museum without being one, which nothing downstream could tell apart afterwards. A historical society may well run a museum; the file does not say which do.
+
+### Overture Maps
+
+Every other source is, in part, a measurement of who writes things down. Wikidata holds what an editor thought notable, OpenStreetMap what a mapper stood in front of, and the registers exist only where a government publishes one. Overture is pooled commercial POI data, and its footprint is the most even of anything open.
+
+It is published as **10.5 GB of Parquet**, which is not something to download onto a Raspberry Pi every month. It does not have to be. Parquet is columnar, and a museum record needs eleven of its leaf columns. Measured over a full pass of release `2026-08-19.0`:
+
+| | |
+| --- | --- |
+| Whole release | 10.5 GB |
+| The columns this reads | **3.9 GB over 12,336 range requests, 31 minutes** (plus 0.2 GB for the alternate categories added since) |
+| Asking whether there is a new release at all | one request |
+
+Two details do most of that work. Places are points, so `bbox` gives the position and the `geometry` column — a third of the projection — is never transferred; the cost is that positions carry about seven digits rather than full precision, which is a tenth of a metre. And the reader fetches each row group's wanted column chunks by byte range, coalescing the ones that sit near each other: a single read-ahead window thrashes when parquet reads column by column, 380 MB per file against the 203 MB the columns actually occupy. `coalesceGap` in `reader.go` carries the measured trade-off between bytes and round trips.
+
+**What the first full pass found.** 275,277 records, all with coordinates and 72% with a website. Two things needed acting on.
+
+It reported nine museum categories the reader had never heard of — state, national, contemporary art, decorative arts, cartooning, costume, civilization, textile and photography museums, 2,922 in all, every one real. That counter exists so a source cannot quietly stop seeing a kind of museum, and it paid for itself on the first run.
+
+And 140,650 records — more than every other museum category put together — were `art_gallery`. That category holds two different things: a room that puts on exhibitions, and a shop that sells paintings. Telling them apart from the file alone turned out not to be possible, and trying is the wrong instinct anyway — a small gallery with a real programme and no Wikipedia article is exactly what this catalogue is for, so losing those to keep the shops out is a bad trade.
+
+So the question a gallery has to answer is not "are you a museum" but "is there any way to find out". Two things qualify one:
+
+- **A museum alternate category.** Overture's own second opinion: a gallery it also files as a contemporary art museum is the exhibiting kind. This is the strongest signal available without leaving the file, and it admits 23% of galleries.
+- **A website.** Not evidence of exhibiting — plenty of shops have one — but evidence that the question is answerable, because the sweep will read it. 97% of galleries have one, so this is barely a filter; it is a handover to the part of the pipeline that can actually tell.
+
+What is left out is the gallery with neither: no second opinion, no site, nothing that could ever be learned about it beyond a name and a pin.
+
+The consequence is deliberate and worth stating plainly: **galleries are about half of what this source contributes**, and until each one has been swept there is no way to tell the gem from the shop. Every one carries the class `art gallery` rather than `museum`, so anything wanting only museums can say so — and once the sweep has read them, the ones with an exhibition programme have exhibitions in the catalogue and the shops do not. That is the distinction worth filtering on, and it is evidence rather than a guess.
+
+(The taxonomy hierarchy looks like it should be the discriminator and is not: every `art_gallery` in the release sits under the same path, shops included.)
+
+`museum crawl -sources overture` on its own is the way to run it, and the scheduler below means the full crawl will not read it twice for one release.
+
+### Where the world is missing
+
+The catalogue is not evenly thin. Measured against Wikidata, which is the broadest of the sources:
+
+| | Museums in Wikidata |
+| --- | --- |
+| Italy | 8,924 |
+| **Africa, all 57 countries** | **1,201** |
+| India | 554 |
+| Kenya | 23 |
+| Ethiopia | 12 |
+| Somalia, Djibouti, Eritrea, Comoros | 1 each |
+
+This is not a gap the crawler can fix by trying harder at the same sources, and it is worth being precise about why, because each part of the world is missing for a different reason and has a different remedy.
+
+Overture changes this picture more than anything else here. Measured against Wikidata, per country:
+
+| | Wikidata | Overture |
+| --- | --- | --- |
+| South Africa | 155 | **1,419** |
+| Egypt | 155 | **637** |
+| Morocco | 72 | **318** |
+| Nigeria | 119 | **210** |
+| Kenya | 23 | **128** |
+| Tanzania | 0 | **52** |
+| Zimbabwe | 0 | **42** |
+| Zambia | 0 | **21** |
+| Cameroon | **83** | 33 |
+
+Not uniformly — Cameroon is better in Wikidata, and that is worth remembering before treating any one source as the answer — but Tanzania, Zimbabwe and Zambia go from nothing to something, and most of the continent improves severalfold.
+
+**Africa can also come from OpenStreetMap.** No Wikipedia edition in an African language has a museums-by-country tree — Swahili has no langlink for the English root at all — so the category crawl has nothing to walk. OSM is mapped on the ground and holds 58 museums in Kenya against Wikidata's 23. That is why `osm` is on by default despite being the slowest source by an order of magnitude: for one continent it is the only source there is.
+
+**Asia comes from the non-English editions.** Urdu, Arabic, Persian, Thai, Indonesian, Bengali, Vietnamese and Tamil each keep a museums-by-country tree, between 30 and 220 per-country subcategories apiece, covering regions no European edition reaches. They were added for exactly this and then left switched off by a default of `-languages en`; the default is now `all`.
+
+**The registers are a rich-country artefact, and must not become the backbone.** They exist because the United States and France run agencies that publish them. Searching for equivalents elsewhere: Japan's national facility dataset is licensed for non-commercial use only and cannot be redistributed here; South Korea's museum register requires a registered API key; no African country publishes a comparable register at all. So registers will keep making the countries that already have the best coverage look even better. They are worth having — 15,094 museums for two requests — but a catalogue that leaned on them would be measuring which governments publish open data, not where museums are.
+
+**A cut-short crawl must not always lose the same places.** The OSM walk is 244 Overpass queries and is routinely interrupted. Walked alphabetically, the tail that goes missing is always the same one, and it is Tanzania, Togo, Tunisia, Uganda, Vietnam, Yemen, Zambia, Zimbabwe. The walk now starts at a different area each day, so the loss moves around; the order is still deterministic, so a run is reproducible from its log.
 
 ### How records are merged
 
 Strongest evidence first:
 
 1. **Wikidata ID** — exact and authoritative. Both Wikipedia sources expose it via `pageprops`, and OSM often carries a `wikidata` tag, so this catches most of the overlap.
-2. **Normalised name + country** — punctuation, case and spacing ignored, so `Musée d'Orsay` and `Musee d Orsay` match. *Every* name a source supplied is tried, not just the primary one: OSM names a museum in the local language while Wikidata labels it in English, and without the alternatives the two records never meet. Surviving alternatives are kept as `also_known_as`.
+2. **Normalised name + country + town** — the stronger fallback, for the very common case of a name that is not unique within a country.
+3. **Normalised name + country** — punctuation, case and spacing ignored, so `Musée d'Orsay` and `Musee d Orsay` match. *Every* name a source supplied is tried, not just the primary one: OSM names a museum in the local language while Wikidata labels it in English, and without the alternatives the two records never meet. Surviving alternatives are kept as `also_known_as`.
 
-A name alone is never enough — without a known country the record stays separate, because "City Museum" names dozens of unrelated institutions. Coordinates are deliberately *not* used for matching: museum campuses put genuinely distinct museums metres apart.
+A name alone is never enough — without a known country the record stays separate, because "City Museum" names dozens of unrelated institutions.
 
-Later sources fill gaps without overwriting established facts, with one exception: Wikidata's `country` overrides one inferred by the category crawl, which derives it from an ancestor category and so gets satellites wrong (`Centre Pompidou Hanwha` sits under a French category but stands in South Korea).
+A match is then **vetoed** if the two records are more than 25 km apart. Coordinates are deliberately not used to *make* a match — museum campuses put genuinely distinct museums metres apart, so being close is no evidence of being the same — but being far apart is strong evidence of the opposite, and the veto is what stops the two dense sources doing real damage. Overture and the American register contribute some 200,000 records, almost none carrying a Wikidata ID, into countries with dozens of museums called "Heritage Museum"; matching on name and country alone folded the one in Portland and the one in Springfield into a single record holding one of the two positions, with nothing downstream able to tell. 25 km is generous on purpose: a geocoder that could only place a museum's town puts it at the town's centre, which in a rural district is several kilometres out.
+
+The town key earns its place immediately afterwards. Once two "Heritage Museum" records are correctly kept apart, the plain name key is poisoned as ambiguous — it now identifies neither — and every later record naming that museum is locked out of both. Keeping them apart is only half the job; a Wikidata record that names Portland has to reach the Portland one, or the catalogue is safe and useless.
+
+**What a merged record gains.** Later sources fill gaps without overwriting established facts: the website from whichever source has one, the position from whichever knows it, `also_known_as` accumulating every name any source used, and `sources` and `classes` unioned. That is the point of overlap rather than a cost of it — a museum found in Wikidata, Overture and the American register ends up with the Wikipedia article from one, the position and website from another, and its local-language name from a third.
+
+There is one exception to gap-filling: Wikidata's `country` overrides one inferred by the category crawl, which derives it from an ancestor category and so gets satellites wrong (`Centre Pompidou Hanwha` sits under a French category but stands in South Korea).
+
+---
+
+## Using the sources legally
+
+Everything here is collected from sources that permit it, at rates they
+publish, and served on under the terms they attach. Those are three separate
+obligations and this section is about all three, because getting any of them
+wrong is the kind of mistake that surfaces weeks later as a block.
+
+### Being identifiable
+
+Wikimedia's user-agent policy and Nominatim's usage policy both require a
+crawler to say who it is and how to reach whoever runs it. Set `MUSEUM_CONTACT`
+to an email address or a URL; it is composed into the User-Agent every source
+sees, and the crawler says so in its log on startup when it is unset.
+
+A contact nobody can reach is the same as none. Four clients used to carry
+their own constant naming `github.com/example/museum`, an address that does not
+exist — a placeholder passes review precisely because it looks like an answer.
+
+### Rates
+
+| Source | Rate | Enforced by |
+| --- | --- | --- |
+| Wikipedia action API | 5/s, backing off to 1 per 5s on `429` | one limiter shared across every edition and both wiki sources |
+| Wikidata Query Service | 1 per 1.2s | per-process limiter |
+| Overpass | 1 per 3s, three instances tried in turn | per-process limiter |
+| Nominatim | 1 per 1.1s, widening to 30s under refusal | per-process limiter, shared by the enricher's concurrent stages |
+| Museum websites | 1 per host per second, or the site's own `Crawl-delay` if longer | per-host, in the fetcher |
+
+The limiters are per *endpoint*, not per client object, which is the shape the
+rate limits themselves have. Two clients each honouring the interval
+independently run at twice it — that is how a crawl of "Lists of museums in the
+United States" was once thrown away.
+
+### robots.txt
+
+Museum websites are read through one fetcher, and it reads `robots.txt` first:
+the group naming this crawler where a site wrote one, the `*` group otherwise,
+`Allow`/`Disallow` with `*` and `$` wildcards, and `Crawl-delay`. A site with no
+`robots.txt` is crawlable, which is the convention.
+
+A site that refuses is **parked rather than retried**. A refusal is not a
+failure that might come good, and the sweep's failure path would otherwise ask
+it six more times on the way to the same answer.
+
+A `Crawl-delay` longer than 60 seconds is treated as a refusal too. A site
+asking for one request an hour has said no to a sweep of this shape, and
+honouring the number by holding a worker for an hour would not serve it either.
+
+### Licences, and what they ask of you
+
+| Source | Licence | Requires |
+| --- | --- | --- |
+| Wikidata | CC0 1.0 | nothing |
+| Wikipedia | CC BY-SA 4.0 | attribution, share-alike |
+| OpenStreetMap (incl. Nominatim geocoding) | ODbL 1.0 | attribution, share-alike |
+| Overture Maps places | CDLA Permissive 2.0 | attribution |
+| IMLS museum file (US) | public domain, a US government work | nothing; acknowledgement asked for and given |
+| Muséofile (FR) | Licence Ouverte 2.0 | attribution |
+| Museum websites | listings recorded as facts, with the page they came from | — |
+
+Several of these require a credit wherever the data is shown, and the catalogue
+mixes them per record, so the credit is derived per record rather than declared
+once. Every `/v1/museums` response carries an `attribution` array covering the
+sources that page actually drew on, `/v1/attribution` states the whole set, and
+the map credits its data as well as its tiles.
+
+Note the one that is easy to miss: an **approximate position carries ODbL**
+however the museum was found. It is a position Nominatim supplied, and Nominatim
+geocodes against OpenStreetMap — so a page of CC0 Wikidata records placed by the
+geocoder is ODbL data all the same.
+
+If you serve these records on, you take on the same obligations. That is what
+`/v1/attribution` is for: it is machine-readable so a client can comply without
+guessing.
 
 ---
 
@@ -958,8 +1176,11 @@ That means cross-site reuse fires zero per cent of the time on this sample — f
 | `KAFKA_BROKER_LOCAL` | Bootstrap the app uses |
 | `KAFKA_TOPIC` | Topic MinIO publishes to and `enrich` reads |
 | `KAFKA_GROUP_ID` | Consumer group for `enrich` |
+| `MUSEUM_CONTACT` | **Set this.** An email address or URL that reaches whoever runs the crawler, composed into the User-Agent every source sees |
+| `MUSEUM_USER_AGENT` | Replaces the composed header outright |
 | `NOMINATIM_USER_AGENT` | Sent to Nominatim, which rejects generic agents |
 | `WIKIDATA_USER_AGENT` | Sent to the Wikidata Query Service |
+| `WIKIPEDIA_USER_AGENT` | Sent to the Wikipedia action API |
 | `OVERPASS_USER_AGENT` | Sent to the Overpass API |
 | `EXHIBITIONS_USER_AGENT` | Sent when reading museum websites |
 
@@ -1052,7 +1273,7 @@ go test ./internal/harvest/ -run TestLiveCompile -harvest.live -v -timeout 50m
 
 ## Notes
 
-- Country extraction is heuristic, from page and category titles. `pkg/geo` recognises UN member states plus the naming variants Wikipedia uses interchangeably.
+- Country extraction is heuristic, from page and category titles. `pkg/geo` recognises UN member states, the 44 territories that have their own ISO 3166-1 code and their own museums (Wikidata attributes 22 to the Isle of Man, 22 to Greenland, 21 to Jersey), and the naming variants Wikipedia uses interchangeably.
 - Object keys are slugs: lowercased, non-alphanumeric runs collapsed to dashes, accents preserved. Two museums in one country whose names slugify identically collide, and the second is skipped — measured at 1 in 3,970 on German museums (0.03%).
 
 ## License

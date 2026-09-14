@@ -13,19 +13,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"museum/pkg/useragent"
 )
 
 const (
 	// endpoint is the public SPARQL endpoint.
 	endpoint = "https://query.wikidata.org/sparql"
-
-	// defaultUserAgent identifies this client. The query service blocks
-	// requests with a generic agent, and asks for contact details.
-	defaultUserAgent = "museum-pipeline/1.0 (https://github.com/example/museum)"
 
 	// minRequestInterval keeps the crawl within the query service's fair-use
 	// expectations for anonymous clients.
@@ -47,15 +44,13 @@ type Client struct {
 }
 
 // NewClient returns a Client with rate limiting and a descriptive user agent.
-// Set WIKIDATA_USER_AGENT to supply your own contact details.
+// The query service blocks requests carrying a generic agent and Wikimedia's
+// user-agent policy asks for contact details, which useragent composes from
+// MUSEUM_CONTACT; WIKIDATA_USER_AGENT still overrides the whole header.
 func NewClient() *Client {
-	agent := os.Getenv("WIKIDATA_USER_AGENT")
-	if agent == "" {
-		agent = defaultUserAgent
-	}
 	return &Client{
 		httpClient: &http.Client{Timeout: queryTimeout},
-		userAgent:  agent,
+		userAgent:  useragent.For("museum catalogue", "WIKIDATA_USER_AGENT"),
 		endpoint:   endpoint,
 	}
 }

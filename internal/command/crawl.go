@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -11,10 +12,13 @@ import (
 	"time"
 
 	"museum/internal/collect"
+	"museum/internal/crawlstate"
 	"museum/internal/models"
 	"museum/internal/postgres"
 	"museum/pkg/graceful"
 	"museum/pkg/osm"
+	"museum/pkg/overture"
+	"museum/pkg/registers"
 	"museum/pkg/wikidata"
 	"museum/pkg/wikipedia"
 )
@@ -31,21 +35,46 @@ func crawlCommand() Command {
 	return Command{
 		Name:    "crawl",
 		Summary: "Build the catalogue from Wikidata, Wikipedia and OpenStreetMap",
-		Usage:   "[-sources wikidata,category,lists,osm]",
+		Usage:   "[-sources wikidata,category,lists,osm,registers,overture|all]",
 		Run:     runCrawl,
 	}
 }
 
 func runCrawl(ctx context.Context, args []string) error {
-	fs := newFlagSet("crawl", "[-sources wikidata,category,lists,osm] [-languages en,es,…]", os.Stderr)
-	sources := fs.String("sources", "wikidata,category,lists",
-		"comma-separated sources: wikidata, category, lists, osm")
-	// English only by default. Every extra edition is a full category walk and
-	// roughly doubles the crawl's Wikipedia traffic, so widening coverage is a
-	// decision to make deliberately rather than something a routine crawl does
-	// by accident. "all" is the shorthand for every edition known.
-	languages := fs.String("languages", wikipedia.DefaultLanguage,
+	fs := newFlagSet("crawl", "[-sources wikidata,category,lists,osm,registers,overture|all] [-languages en,es,…]", os.Stderr)
+	// Everything, by default.
+	//
+	// Both of these used to be narrowed — osm off, English only — on the
+	// reasoning that widening the crawl doubles its traffic and should be a
+	// deliberate act. What that defaulted to in practice was a catalogue of
+	// the places the English-speaking world writes about. The two switches
+	// left off are precisely the ones that cover everywhere else:
+	//
+	// OpenStreetMap is the only source that reaches Africa at all. Wikidata
+	// holds 1,201 museums for the whole continent across 57 countries — one
+	// each for Somalia, Djibouti, Eritrea and the Comoros — and no Wikipedia
+	// edition has a museums-by-country tree in an African language, so the
+	// category crawl cannot help either. OSM has 58 in Kenya against
+	// Wikidata's 23.
+	//
+	// The eighteen non-English editions do the same job for Asia: Urdu,
+	// Arabic, Persian, Thai, Indonesian, Bengali, Vietnamese and Tamil were
+	// added to this crawl for exactly that reason and then left switched off
+	// by a default of "en".
+	//
+	// So the default is now everything, and narrowing is the deliberate act:
+	// -sources wikidata,category,lists,registers -languages en is the old
+	// behaviour, and it is the right thing to run when what you want is a
+	// quick crawl rather than a complete one.
+	sources := fs.String("sources", "all",
+		"comma-separated sources: wikidata, category, lists, osm, registers, overture; or \"all\"")
+	languages := fs.String("languages", "all",
 		"comma-separated Wikipedia editions for the category source, or \"all\"")
+	// -force is for the two cases the cadence cannot know about: a source whose
+	// reader has been changed and should be re-run against unchanged upstream
+	// data, and a first crawl into an empty bucket that inherited somebody
+	// else's state.
+	force := fs.Bool("force", false, "read every selected source even if it is not due or has not changed")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -76,6 +105,18 @@ func runCrawl(ctx context.Context, args []string) error {
 	}
 
 	start := time.Now()
+
+	// What is worth running, decided before anything starts: a source that is
+	// not due, or that has already been read at its current version, costs a
+	// listing request here rather than a download later.
+	keeper := crawlstate.NewKeeper(store, bucket)
+	enabled, versions := plan(ctx, enabled, keeper, *force, start)
+	if len(enabled) == 0 {
+		log.Printf("Nothing due: every selected source has been read recently and has nothing new. " +
+			"Pass -force to read them anyway.")
+		return nil
+	}
+
 	log.Printf("Crawling sources: %s", strings.Join(enabled, ", "))
 	if contains(enabled, "category") {
 		log.Printf("Wikipedia editions: %s", strings.Join(editions, ", "))
@@ -88,9 +129,27 @@ func runCrawl(ctx context.Context, args []string) error {
 	saver := newCheckpointer(ctx)
 	defer saver.close()
 
+	// Per-source counts, so the state each source leaves behind records what it
+	// actually produced. A source that has quietly stopped finding anything is
+	// otherwise indistinguishable from one that ran fine.
+	var (
+		countMu sync.Mutex
+		counts  = map[string]int{}
+	)
+	known := &registerVersions{keeper: keeper}
+
 	merger := collect.NewMerger()
-	collectSources(ctx, enabled, editions, merger, saver.add)
+	collectSources(ctx, enabled, editions, merger, func(museum models.Museum) {
+		saver.add(museum)
+		if len(museum.Sources) > 0 {
+			countMu.Lock()
+			counts[museum.Sources[0]]++
+			countMu.Unlock()
+		}
+	}, versions, known)
 	saver.flush()
+
+	recordState(ctx, keeper, enabled, versions, counts, known, start)
 
 	distinct, folded := merger.Stats()
 	log.Printf("Collected %d distinct museums (%d records merged across sources) in %s",
@@ -367,7 +426,74 @@ func loadIntoDatabase(ctx context.Context, museums []models.Museum) {
 // The category source runs once per language edition. Those crawls are the only
 // way to reach the museums English Wikipedia has no article for, which is most
 // of them: 35,352 against 19,802.
-func collectSources(ctx context.Context, enabled, languages []string, merger *collect.Merger, onMuseum func(models.Museum)) {
+// recordState writes down what each source that ran found, so the next crawl
+// can decide whether to run it at all.
+//
+// Failing to record is logged and no more: the crawl's own output is already
+// written by this point, and losing the bookkeeping costs one unnecessary run
+// rather than any data.
+func recordState(ctx context.Context, keeper *crawlstate.Keeper, ran []string,
+	versions map[string]string, counts map[string]int, known *registerVersions, now time.Time) {
+
+	for _, name := range ran {
+		state := crawlstate.Ran(keeper.Load(ctx, name), versions[name], counts[name], now)
+
+		// The registers source has a version per register rather than one for
+		// the source, since they change independently.
+		if name == "registers" {
+			for register, version := range known.Versions() {
+				state = state.WithVersion(register, version)
+			}
+		}
+
+		if err := keeper.Save(ctx, state); err != nil {
+			log.Printf("could not record state for source %q: %v", name, err)
+		}
+	}
+}
+
+// registerVersions collects the validators the registers source reports as it
+// reads each file, so the crawl can offer them back next time.
+//
+// One lock because the registers source runs in its own goroutine alongside
+// four others, and the crawl reads what it collected once they have all
+// finished.
+type registerVersions struct {
+	keeper *crawlstate.Keeper
+
+	mu      sync.Mutex
+	seen    map[string]string
+	changed bool
+}
+
+// Load returns what a source left behind.
+func (r *registerVersions) Load(ctx context.Context, source string) crawlstate.State {
+	return r.keeper.Load(ctx, source)
+}
+
+// Record notes the validator one register is now serving.
+func (r *registerVersions) Record(source, version string, changed bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.seen == nil {
+		r.seen = map[string]string{}
+	}
+	if version != "" {
+		r.seen[source] = version
+	}
+	r.changed = r.changed || changed
+}
+
+// Versions returns what was collected.
+func (r *registerVersions) Versions() map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return maps.Clone(r.seen)
+}
+
+func collectSources(ctx context.Context, enabled, languages []string, merger *collect.Merger, onMuseum func(models.Museum),
+	versions map[string]string, known *registerVersions) {
 	var wg sync.WaitGroup
 
 	// One Wikipedia client for every source that needs one, so they share both
@@ -388,7 +514,7 @@ func collectSources(ctx context.Context, enabled, languages []string, merger *co
 
 	for _, name := range enabled {
 		if name != "category" {
-			run(name, func() <-chan models.Museum { return museumsFrom(ctx, name, wiki) })
+			run(name, func() <-chan models.Museum { return museumsFrom(ctx, name, wiki, versions, known) })
 			continue
 		}
 		for _, lang := range languages {
@@ -528,7 +654,8 @@ func applyDetails(m models.Museum, d wikidata.Details) models.Museum {
 // outright. The client's limiter is process-wide now, so a shared client is
 // belt and braces rather than the fix itself — but it also shares connections,
 // which is what a single logical crawler should do.
-func museumsFrom(ctx context.Context, name string, wiki *wikipedia.Client) <-chan models.Museum {
+func museumsFrom(ctx context.Context, name string, wiki *wikipedia.Client,
+	versions map[string]string, known *registerVersions) <-chan models.Museum {
 	switch name {
 	case "wikidata":
 		return wikidata.NewService(wikidata.NewClient()).Museums(ctx)
@@ -539,6 +666,15 @@ func museumsFrom(ctx context.Context, name string, wiki *wikipedia.Client) <-cha
 
 	case "osm":
 		return osm.NewService(osm.NewClient()).Museums(ctx)
+
+	case "registers":
+		service := registers.NewService()
+		service.Known = known.Load(ctx, "registers").Versions
+		service.Seen = known.Record
+		return service.Museums(ctx)
+
+	case "overture":
+		return overture.NewService(nil).Museums(ctx, versions["overture"])
 
 	case "lists":
 		svc := wikipedia.NewCategoryService(wiki)
@@ -576,9 +712,93 @@ func parseLanguages(raw string) []string {
 	return editions
 }
 
+// allSources is every source, in the order a crawl should start them.
+var allSources = []string{"wikidata", "category", "lists", "osm", "registers", "overture"}
+
+// sourceCadence is how long each source's last read stays good enough.
+//
+// They do not go stale at the same rate and it is not close. Wikidata is
+// edited every minute; the American museum register was last updated in 2018
+// and its publisher has said it never will be again. Running everything weekly
+// means reading two gigabytes of Overture eleven times a year to find eleven
+// copies of what we already had, and running everything monthly means a
+// Wikipedia edit waits a month.
+//
+// The cadence is only the first of two questions — a source that is due is
+// then asked whether it has anything new, where it can answer cheaply — so
+// these are deliberately not conservative. Being due costs a request, not a
+// crawl.
+var sourceCadence = map[string]time.Duration{
+	// Continuously edited, and the cheapest of the API sources per museum.
+	"wikidata": 7 * 24 * time.Hour,
+	"category": 7 * 24 * time.Hour,
+	// List articles are edited far less often than the articles they link to.
+	"lists": 14 * 24 * time.Hour,
+	// Continuously edited, but 244 Overpass queries against a service that asks
+	// for a light touch. Fortnightly is the compromise.
+	"osm": 14 * 24 * time.Hour,
+	// Published files. Both answer a conditional request, so a due run that
+	// finds nothing new costs two round trips.
+	"registers": 30 * 24 * time.Hour,
+	// Overture releases monthly and never rewrites a release.
+	"overture": 30 * 24 * time.Hour,
+}
+
+// plan decides which sources to run and, where a source can say so cheaply,
+// what version of the upstream it would be reading.
+//
+// Both checks happen before any source starts, so a crawl that has nothing to
+// do says so in a second rather than discovering it a gigabyte in.
+func plan(ctx context.Context, enabled []string, keeper *crawlstate.Keeper, force bool, now time.Time) ([]string, map[string]string) {
+	var runnable []string
+	versions := make(map[string]string, len(enabled))
+
+	for _, name := range enabled {
+		state := keeper.Load(ctx, name)
+
+		if !force && !crawlstate.Due(state, sourceCadence[name], now) {
+			log.Printf("source %q: read %s ago, next due %s — skipping",
+				name, now.Sub(state.LastRunAt).Round(time.Hour),
+				crawlstate.NextDue(state, sourceCadence[name]).Format(time.DateOnly))
+			continue
+		}
+
+		// Overture is the one source that can be asked "is there anything new"
+		// for the price of a single listing request, and the one where the
+		// answer is worth the most: a release is 2 GB of transfer and an hour
+		// of parsing, and eleven months in twelve the answer is no.
+		if name == "overture" {
+			release, err := overture.NewService(nil).LatestRelease(ctx)
+			switch {
+			case err != nil:
+				log.Printf("source %q: cannot read the release listing (%v) — running anyway", name, err)
+			case release == state.Version && !force:
+				log.Printf("source %q: release %s is the one already read — skipping", name, release)
+				continue
+			default:
+				versions[name] = release
+			}
+		}
+
+		runnable = append(runnable, name)
+	}
+	return runnable, versions
+}
+
 // parseSources validates and de-duplicates the -sources flag.
+//
+// "all" selects every source, which is what -languages already means by it.
+// Worth a word of its own because the widest crawl is the one most likely to be
+// asked for and was the one hardest to type: the full list had to be written
+// out, and a source added later would not reach anyone who had written it out
+// somewhere.
 func parseSources(raw string) []string {
-	known := map[string]bool{"wikidata": true, "category": true, "lists": true, "osm": true}
+	known := map[string]bool{"wikidata": true, "category": true, "lists": true,
+		"osm": true, "registers": true, "overture": true}
+
+	if strings.EqualFold(strings.TrimSpace(raw), "all") {
+		return slices.Clone(allSources)
+	}
 
 	var enabled []string
 	for _, name := range strings.Split(raw, ",") {

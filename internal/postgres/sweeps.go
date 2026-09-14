@@ -29,7 +29,11 @@ const targetColumns = `
        coalesce(s.listing_url,''), coalesce(s.etag,''), coalesce(s.last_modified,''),
        coalesce(s.fingerprint,''),
        s.interval_hours, s.consecutive_failures,
-       (s.last_success_at IS NULL) AS never_read`
+       (s.last_success_at IS NULL) AS never_read,
+       -- Whether this site has ever produced an exhibition. last_change_at is
+       -- only set by a read that found something different from nothing, so a
+       -- site that has never listed anything still has it null.
+       (s.last_change_at IS NOT NULL) AS ever_listed`
 
 // targetJoin attaches the museum a site's listings are attributed to: the most
 // prominent one published on it, since museums share websites.
@@ -165,12 +169,13 @@ func scanTargets(rows pgx.Rows) ([]sweep.Target, error) {
 			lat, lon      *float64
 			intervalHours float64
 			failures      int
+			everListed    bool
 		)
 		if err := rows.Scan(&site.Site, &site.Museum.Name, &site.Museum.Country,
 			&site.Museum.Locality, &site.Museum.Website, &site.Museum.WikidataID,
 			&lat, &lon,
 			&site.ListingURL, &site.ETag, &site.LastModified, &site.Fingerprint,
-			&intervalHours, &failures, &site.NeverRead,
+			&intervalHours, &failures, &site.NeverRead, &everListed,
 		); err != nil {
 			return nil, fmt.Errorf("scan site: %w", err)
 		}
@@ -180,6 +185,7 @@ func scanTargets(rows pgx.Rows) ([]sweep.Target, error) {
 		site.State = sweep.State{
 			Interval:            time.Duration(intervalHours * float64(time.Hour)),
 			ConsecutiveFailures: failures,
+			EverListed:          everListed,
 		}
 		targets = append(targets, site)
 	}
@@ -235,7 +241,10 @@ ON CONFLICT (site) DO UPDATE SET
     due_reason     = EXCLUDED.due_reason,
     parked_reason  = EXCLUDED.parked_reason`
 
-	succeeded := record.Outcome != sweep.Failed
+	// An excluded site was not read, so it has no success to record; naming the
+	// outcomes that count as one keeps a new outcome from silently joining
+	// them.
+	succeeded := record.Outcome == sweep.Changed || record.Outcome == sweep.Unchanged
 	changed := record.Outcome == sweep.Changed
 
 	var parked string

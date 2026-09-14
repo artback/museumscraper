@@ -419,3 +419,132 @@ func TestMerger_ArticleWithoutAnIdentifierStaysSeparate(t *testing.T) {
 		t.Fatalf("got %d museums, want 2: an unidentified article cannot be folded by name", len(museums))
 	}
 }
+
+// TestMerger_SameNameDifferentTownsStayApart is the failure the dense sources
+// make ordinary. Overture contributes about 190,000 museums and the American
+// register 13,878, almost none carrying a Wikidata id, into countries with
+// dozens of museums called "Heritage Museum" — and a name-and-country match
+// folded them into one record holding one of the two positions, with nothing
+// downstream able to tell that it had happened.
+func TestMerger_SameNameDifferentTownsStayApart(t *testing.T) {
+	m := NewMerger()
+
+	m.Add(models.Museum{Name: "Heritage Museum", Country: "United States", Locality: "Portland",
+		Latitude: 45.52, Longitude: -122.67, Sources: []string{"overture"}})
+	m.Add(models.Museum{Name: "Heritage Museum", Country: "United States", Locality: "Springfield",
+		Latitude: 39.79, Longitude: -89.64, Sources: []string{"overture"}})
+
+	if distinct, _ := m.Stats(); distinct != 2 {
+		t.Fatalf("distinct = %d, want 2 — two museums 2,700 km apart are not one museum", distinct)
+	}
+}
+
+// TestMerger_EnrichesTheRightOneOfTwoSameNamedMuseums: keeping them apart is
+// only half of it. A later record naming the same town has to reach the right
+// one of the two, or the catalogue is safe and useless.
+func TestMerger_EnrichesTheRightOneOfTwoSameNamedMuseums(t *testing.T) {
+	m := NewMerger()
+
+	m.Add(models.Museum{Name: "Heritage Museum", Country: "United States", Locality: "Portland",
+		Latitude: 45.52, Longitude: -122.67, Sources: []string{"overture"}})
+	m.Add(models.Museum{Name: "Heritage Museum", Country: "United States", Locality: "Springfield",
+		Latitude: 39.79, Longitude: -89.64, Sources: []string{"overture"}})
+
+	// Wikidata knows the Portland one, and brings what only it has. It carries
+	// no coordinates, which is the common case for the wiki sources.
+	m.Add(models.Museum{Name: "Heritage Museum", Country: "United States", Locality: "Portland",
+		WikidataID: "Q123", Website: "https://heritage-portland.example", Verified: true,
+		Sources: []string{"wikidata"}})
+
+	distinct, merged := m.Stats()
+	if distinct != 2 || merged != 1 {
+		t.Fatalf("distinct = %d, merged = %d, want 2 and 1", distinct, merged)
+	}
+
+	for _, museum := range m.Museums() {
+		switch museum.Locality {
+		case "Portland":
+			if museum.WikidataID != "Q123" || museum.Website == "" || !museum.Verified {
+				t.Errorf("Portland was not enriched: %+v", museum)
+			}
+			if !slices.Equal(museum.Sources, []string{"overture", "wikidata"}) {
+				t.Errorf("Portland sources = %v, want both", museum.Sources)
+			}
+			if !museum.HasCoordinates() {
+				t.Error("Portland lost the position Overture gave it")
+			}
+		case "Springfield":
+			if museum.WikidataID != "" {
+				t.Errorf("Springfield was given Portland's identity: %+v", museum)
+			}
+		default:
+			t.Errorf("unexpected record: %+v", museum)
+		}
+	}
+}
+
+// TestMerger_DistanceOnlyVetoesWhenBothSidesKnowWhereTheyAre: most wiki records
+// carry no coordinates, so the veto must not turn into a requirement.
+func TestMerger_DistanceOnlyVetoesWhenBothSidesKnowWhereTheyAre(t *testing.T) {
+	m := NewMerger()
+
+	m.Add(models.Museum{Name: "Musée Unique", Country: "France", Sources: []string{"wikidata"}})
+	m.Add(models.Museum{Name: "Musée Unique", Country: "France",
+		Latitude: 48.86, Longitude: 2.33, Sources: []string{"overture"}})
+
+	distinct, merged := m.Stats()
+	if distinct != 1 || merged != 1 {
+		t.Errorf("distinct = %d, merged = %d, want 1 and 1", distinct, merged)
+	}
+	if got := m.Museums()[0]; !got.HasCoordinates() {
+		t.Error("the position from the source that had one was lost")
+	}
+}
+
+// TestMerger_NearbyRecordsStillMerge: sources disagree about where a museum is
+// by more than one would think — a geocoder that could only place the town puts
+// the museum at the town's centre — so the veto has to be generous.
+func TestMerger_NearbyRecordsStillMerge(t *testing.T) {
+	m := NewMerger()
+
+	m.Add(models.Museum{Name: "Village Museum", Country: "Kenya", Locality: "Nairobi",
+		Latitude: -1.2864, Longitude: 36.8172, Sources: []string{"wikidata"}})
+	// The same museum, placed at the town centre a few kilometres away.
+	m.Add(models.Museum{Name: "Village Museum", Country: "Kenya", Locality: "Nairobi",
+		Latitude: -1.3200, Longitude: 36.8500, Sources: []string{"overture"}})
+
+	if distinct, _ := m.Stats(); distinct != 1 {
+		t.Errorf("distinct = %d, want 1 — a few kilometres is source disagreement, not a different museum", distinct)
+	}
+}
+
+// TestMerger_LocalityDoesNotMergeAcrossCountries: the locality key is stronger
+// than the name key, so it must not be looser about anything else.
+func TestMerger_LocalityDoesNotMergeAcrossCountries(t *testing.T) {
+	m := NewMerger()
+
+	m.Add(models.Museum{Name: "City Museum", Country: "Canada", Locality: "London",
+		Sources: []string{"overture"}})
+	m.Add(models.Museum{Name: "City Museum", Country: "United Kingdom", Locality: "London",
+		Sources: []string{"wikidata"}})
+
+	if distinct, _ := m.Stats(); distinct != 2 {
+		t.Errorf("distinct = %d, want 2 — London, Ontario is not London, England", distinct)
+	}
+}
+
+// TestMerger_DifferentWikidataIDsStillNeverMerge: the id disagreement check
+// used to return outright rather than trying the next key; now that it
+// continues, make sure it still refuses.
+func TestMerger_DifferentWikidataIDsStillNeverMerge(t *testing.T) {
+	m := NewMerger()
+
+	m.Add(models.Museum{Name: "National Museum", Country: "France", Locality: "Paris",
+		WikidataID: "Q1", Sources: []string{"wikidata"}})
+	m.Add(models.Museum{Name: "National Museum", Country: "France", Locality: "Paris",
+		WikidataID: "Q2", Sources: []string{"wikidata"}})
+
+	if distinct, _ := m.Stats(); distinct != 2 {
+		t.Errorf("distinct = %d, want 2 — two explicit identities disagreeing", distinct)
+	}
+}

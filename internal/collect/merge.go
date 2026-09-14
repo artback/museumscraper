@@ -4,6 +4,7 @@ package collect
 
 import (
 	"html"
+	"math"
 	"regexp"
 	"slices"
 	"strings"
@@ -30,7 +31,10 @@ import (
 //
 // Coordinates are deliberately not used for matching: museum campuses and
 // museum-within-a-building cases put genuinely distinct museums within metres
-// of each other, and a proximity rule merges them wrongly.
+// of each other, and a proximity rule merges them wrongly. They are used the
+// other way round — to veto a name match between records that are demonstrably
+// in different places — because while being close is no evidence of being the
+// same museum, being far apart is good evidence of not being one.
 //
 // A Merger is safe for concurrent use so several source goroutines can feed it.
 type Merger struct {
@@ -88,6 +92,16 @@ func (m *Merger) lookup(museum models.Museum, keys []string) (int, bool) {
 			return idx, true
 		}
 	}
+	// The stronger key first: a name, a country and a town. Two museums of the
+	// same name in one country is ordinary — the United States has dozens of
+	// Heritage Museums — and the plain name key is poisoned as ambiguous the
+	// moment a second one appears, which then blocks every later record from
+	// joining either. Naming the town rescues exactly those: the sources that
+	// cannot agree on a name usually do agree on where the place is.
+	if idx, ok := m.match(museum, localityKeys(museum)); ok {
+		return idx, true
+	}
+
 	for _, key := range keys {
 		// A name more than one museum answers to identifies none of them.
 		// Aliases are matched on as well as primary names, and some aliases are
@@ -100,18 +114,79 @@ func (m *Merger) lookup(museum models.Museum, keys []string) (int, bool) {
 		if _, shared := m.ambiguous[key]; shared {
 			continue
 		}
-		idx, ok := m.byName[key]
-		if !ok {
-			continue
-		}
-		// Never merge two records that carry different Wikidata ids: a name
-		// match is weaker evidence than an explicit disagreement.
-		existing := m.museums[idx]
-		if existing.WikidataID == "" || museum.WikidataID == "" || existing.WikidataID == museum.WikidataID {
+		if idx, ok := m.match(museum, []string{key}); ok {
 			return idx, true
 		}
 	}
 	return 0, false
+}
+
+// match finds a stored record under any of the given keys that museum could be
+// the same museum as.
+func (m *Merger) match(museum models.Museum, keys []string) (int, bool) {
+	for _, key := range keys {
+		idx, ok := m.byName[key]
+		if !ok {
+			continue
+		}
+		existing := m.museums[idx]
+
+		// Never merge two records that carry different Wikidata ids: a name
+		// match is weaker evidence than an explicit disagreement.
+		if existing.WikidataID != "" && museum.WikidataID != "" && existing.WikidataID != museum.WikidataID {
+			continue
+		}
+		// Nor two that are demonstrably in different places.
+		if farApart(*existing, museum) {
+			continue
+		}
+		return idx, true
+	}
+	return 0, false
+}
+
+// maxSeparationKm is how far apart two records of the same name may be and
+// still be taken for the same museum.
+//
+// Generous, because sources disagree about where a museum is by more than one
+// would think: a Wikidata coordinate and an OSM node differ by metres, but a
+// geocoder that could only place the museum's town puts it at the town's
+// centre, which in a rural district is a good few kilometres out. Twenty-five
+// kilometres is past all of that and still nowhere near the distance between
+// two towns that happen to have a museum of the same name.
+const maxSeparationKm = 25
+
+// farApart reports whether two records are too far apart to be one museum.
+//
+// This is the opposite of matching on proximity, which this package refuses to
+// do and for good reason — a museum campus puts genuinely distinct museums
+// metres apart, so being close is no evidence of being the same. Being far
+// apart is evidence of the opposite, and it is strong: the same name in two
+// places is one of the most ordinary things in this data. The United States has
+// a Heritage Museum in Portland and a Heritage Museum in Springfield, and
+// without this they became one record holding one of the two positions, with
+// nothing downstream able to tell.
+//
+// Only decisive when both sides know where they are. Most records from the
+// wiki sources do not, which is why this vetoes a match rather than making one.
+func farApart(a, b models.Museum) bool {
+	if !a.HasCoordinates() || !b.HasCoordinates() {
+		return false
+	}
+	return distanceKm(a.Latitude, a.Longitude, b.Latitude, b.Longitude) > maxSeparationKm
+}
+
+// distanceKm returns the great-circle distance between two points.
+func distanceKm(lat1, lon1, lat2, lon2 float64) float64 {
+	const earthRadiusKm = 6371.0
+	rad := math.Pi / 180
+
+	dLat := (lat2 - lat1) * rad
+	dLon := (lon2 - lon1) * rad
+
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1*rad)*math.Cos(lat2*rad)*math.Sin(dLon/2)*math.Sin(dLon/2)
+	return 2 * earthRadiusKm * math.Asin(math.Min(1, math.Sqrt(a)))
 }
 
 // index records the lookup keys pointing at a stored museum.
@@ -119,7 +194,7 @@ func (m *Merger) index(idx int, museum models.Museum, keys []string) {
 	if museum.WikidataID != "" {
 		m.byWikidata[museum.WikidataID] = idx
 	}
-	for _, key := range append(keys, nameKeys(museum)...) {
+	for _, key := range slices.Concat(keys, nameKeys(museum), localityKeys(museum)) {
 		switch owner, taken := m.byName[key]; {
 		case !taken:
 			m.byName[key] = idx
@@ -293,6 +368,36 @@ func nameKeys(museum models.Museum) []string {
 			continue
 		}
 		key := normalized + "\x00" + country
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// localityKeys builds the stronger matching keys: each name, the country, and
+// the town the museum is in.
+//
+// Empty when the record does not say where it is, which is most of what the
+// wiki sources produce — these keys add matches rather than replacing the
+// weaker ones.
+func localityKeys(museum models.Museum) []string {
+	locality := normalizeForMatch(museum.Locality)
+	if locality == "" || !known(museum.Country) {
+		return nil
+	}
+	country := normalizeForMatch(museum.Country)
+
+	var keys []string
+	seen := make(map[string]struct{})
+	for _, name := range append([]string{museum.Name}, museum.AlsoKnownAs...) {
+		normalized := normalizeForMatch(name)
+		if normalized == "" {
+			continue
+		}
+		key := normalized + "\x00" + country + "\x00" + locality
 		if _, dup := seen[key]; dup {
 			continue
 		}

@@ -16,12 +16,15 @@ func days(n float64) time.Duration { return time.Duration(n * float64(24*time.Ho
 // costing a weekly request.
 func TestNext_SettlesOnASiteThatNeverChanges(t *testing.T) {
 	now := at(2026, time.August, 1)
-	state := State{}
+	// A museum with a programme it does not change, which is a different thing
+	// from a site that has never listed one at all — see BarrenInterval.
+	state := State{EverListed: true}
 
 	var sweeps int
 	for range 20 {
 		plan := Next(state, Unchanged, nil, now)
 		state.Interval = plan.Interval
+		state.EverListed = true
 		sweeps++
 	}
 
@@ -175,5 +178,77 @@ func TestNext_RecoveryClearsTheFailureCount(t *testing.T) {
 	}
 	if plan.Park {
 		t.Error("a site that answered should not be parked")
+	}
+}
+
+// TestNextParksAnExcludedSiteImmediately: a site whose robots.txt forbids the
+// crawl is not a site that might come good. Working it through the failure
+// backoff would ask it five more times on the way to the same answer.
+func TestNextParksAnExcludedSiteImmediately(t *testing.T) {
+	now := time.Now()
+	plan := Next(State{Interval: 7 * 24 * time.Hour}, Excluded, nil, now)
+
+	if !plan.Park {
+		t.Error("an excluded site was not parked")
+	}
+	if plan.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d, want 0: a refusal is not a failure", plan.ConsecutiveFailures)
+	}
+	if plan.DueAt.Before(now.Add(MaxInterval)) {
+		t.Errorf("DueAt = %s, want at least MaxInterval out", plan.DueAt.Sub(now))
+	}
+}
+
+// TestNext_ASiteThatHasNeverListedAnythingFallsToTheBarrenCeiling.
+//
+// Admitting Overture's art galleries brings in something like 136,000 sites
+// whose only qualification is having a website worth reading — which is the
+// point, because a small gallery with a real programme and no Wikipedia
+// article is what this catalogue is for. Most will turn out to be shops. At
+// the ordinary ceiling those shops cost some 2,300 requests a day, forever, to
+// confirm again that they list nothing.
+func TestNext_ASiteThatHasNeverListedAnythingFallsToTheBarrenCeiling(t *testing.T) {
+	now := at(2026, time.August, 1)
+	state := State{} // never listed an exhibition
+
+	for range 30 {
+		state.Interval = Next(state, Unchanged, nil, now).Interval
+	}
+
+	if state.Interval != BarrenInterval {
+		t.Errorf("interval settled at %s, want the barren ceiling %s", state.Interval, BarrenInterval)
+	}
+	if plan := Next(state, Unchanged, nil, now); plan.Park {
+		t.Error("a barren site was parked — a gallery that starts exhibiting has no way to tell us")
+	}
+}
+
+// TestNext_ListingSomethingRestoresTheOrdinaryCeiling: the barren ceiling is
+// keyed on evidence, not on a label, so a site that finally lists an exhibition
+// returns to being read like any other museum.
+func TestNext_ListingSomethingRestoresTheOrdinaryCeiling(t *testing.T) {
+	now := at(2026, time.August, 1)
+
+	barren := State{Interval: BarrenInterval}
+	if got := Next(barren, Unchanged, nil, now).Interval; got != BarrenInterval {
+		t.Fatalf("barren site interval = %s, want %s", got, BarrenInterval)
+	}
+
+	// The same site, once it has listed something.
+	listed := State{Interval: BarrenInterval, EverListed: true}
+	if got := Next(listed, Unchanged, nil, now).Interval; got != MaxInterval {
+		t.Errorf("after listing an exhibition the interval is %s, want the ordinary %s ceiling", got, MaxInterval)
+	}
+}
+
+// TestNext_BarrenDoesNotOverrideAClosingDate: a stored exhibition closing is
+// still the one moment staleness is a certainty rather than a guess.
+func TestNext_BarrenDoesNotOverrideAClosingDate(t *testing.T) {
+	now := at(2026, time.August, 1)
+	closes := now.AddDate(0, 0, 3)
+
+	plan := Next(State{Interval: BarrenInterval}, Unchanged, &closes, now)
+	if plan.DueAt.After(closes.AddDate(0, 0, 2)) {
+		t.Errorf("DueAt = %s, want it pulled in to just after the closing date", plan.DueAt)
 	}
 }

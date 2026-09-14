@@ -10,17 +10,14 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"museum/internal/ratelimit"
+	"museum/pkg/useragent"
 )
 
 const (
-	// DefaultUserAgent identifies this client to Wikipedia. Their API policy
-	// asks for a descriptive agent with contact details; replace the URL when
-	// deploying this for real.
-	DefaultUserAgent = "museum-pipeline/1.0 (https://github.com/example/museum)"
-
 	// maxTitlesPerQuery is the number of titles the API accepts in a single
 	// multi-title query for unauthenticated clients.
 	maxTitlesPerQuery = 50
@@ -53,6 +50,16 @@ const (
 // two halves of the same program.
 var apiGate = ratelimit.NewGate(minRequestInterval, maxRequestInterval)
 
+// userAgent is what this client tells Wikipedia it is. Their user-agent policy
+// asks for a descriptive agent with contact details and refuses requests
+// without one; useragent composes it from MUSEUM_CONTACT, and
+// WIKIPEDIA_USER_AGENT overrides the whole header. Resolved once per process
+// rather than baked into a constant, so a deployment configures it rather than
+// editing source.
+var userAgent = sync.OnceValue(func() string {
+	return useragent.For("museum catalogue", "WIKIPEDIA_USER_AGENT")
+})
+
 // Client talks to the Wikipedia action API. It is safe for concurrent use; the
 // rate limiter is shared across callers.
 type Client struct {
@@ -81,7 +88,7 @@ const DefaultLanguage = "en"
 func NewLanguageClient(lang string) *Client {
 	return &Client{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
-		userAgent:  DefaultUserAgent,
+		userAgent:  userAgent(),
 		gate:       apiGate,
 		lang:       lang,
 	}

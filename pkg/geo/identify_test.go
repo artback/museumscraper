@@ -108,3 +108,85 @@ func TestCanonical_AliasesHaveISOCodes(t *testing.T) {
 		}
 	}
 }
+
+// TestTerritoriesAreRecognised: these have their own ISO code and their own
+// museums, and Wikidata attributes museums to them directly rather than to the
+// state they belong to. Unrecognised, those records carried a country nothing
+// could canonicalise, which excluded them from every check keyed on knowing
+// where a museum is.
+func TestTerritoriesAreRecognised(t *testing.T) {
+	cases := map[string]string{
+		"Isle of Man":      "IM",
+		"Greenland":        "GL",
+		"Jersey":           "JE",
+		"Hong Kong":        "HK",
+		"Kosovo":           "XK",
+		"Puerto Rico":      "PR",
+		"Réunion":          "RE",
+		"New Caledonia":    "NC",
+		"Åland Islands":    "AX",
+		"Faroe Islands":    "FO",
+		"Cayman Islands":   "KY",
+		"French Polynesia": "PF",
+	}
+	for name, code := range cases {
+		if !IsCountry(name) {
+			t.Errorf("IsCountry(%q) = false", name)
+		}
+		if got, ok := ISOCode(name); !ok || got != code {
+			t.Errorf("ISOCode(%q) = %q (ok=%v), want %q", name, got, ok, code)
+		}
+	}
+}
+
+// TestTerritoryAliases: the sources spell these several ways, and two
+// spellings of one place are two places to everything downstream.
+func TestTerritoryAliases(t *testing.T) {
+	cases := map[string]string{
+		"Macao":             "Macau",
+		"Curacao":           "Curaçao",
+		"Aland Islands":     "Åland Islands",
+		"Reunion":           "Réunion",
+		"US Virgin Islands": "United States Virgin Islands",
+		"saint barthelemy":  "Saint Barthélemy",
+	}
+	for spelling, want := range cases {
+		if got, ok := Canonical(spelling); !ok || got != want {
+			t.Errorf("Canonical(%q) = %q (ok=%v), want %q", spelling, got, ok, want)
+		}
+	}
+}
+
+// TestCrawlAreasCoversBothAndDoesNotRepeat: the OSM crawl iterates this, so a
+// duplicate is a duplicate query against a rate-limited public service.
+func TestCrawlAreasCoversBothAndDoesNotRepeat(t *testing.T) {
+	areas := CrawlAreas()
+
+	seen := make(map[string]bool, len(areas))
+	for _, a := range areas {
+		if seen[a] {
+			t.Errorf("%q appears twice in CrawlAreas", a)
+		}
+		seen[a] = true
+	}
+	if !seen["France"] || !seen["Greenland"] {
+		t.Error("CrawlAreas must cover countries and territories alike")
+	}
+
+	// Every area must resolve to an ISO code, or the crawl silently skips it.
+	for _, a := range areas {
+		if _, ok := ISOCode(a); !ok {
+			t.Errorf("%q has no ISO code, so the OSM crawl will skip it", a)
+		}
+	}
+}
+
+// TestTerritoryNamesDoNotCollideWithSubdivisions: matching is exact, so
+// "New Jersey" must not resolve to Jersey.
+func TestTerritoryNamesDoNotCollideWithSubdivisions(t *testing.T) {
+	for _, place := range []string{"New Jersey", "Georgia, United States", "New Caledonia County"} {
+		if _, ok := Canonical(place); ok {
+			t.Errorf("Canonical(%q) matched a territory", place)
+		}
+	}
+}

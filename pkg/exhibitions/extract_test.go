@@ -184,7 +184,7 @@ Disallow: /private
 Disallow: /admin
 Allow: /private/public
 `
-	rules := parseRobots(body)
+	rules := parseRobots(body, "museum-catalogue/1.0 (+https://example.org)")
 
 	cases := map[string]bool{
 		"/whats-on":          true,
@@ -203,7 +203,7 @@ Allow: /private/public
 
 func TestParseRobots_GroupsForOtherAgentsAreIgnored(t *testing.T) {
 	// A blanket Disallow aimed at a different crawler must not apply here.
-	rules := parseRobots("User-agent: SomeOtherBot\nDisallow: /\n")
+	rules := parseRobots("User-agent: SomeOtherBot\nDisallow: /\n", "museum-catalogue/1.0 (+https://example.org)")
 	if !rules.allows("/whats-on") {
 		t.Error("a rule for another user-agent was applied to this crawler")
 	}

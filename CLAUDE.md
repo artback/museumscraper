@@ -27,6 +27,11 @@ docker compose run --rm jobs harvest list
 
 The API is then on <http://localhost:8090>, the map on `/map`.
 
+Set `MUSEUM_CONTACT` before any run that leaves the machine. It is composed into
+the User-Agent every source sees, and Wikimedia's and Nominatim's policies both
+ask for a way to reach whoever is crawling them. Unset, the crawler logs that it
+is unset and carries the project URL alone.
+
 Batch jobs share one `jobs` service on purpose: `docker compose run` replaces a
 service's command outright, so giving each job its own service with a baked-in
 subcommand meant the subcommand vanished the moment you passed a flag.

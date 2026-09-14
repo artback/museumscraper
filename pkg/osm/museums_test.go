@@ -2,6 +2,7 @@ package osm
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -160,4 +161,49 @@ func TestCountryMuseumsLive(t *testing.T) {
 		t.Error("expected at least some museums to carry coordinates")
 	}
 	t.Logf("Andorra: %d museums, %d with coordinates", len(museums), withCoords)
+}
+
+// TestRotateKeepsEveryAreaAndMovesTheStart: the OSM walk is the slowest source
+// and a cut-short crawl loses whatever is at the end. Alphabetically that is
+// always the same tail — Uganda, Vietnam, Yemen, Zambia, Zimbabwe — which is
+// exactly the part of the world this source exists to reach.
+func TestRotateKeepsEveryAreaAndMovesTheStart(t *testing.T) {
+	areas := []string{"Argentina", "Brazil", "Chile", "Denmark", "Egypt"}
+
+	starts := make(map[string]bool)
+	for day := 1; day <= 365; day++ {
+		when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, day-1)
+		got := rotate(areas, when)
+
+		if len(got) != len(areas) {
+			t.Fatalf("day %d: got %d areas, want %d", day, len(got), len(areas))
+		}
+		sorted := slices.Clone(got)
+		slices.Sort(sorted)
+		if !slices.Equal(sorted, areas) {
+			t.Fatalf("day %d: rotation changed the set: %v", day, got)
+		}
+		starts[got[0]] = true
+	}
+
+	if len(starts) != len(areas) {
+		t.Errorf("only %d of %d areas ever went first: %v", len(starts), len(areas), starts)
+	}
+}
+
+// TestRotateIsDeterministic: a run has to be reproducible from its log.
+func TestRotateIsDeterministic(t *testing.T) {
+	areas := []string{"Argentina", "Brazil", "Chile"}
+	when := time.Date(2026, 6, 15, 9, 30, 0, 0, time.UTC)
+
+	first := rotate(areas, when)
+	if second := rotate(areas, when); !slices.Equal(first, second) {
+		t.Errorf("same day gave different orders: %v then %v", first, second)
+	}
+}
+
+func TestRotateHandlesAnEmptyList(t *testing.T) {
+	if got := rotate(nil, time.Now()); len(got) != 0 {
+		t.Errorf("rotate(nil) = %v", got)
+	}
 }
