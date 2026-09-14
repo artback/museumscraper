@@ -269,6 +269,12 @@ func (h *Harvester) Once(ctx context.Context, source extract.Source) (Outcome, e
 	outcome.Assessment = assessment
 	run.Duration = h.now().Sub(started)
 
+	// An extractor written before shapes were recorded earns one here, on the
+	// strength of the run that just passed. See recordShape.
+	if assessment.Publishable() && outcome.Healed == nil {
+		h.recordShape(ctx, artifact, page, run.Fingerprint)
+	}
+
 	if assessment.Publishable() {
 		if err := h.publish(ctx, source, run, assessment.Records); err != nil {
 			// Failing to publish is not failing to extract. The run keeps its
@@ -363,6 +369,53 @@ func (h *Harvester) heal(
 	log.Printf("harvest: %s healed to v%d, now extracting %d records",
 		source.Name, healed.Version, len(revalidated.Records))
 	return revalidated, run, outcome
+}
+
+// recordShape gives a working artifact the structural sketch of the page it
+// just read, where it has none.
+//
+// Reuse needs a Shape on the *other* site's artifact to fire, and every
+// extractor generated before shapes existed has none — so without this, a store
+// full of working extractors is a store nothing can ever be reused from, until
+// each of them happens to break and be healed. Which is exactly backwards: the
+// extractors worth reusing are the ones that have not broken.
+//
+// It costs nothing and needs no model. The page has already been fetched and
+// the script has already been run against it and passed, so the shape recorded
+// is the shape of a page this script demonstrably reads — which is a stronger
+// claim than the one the artifact was generated with, since that page is months
+// old.
+//
+// It writes a new version rather than amending the stored one, because versions
+// are immutable and that is what makes a heal diff reviewable. The version it
+// writes carries the same script, so the diff is empty and says so.
+func (h *Harvester) recordShape(ctx context.Context, artifact extract.Artifact, page *extract.Page, fingerprint string) {
+	if artifact.Version < 1 || !artifact.Shape.Empty() {
+		return
+	}
+
+	updated := artifact
+	updated.Version = artifact.Version + 1
+	updated.Parent = artifact.Version
+	updated.Reason = "recorded the page's structure, so this extractor can be reused on a site built the same way"
+	updated.Fingerprint = fingerprint
+	updated.Shape = extract.ShapeOf(page)
+	updated.CreatedAt = h.now()
+
+	switch err := h.Store.SaveArtifact(ctx, updated); {
+	case errors.Is(err, ErrArtifactExists):
+		// Another worker recorded it first, which is the answer rather than a
+		// failure: several workers share one Harvester and run different
+		// sources, but the schedule can hand the same source to two replicas.
+	case err != nil:
+		// Housekeeping. A source that could not record its shape still ran, and
+		// still published; it simply is not reusable yet.
+		log.Printf("harvest: %s ran but its page shape could not be recorded: %v", artifact.Source, err)
+	default:
+		h.remember(updated)
+		log.Printf("harvest: %s recorded its page shape at v%d, and can now be reused from",
+			artifact.Source, updated.Version)
+	}
 }
 
 // repair produces a replacement artifact: by adoption where some other site's

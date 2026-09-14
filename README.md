@@ -1256,6 +1256,16 @@ structural paths, about two kilobytes, from which the Jaccard index is estimated
 to within a few per cent. An artifact stored before shapes existed carries none
 and is simply never a candidate, which is the safe direction.
 
+**Extractors written before shapes existed earn one by running.** A store full of
+working extractors would otherwise be a store nothing can be reused from, until
+each of them happens to break and be healed — which is backwards, since the
+extractors worth reusing are the ones that have not broken. So a run that passes
+records the shape of the page it just read, as a new version carrying the same
+script. It costs nothing and needs no model: the page is already fetched and the
+script has already been proved against it, which is a stronger claim than the
+artifact was generated with, that page being months old. A failing run records
+nothing, because a shape is a claim that this script reads this page.
+
 An adopted artifact is stored under its own source's name, with its own page's
 fingerprint and shape, and its provenance records `reused_from` and the
 similarity. It is the one kind of extractor that was never written for the page

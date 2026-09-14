@@ -334,3 +334,107 @@ func TestHealAdoptsARedesignedPageFromASiteAlreadyRunningIt(t *testing.T) {
 		t.Errorf("the run after the adopted heal graded %s: %v", outcome.Run.Verdict, outcome.Run.Findings)
 	}
 }
+
+// TestAPassingRunRecordsTheShapeOfAnOlderArtifact is how the pool gets seeded.
+//
+// Every extractor generated before shapes existed carries none, so a store full
+// of working extractors is one nothing can be reused from — until each of them
+// happens to break and be healed, which is backwards: the extractors worth
+// reusing are the ones that have not broken. An ordinary run has the page in
+// hand and has just proved the script reads it, so it can record the shape for
+// nothing.
+func TestAPassingRunRecordsTheShapeOfAnOlderArtifact(t *testing.T) {
+	store := newMemory()
+	source := testSource()
+
+	// An artifact as the store held them before shapes: script, fingerprint,
+	// nothing else.
+	page, err := extract.ParsePage(source.URL, beforePage)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := store.SaveArtifact(context.Background(), extract.Artifact{
+		Source: source.Name, Version: 1, Script: beforeScript,
+		Fingerprint: extract.Fingerprint(page),
+	}); err != nil {
+		t.Fatalf("save artifact: %v", err)
+	}
+
+	model := &fixedModel{script: beforeScript}
+	harvester := reuseHarvester(store, model, beforePage)
+
+	outcome, err := harvester.Once(context.Background(), source)
+	if err != nil {
+		t.Fatalf("Once() error = %v", err)
+	}
+	if outcome.Run.Verdict != extract.Pass {
+		t.Fatalf("the run graded %s: %v", outcome.Run.Verdict, outcome.Run.Findings)
+	}
+	if model.calls.Load() != 0 {
+		t.Errorf("recording a shape invoked the model %d times", model.calls.Load())
+	}
+
+	stored, err := store.CurrentArtifact(context.Background(), source.Name)
+	if err != nil {
+		t.Fatalf("CurrentArtifact: %v", err)
+	}
+	if stored.Shape.Empty() {
+		t.Fatal("a passing run left the artifact without a shape, so it can never be reused from")
+	}
+	if stored.Version != 2 || stored.Parent != 1 {
+		t.Errorf("recorded at v%d from v%d, want v2 from v1", stored.Version, stored.Parent)
+	}
+	if stored.Script != beforeScript {
+		t.Error("recording a shape changed the script, which it must never do")
+	}
+
+	// Once is enough: a second run has nothing left to record.
+	if _, err := harvester.Once(context.Background(), source); err != nil {
+		t.Fatalf("second Once() error = %v", err)
+	}
+	again, err := store.CurrentArtifact(context.Background(), source.Name)
+	if err != nil {
+		t.Fatalf("CurrentArtifact: %v", err)
+	}
+	if again.Version != 2 {
+		t.Errorf("a second run wrote v%d; recording a shape must happen once, not every run", again.Version)
+	}
+}
+
+// TestAFailingRunRecordsNoShape: a shape is a claim that this script reads this
+// page. An extractor that just came back with nothing has made no such claim,
+// and recording one would offer it to other sites as a working extractor.
+func TestAFailingRunRecordsNoShape(t *testing.T) {
+	store := newMemory()
+	source := testSource()
+
+	if err := store.SaveArtifact(context.Background(), extract.Artifact{
+		Source: source.Name, Version: 1, Script: beforeScript,
+	}); err != nil {
+		t.Fatalf("save artifact: %v", err)
+	}
+
+	// The page has been redesigned; the stored script reads nothing on it. No
+	// generator, so the run cannot heal its way out either.
+	harvester := &Harvester{
+		Store: store,
+		Fetch: &pageFetcher{body: afterPage},
+		Now:   func() time.Time { return time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC) },
+	}
+
+	outcome, err := harvester.Once(context.Background(), source)
+	if err != nil {
+		t.Fatalf("Once() error = %v", err)
+	}
+	if outcome.Run.Verdict == extract.Pass {
+		t.Fatalf("the fixture passed, so it tests nothing")
+	}
+
+	stored, err := store.CurrentArtifact(context.Background(), source.Name)
+	if err != nil {
+		t.Fatalf("CurrentArtifact: %v", err)
+	}
+	if !stored.Shape.Empty() || stored.Version != 1 {
+		t.Errorf("a failing run recorded a shape at v%d, offering a broken extractor for reuse", stored.Version)
+	}
+}

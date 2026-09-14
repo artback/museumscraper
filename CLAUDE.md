@@ -81,6 +81,13 @@ two sources can hold identical scripts, and healing one does not touch the other
 — each is a separate artifact under its own name, and `harvest show` prints
 `reused_from` for the ones that arrived this way.
 
+Reuse only fires against artifacts that carry a page shape, and one written
+before shapes existed has none. It gains one on its next passing run — no model,
+a new version with the same script — so the pool seeds itself as the scheduler
+works through the sources. To seed it now, run a few by hand:
+`docker compose run --rm jobs harvest run -source NAME`, or just let
+`harvest serve` come round.
+
 Generated scripts get a standard library on the global `museum` (see
 `internal/harvest/library.go`). `museum.dates` is the same
 `exhibitions.ParseDateRange` the hand-written scraper uses, so **improving it
