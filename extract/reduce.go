@@ -54,6 +54,11 @@ type Reducer struct {
 	// schema.org data is handing over exact, language-independent values and
 	// an artifact that reads them is far better than one guessing at markup.
 	MaxJSONLDRunes int
+
+	// elideWrappers drops a single-child element even when it carries
+	// attributes, keeping the child. Set by tighten on a page that does not
+	// otherwise fit; see tightening.
+	elideWrappers bool
 }
 
 // Reducer defaults, sized for a local model with a modest context window.
@@ -88,6 +93,9 @@ type Reduction struct {
 	// Truncated reports that MaxBytes was reached, so the sketch is a prefix
 	// of the page rather than a summary of all of it.
 	Truncated bool
+	// Tightened is how many passes of reduced per-element detail it took to fit
+	// the budget. Zero is a page that fitted as configured.
+	Tightened int
 }
 
 // Ratio is how much smaller the reduction is than the page, as a multiple.
@@ -104,8 +112,15 @@ func (r Reduction) Ratio() float64 {
 
 // String renders the ratio for a log line or a CLI.
 func (r Reduction) String() string {
-	return fmt.Sprintf("%d bytes reduced to %d (%.0f× smaller)",
+	out := fmt.Sprintf("%d bytes reduced to %d (%.0f× smaller)",
 		r.OriginalBytes, r.ReducedBytes, r.Ratio())
+	if r.Tightened > 0 {
+		out += fmt.Sprintf(", at detail level %d to fit", r.Tightened)
+	}
+	if r.Truncated {
+		out += ", still truncated"
+	}
+	return out
 }
 
 // keptAttributes are the attributes a selector can usefully be written
@@ -143,8 +158,74 @@ var droppedElements = map[string]bool{
 	"meta": true, "input": true, "label": true, "template": true,
 }
 
-// Reduce compresses a parsed page.
+// Reduce compresses a parsed page, tightening what it keeps per element until
+// the whole document fits the budget.
+//
+// The alternative — one pass, cut at MaxBytes — showed the model a prefix. That
+// is the worst possible way to spend the budget, because a listing page puts its
+// chrome first: every one of six real museum pages measured hit the cap, and
+// what was lost was always the tail, which on one of them was half the
+// programme. A prefix is also silently wrong in a way the model cannot see: the
+// page it is asked to write selectors for simply stops.
+//
+// So the budget is spent on the whole document at lower detail rather than part
+// of it at full detail. What gets cut is text — the largest category in a
+// reduced page, and the one the model needs least, since it is being shown where
+// data lives rather than asked to read it. A title is recognisable in five words
+// as well as in twenty.
 func (r *Reducer) Reduce(page *Page) Reduction {
+	reduction := r.reduceOnce(page)
+	for pass := 1; pass <= len(tightenings) && reduction.Truncated; pass++ {
+		tighter := r.tighten(tightenings[pass-1])
+		next := tighter.reduceOnce(page)
+		next.Tightened = pass
+		reduction = next
+	}
+	return reduction
+}
+
+// tightening is one step of detail to give up, as a fraction of what was
+// configured, when the page will not fit.
+//
+// Text goes first and furthest. Repeats are never cut below two, because one
+// example of a row and a count does not show a model that the second row
+// carries a date where the first carried a badge — which is the difference
+// between an extractor that reads a listing and one that reads its first entry.
+type tightening struct {
+	text, classes, jsonld int
+	repeats               int
+	// elideWrappers collapses a chain of single-child elements to its
+	// innermost member, attributes and all.
+	//
+	// This is the structural lever, and the only one that reaches a page whose
+	// bulk is markup rather than words: a framework site buries every card
+	// under a dozen layout divs, and a selector is never written against the
+	// ninth anonymous wrapper. Depth would be the obvious alternative and is
+	// the wrong one — cutting at a depth throws away everything *below* it,
+	// which on exactly those pages is the listing itself.
+	elideWrappers bool
+}
+
+var tightenings = []tightening{
+	{text: 40, classes: 3, jsonld: 1000, repeats: 3},
+	{text: 20, classes: 2, jsonld: 600, repeats: 2, elideWrappers: true},
+	{text: 10, classes: 1, jsonld: 300, repeats: 2, elideWrappers: true},
+}
+
+// tighten returns a reducer that keeps less of each element, never more than
+// the configured limits — a reducer already configured tightly than this stays
+// as it is.
+func (r *Reducer) tighten(to tightening) *Reducer {
+	tighter := *r
+	tighter.MaxTextRunes = min(r.MaxTextRunes, to.text)
+	tighter.MaxClassTokens = min(r.MaxClassTokens, to.classes)
+	tighter.MaxJSONLDRunes = min(r.MaxJSONLDRunes, to.jsonld)
+	tighter.MaxRepeats = min(r.MaxRepeats, to.repeats)
+	tighter.elideWrappers = to.elideWrappers
+	return &tighter
+}
+
+func (r *Reducer) reduceOnce(page *Page) Reduction {
 	w := &sketch{
 		reducer: r,
 		limit:   r.MaxBytes,
@@ -237,7 +318,7 @@ func (s *sketch) writeNode(node *html.Node, depth int) {
 	// model nothing it can select on — one measured listing page spent 139
 	// lines on them. Where such an element has no attributes worth keeping and
 	// exactly one element child, it is elided and the child takes its place.
-	if attributes == "" && onlyChild(node) != nil {
+	if (attributes == "" || s.reducer.elideWrappers) && onlyChild(node) != nil {
 		s.writeNode(onlyChild(node), depth)
 		return
 	}

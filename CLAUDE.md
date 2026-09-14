@@ -73,6 +73,14 @@ HARVEST_BUCKET_NAME=museum-harvest                 # defaults to $MUSEUM_BUCKET_
 Generation is slow — minutes for one page on the Pi — and it is meant to be.
 Nothing on the steady-state path touches the model.
 
+A site is not always compiled. Before generating, the harness looks for a stored
+extractor whose page is structurally the same (`extract.ReuseThreshold`), runs it
+against this page and validates the result; a corpus of museum websites is full
+of one CMS theme sold to eighty institutions. Two consequences worth knowing:
+two sources can hold identical scripts, and healing one does not touch the other
+— each is a separate artifact under its own name, and `harvest show` prints
+`reused_from` for the ones that arrived this way.
+
 Generated scripts get a standard library on the global `museum` (see
 `internal/harvest/library.go`). `museum.dates` is the same
 `exhibitions.ParseDateRange` the hand-written scraper uses, so **improving it

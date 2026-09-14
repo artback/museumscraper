@@ -261,7 +261,7 @@ museum harvest run -source example-museum
 museum harvest serve
 ```
 
-The fallback for sites the heuristic scraper cannot read. A local model writes an extractor once; every run after that executes it with no model involved. See [Generated extractors](#generated-extractors).
+The fallback for sites the heuristic scraper cannot read. A local model writes an extractor once — or none is written at all, where a site structurally identical to one already handled can take that site's extractor — and every run after that executes it with no model involved. See [Generated extractors](#generated-extractors).
 
 ### `museum refresh` — scrape exhibitions
 
@@ -1135,10 +1135,37 @@ Five of the six now fit inside the budget, where previously none did — so the 
 
 Regenerating Kalmar on the smaller prompt: **29 s → 19 s**, first attempt, same six exhibitions.
 
+**And a page that still does not fit gives up detail rather than the page.** Cutting
+at the byte cap is the worst way to spend the budget: a listing page puts its
+chrome first, so a prefix loses the listing, and the model cannot see that the
+document it is writing selectors for simply stops. So a page over budget is
+reduced again with less kept per element — shorter text first, since the model is
+being shown where data lives rather than asked to read it, and a title is
+recognisable in five words as well as in twenty — and then, if it still does not
+fit, with chains of single-child wrappers collapsed to their innermost member.
+
+That second step is the one that reaches a page whose bulk is markup rather than
+words, which is what a framework site is. Measured on a listing of forty cards
+each buried under nine layout divs, against a 12 KB budget:
+
+| | Reduction | Entries the model sees |
+|---|---|---|
+| Cut at the cap | 12,001 bytes | **16 of 40** |
+| Tightened | 11,500 bytes | **40 of 40** |
+
+Depth would have been the obvious lever and is the wrong one: cutting at a depth
+throws away everything *below* it, which on exactly those pages is the listing.
+Repeats are never cut below two either — one example of a row and a count does
+not show a model that the second row carries a date where the first carried a
+badge. A page inside the budget is reduced exactly as before; tightening is a
+response to not fitting, never the ordinary case, and the reduction line says
+which happened.
+
 ### The generations not spent
 
 Cutting the prompt above made each generation cheaper. The larger saving is the
-generations that never happen, and there are three of them. All three are
+generations that never happen. The largest of those is reuse, which has its own
+section below; three more are here. All three are
 measured in *model invocations*, which on a Pi is minutes apiece and is the only
 cost this design has.
 
@@ -1203,6 +1230,54 @@ The counts were a coincidence. Comparing the records rather than the totals: tit
 The lesson generalises past this codebase: **making extractors more capable raises the false-positive rate of reuse.** Anything that decides to reuse on the strength of validation alone gets less safe as the components get better, which is the opposite of the intuition. Compare records, not counts, and gate on structural similarity.
 
 That means cross-site reuse fires zero per cent of the time on this sample — five sites contain no siblings. It is worth having anyway, because sameness here is a property of the CMS theme, and a corpus of hundreds of museum sites certainly does contain WordPress installations sharing one. The mechanism should be built before it is needed, not after it has silently published a short listing.
+
+### Reuse, as it is actually wired
+
+A source with no extractor is now *adopted* where it can be and generated where
+it cannot. Three things have to hold, cheapest first:
+
+1. **The pages are structurally alike** — `Similarity` ≥ `extract.ReuseThreshold`
+   (0.5), measured against every stored artifact. This is the gate the section
+   above argues for, and it is the one that refuses the pairs that would have
+   validated while being wrong.
+2. **The script runs on this page** — a sandboxed execution, milliseconds.
+3. **Its output passes validation**, against *this* source's schema, exactly as a
+   generated artifact's trial does.
+
+Three candidates are tried, most similar first; then it generates. Quarantined
+sources are never candidates — whatever is wrong with an extractor that could not
+be repaired is not a thing to copy onto a second site for looking alike.
+
+**The stored sketch is what makes this possible at all.** A fingerprint is a hash
+and can only answer "has this page changed"; similarity needs something of the
+path set itself, and the other site's page is long gone by the time the question
+is asked. So an artifact carries a `Shape`: the 128 smallest hashes of its page's
+structural paths, about two kilobytes, from which the Jaccard index is estimated
+to within a few per cent. An artifact stored before shapes existed carries none
+and is simply never a candidate, which is the safe direction.
+
+An adopted artifact is stored under its own source's name, with its own page's
+fingerprint and shape, and its provenance records `reused_from` and the
+similarity. It is the one kind of extractor that was never written for the page
+it runs on, and an operator reading a surprising result has to be able to see
+that at once rather than deduce it from two sources having identical scripts.
+
+Two places it pays, and the second is the larger:
+
+- **A new site.** No generation, where the alternative was minutes of one. The
+  new-extractor budget is not charged for it either — `-max-new-extractors`
+  rations generation, and an adoption is not one — so a run that meets eighty
+  sites on one template comes back with eighty extractors and one generation.
+- **A redesign.** A CMS vendor rolls a new theme out to every site it hosts over
+  a month. Every one of them breaks in the same way, and afterwards they are
+  identical again — so the fleet-wide event that would cost the most model time
+  is exactly the one where the first site healed pays for the rest. Healing tries
+  adoption before it regenerates, and an adopted heal is still a heal: it is a new
+  version with a parent, and `harvest rollback` reaches the one it replaced.
+
+`TestLiveCrossReuse` reports what the gate would do on the real sites, including
+whether the stored sketch and the exact calculation ever disagree about a pair —
+which is the one way this could fail open.
 
 ### Two risks that are bounded but not closed
 

@@ -134,6 +134,14 @@ type Report struct {
 	Reduction Reduction
 	// Attempts are the generations tried, in order.
 	Attempts []Attempt
+
+	// Reused names the source whose artifact was adopted instead of generating
+	// one, and Similarity is how alike the two pages were. A report carrying
+	// them has no attempts, because no model was asked. Tried is how many
+	// stored artifacts were run against the page before one passed.
+	Reused     string
+	Similarity float64
+	Tried      int
 }
 
 // Generate compiles an artifact for source from page.
@@ -260,6 +268,7 @@ func (g *Generator) generate(ctx context.Context, source Source, page *Page, pre
 				Version:     1,
 				Script:      script,
 				Fingerprint: Fingerprint(page),
+				Shape:       ShapeOf(page),
 				Provenance: Provenance{
 					Model:       modelName(g.Model),
 					Prompt:      PromptVersion,

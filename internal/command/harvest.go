@@ -221,9 +221,9 @@ func harvestAdd(ctx context.Context, args []string) error {
 		return err
 	}
 
-	fmt.Printf("Reading %s and generating an extractor. This is the slow part.\n\n", source.URL)
+	fmt.Printf("Reading %s. If no stored extractor already fits this page, one is generated, which is the slow part.\n\n", source.URL)
 
-	// Generated first, shown, and only then committed. An operator asked to
+	// Produced first, shown, and only then committed. An operator asked to
 	// approve an artifact they have not seen is not reviewing anything, so
 	// this drafts rather than compiles: nothing is written until the answer.
 	artifact, report, err := h.Draft(ctx, source)
@@ -233,8 +233,16 @@ func harvestAdd(ctx context.Context, args []string) error {
 	}
 	printAttempts(report)
 
-	fmt.Printf("Generated v%d for %s using %s, %d attempt(s):\n\n",
-		artifact.Version, source.Name, artifact.Provenance.Model, artifact.Provenance.Attempts)
+	if artifact.Provenance.ReusedFrom != "" {
+		// Said plainly, because this is the one artifact that was never written
+		// for the page it is about to run on. The operator is the check.
+		fmt.Printf("Reused %s's extractor for %s — the two pages share %.0f%% of their structure, "+
+			"and it read this one correctly. Nothing was generated.\n\n",
+			artifact.Provenance.ReusedFrom, source.Name, 100*artifact.Provenance.Similarity)
+	} else {
+		fmt.Printf("Generated v%d for %s using %s, %d attempt(s):\n\n",
+			artifact.Version, source.Name, artifact.Provenance.Model, artifact.Provenance.Attempts)
+	}
 	fmt.Println(indent(artifact.Script))
 	fmt.Println()
 
@@ -370,9 +378,18 @@ func harvestShow(ctx context.Context, args []string) error {
 	}
 
 	current := artifacts[len(artifacts)-1]
-	fmt.Printf("\nExtractor v%d, generated %s by %s (prompt %s), %d attempt(s)\n",
-		current.Version, current.CreatedAt.Format(time.RFC3339),
-		current.Provenance.Model, current.Provenance.Prompt, current.Provenance.Attempts)
+	if current.Provenance.ReusedFrom != "" {
+		// An adopted extractor was never written for this site, which is the
+		// single most useful thing to know when its output looks odd.
+		fmt.Printf("\nExtractor v%d, adopted %s from %s — the two pages share %.0f%% of their structure "+
+			"(written by %s, prompt %s)\n",
+			current.Version, current.CreatedAt.Format(time.RFC3339), current.Provenance.ReusedFrom,
+			100*current.Provenance.Similarity, current.Provenance.Model, current.Provenance.Prompt)
+	} else {
+		fmt.Printf("\nExtractor v%d, generated %s by %s (prompt %s), %d attempt(s)\n",
+			current.Version, current.CreatedAt.Format(time.RFC3339),
+			current.Provenance.Model, current.Provenance.Prompt, current.Provenance.Attempts)
+	}
 
 	// The heal history is the diffable record the PRD asks for: every version,
 	// what it came from, and why it was regenerated.

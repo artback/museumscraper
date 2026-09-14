@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path"
 	"slices"
 	"strings"
@@ -235,6 +236,47 @@ func (s *Store) CurrentArtifact(ctx context.Context, source string) (extract.Art
 		return extract.Artifact{}, err
 	}
 	return *artifact, nil
+}
+
+// CurrentArtifacts reads the newest version of every source's artifact.
+//
+// One listing of the whole artifact prefix, then a GET per source. The listing
+// is what makes that affordable: version numbers are zero-padded into the key,
+// so the newest version of each source is the last key of its group and no
+// object has to be downloaded to find out which.
+//
+// It exists for reuse — deciding whether some other site's extractor already
+// reads this page — which is asked at most a handful of times a day, when a
+// site is met for the first time. Nothing on the steady-state path calls it.
+func (s *Store) CurrentArtifacts(ctx context.Context) ([]extract.Artifact, error) {
+	keys, err := s.artifacts.ListKeys(ctx, s.bucket, artifactPrefix)
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(keys)
+
+	// The last key of each source's group, which sorting has just put in
+	// version order within each group.
+	newest := make([]string, 0, 16)
+	for i, key := range keys {
+		if i+1 == len(keys) || path.Dir(keys[i+1]) != path.Dir(key) {
+			newest = append(newest, key)
+		}
+	}
+
+	artifacts := make([]extract.Artifact, 0, len(newest))
+	for _, key := range newest {
+		artifact, err := s.artifacts.GetObject(ctx, s.bucket, key)
+		if err != nil {
+			// One unreadable artifact is not a reason to refuse the question.
+			// The answer is "which of these already reads this page", and an
+			// object that cannot be decoded simply is not a candidate.
+			log.Printf("harvest: could not read %s while looking for a reusable extractor: %v", key, err)
+			continue
+		}
+		artifacts = append(artifacts, *artifact)
+	}
+	return artifacts, nil
 }
 
 // LastRunAt returns when a source last ran, without reading any run.

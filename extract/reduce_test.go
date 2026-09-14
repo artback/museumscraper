@@ -94,12 +94,23 @@ func TestReduceTruncatesLongText(t *testing.T) {
 	}
 }
 
+// TestReduceRespectsByteCap: the cap is the last defence, and a page that
+// defeats every other rule is cut at it rather than allowed into a prompt whole.
+// Each section here is a different shape, so nothing collapses into a repeat
+// count and no amount of tightening can make it fit.
 func TestReduceRespectsByteCap(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`<!doctype html><html><body>`)
+	for i := range 500 {
+		fmt.Fprintf(&b, `<section class="s%d"><div class="d%d"><a href="/x/%d">Item %d</a></div></section>`,
+			i, i, i, i)
+	}
+	b.WriteString(`</body></html>`)
+
 	reducer := NewReducer()
 	reducer.MaxBytes = 500
-	reducer.MaxRepeats = 1000 // force the byte cap to be the binding limit
 
-	got := reducer.Reduce(testPage(t, bigListing(500)))
+	got := reducer.Reduce(testPage(t, b.String()))
 
 	if !got.Truncated {
 		t.Error("Reduce() did not report truncation despite hitting the byte cap")
@@ -107,6 +118,94 @@ func TestReduceRespectsByteCap(t *testing.T) {
 	if got.ReducedBytes > 2*reducer.MaxBytes {
 		t.Errorf("Reduce() produced %d bytes, want it near the cap of %d",
 			got.ReducedBytes, reducer.MaxBytes)
+	}
+}
+
+// frameworkListing is what a real listing page looks like from the inside:
+// every card buried under a stack of layout wrappers, each carrying classes
+// that describe how it looks and nothing about what it is.
+func frameworkListing(rows int) string {
+	var b strings.Builder
+	b.WriteString(`<!doctype html><html><head><title>What's On</title></head>` +
+		`<body><div class="page"><div class="container"><div class="row">`)
+	for i := range rows {
+		fmt.Fprintf(&b, `<div class="col col-md-4 sect-%d"><div class="inner"><div class="pad">`+
+			`<div class="frame"><div class="shadow">`+
+			`<article class="card card-%d"><div class="card-body"><div class="card-inner">`+
+			`<div class="text-wrap">`+
+			`<h2 class="card-title">Exhibition %d</h2><p class="card-text">%s</p>`+
+			`<a class="btn btn-primary" href="/exhibitions/show-%d">Find out more</a>`+
+			`<time class="card-date" datetime="2026-09-01">1 September</time>`+
+			`</div></div></div></article></div></div></div></div></div>`,
+			i, i, i, strings.Repeat("a sentence about the show ", 12), i)
+	}
+	b.WriteString(`</div></div></div></body></html>`)
+	return b.String()
+}
+
+// TestReduceGivesUpDetailBeforeItGivesUpThePage is the whole argument for
+// tightening. A prompt budget spent as a prefix stops part-way down the
+// document, and a listing page puts its chrome first — so what a prefix loses is
+// the listing. Spending the same budget on all of the page at lower detail keeps
+// what the model is actually being asked for: where the data lives.
+func TestReduceGivesUpDetailBeforeItGivesUpThePage(t *testing.T) {
+	const rows = 40
+	page := testPage(t, frameworkListing(rows))
+
+	reducer := NewReducer()
+	reducer.MaxBytes = 12000
+
+	before := reducer.reduceOnce(page)
+	if !before.Truncated {
+		t.Fatal("the fixture fits at full detail, so it tests nothing")
+	}
+
+	got := reducer.Reduce(page)
+
+	if got.Truncated {
+		t.Errorf("Reduce() still truncated at %d bytes after tightening to level %d",
+			got.ReducedBytes, got.Tightened)
+	}
+	if got.Tightened == 0 {
+		t.Error("Reduce() reported no tightening for a page that did not fit")
+	}
+	if got.ReducedBytes > reducer.MaxBytes {
+		t.Errorf("Reduce() produced %d bytes against a cap of %d", got.ReducedBytes, reducer.MaxBytes)
+	}
+
+	// The point of the exercise, and the thing that would make it worthless if
+	// it were not true: giving up detail must not give up entries. Every one of
+	// them is in the prompt now; the prefix reached a fraction.
+	seen := func(text string) int {
+		var n int
+		for i := range rows {
+			if strings.Contains(text, fmt.Sprintf("/exhibitions/show-%d\"", i)) {
+				n++
+			}
+		}
+		return n
+	}
+
+	if seen(got.Text) != rows {
+		t.Errorf("the tightened reduction shows %d of %d entries, want all of them", seen(got.Text), rows)
+	}
+	if seen(before.Text) >= rows {
+		t.Fatal("the truncated reduction already showed every entry")
+	}
+	t.Logf("prefix showed %d of %d entries in %d bytes; tightening showed %d in %d",
+		seen(before.Text), rows, before.ReducedBytes, seen(got.Text), got.ReducedBytes)
+}
+
+// TestReduceKeepsFullDetailWhenThePageFits: tightening is a response to a page
+// that does not fit and must never be the ordinary case. A page within budget is
+// reduced exactly as it was before this existed.
+func TestReduceKeepsFullDetailWhenThePageFits(t *testing.T) {
+	page := testPage(t, bigListing(50))
+
+	got := NewReducer().Reduce(page)
+	if got.Tightened != 0 || got.Truncated {
+		t.Errorf("a page inside the budget was reduced at detail level %d (truncated %v)",
+			got.Tightened, got.Truncated)
 	}
 }
 

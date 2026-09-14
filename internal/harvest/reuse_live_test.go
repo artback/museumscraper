@@ -142,6 +142,35 @@ func TestLiveCrossReuse(t *testing.T) {
 		t.Logf("cross-site reuse: %d of %d extractor/page pairs validated (%.0f%%)",
 			reusable, trials, 100*float64(reusable)/float64(trials))
 	}
+
+	// What production would actually decide. The gate does not have the other
+	// page — only the sketch stored on its artifact — so the question worth
+	// asking on real input is whether the sketch reaches the same verdict as the
+	// exact calculation above. A disagreement here is the estimator being too
+	// coarse for the threshold, which is the one way this gate could fail open.
+	var disagreements int
+	for _, a := range names {
+		for _, b := range names {
+			pa, oka := pages[a]
+			pb, okb := pages[b]
+			if a == b || !oka || !okb {
+				continue
+			}
+
+			exact := extract.Similarity(pa, pb)
+			sketched := extract.ShapeOf(pa).Similarity(extract.ShapeOf(pb))
+
+			if (exact >= extract.ReuseThreshold) != (sketched >= extract.ReuseThreshold) {
+				disagreements++
+				t.Errorf("%s/%s: exact similarity %.2f, stored sketch %.2f — "+
+					"the two sides of the reuse gate disagree", a, b, exact, sketched)
+			}
+			if sketched >= extract.ReuseThreshold {
+				t.Logf("reuse would fire: %s -> %s (%.2f)", a, b, sketched)
+			}
+		}
+	}
+	t.Logf("the stored sketch agreed with the exact similarity on every pair but %d", disagreements)
 }
 
 func loadScripts(t *testing.T, dir string) map[string]string {

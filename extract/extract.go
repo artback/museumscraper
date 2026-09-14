@@ -402,6 +402,16 @@ type Provenance struct {
 	Library string `json:"library,omitempty"`
 	// Attempts is how many generations were tried before one passed its trial.
 	Attempts int `json:"attempts"`
+	// ReusedFrom names the source whose artifact this is a copy of, when it
+	// was adopted rather than generated, and Similarity is how alike the two
+	// pages were. Both are empty on a generated artifact.
+	//
+	// Recorded because an adopted extractor is the one kind that was never
+	// written for the page it runs on, and an operator reading a surprising
+	// result has to be able to see that at once rather than deduce it from two
+	// sources having identical scripts.
+	ReusedFrom string  `json:"reused_from,omitempty"`
+	Similarity float64 `json:"similarity,omitempty"`
 	// GeneratedAt is when generation finished.
 	GeneratedAt time.Time `json:"generated_at,omitzero"`
 }
@@ -423,6 +433,11 @@ type Artifact struct {
 	// written against. Comparing it against a fresh page is how drift is
 	// detected without spending a model invocation.
 	Fingerprint string `json:"fingerprint"`
+	// Shape is the same page's structural path set, sampled rather than
+	// hashed, so that a page met later can be asked how much structure it
+	// shares with this one. See Shape: it is what decides whether this script
+	// can be reused on another site instead of a new one being generated.
+	Shape Shape `json:"shape,omitzero"`
 	// Provenance says where the script came from.
 	Provenance Provenance `json:"provenance,omitzero"`
 
