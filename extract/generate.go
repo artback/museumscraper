@@ -28,7 +28,7 @@ type Model interface {
 // model produces. Without it, a fleet-wide drop in generation quality after a
 // prompt edit is invisible: every artifact says only which model wrote it, and
 // they were all written by the same one.
-const PromptVersion = "3"
+const PromptVersion = "4"
 
 // systemPrompt frames the task. It states the contract, and states twice, in
 // different words, that the output is a JSON envelope — local models in the 7B
@@ -94,6 +94,18 @@ const DefaultAttempts = 3
 // ErrGeneration means no attempt produced an artifact that passed its trial.
 var ErrGeneration = errors.New("could not generate a working artifact")
 
+// ErrNotExtractable means the page holds nothing a script could read, so no
+// model was asked.
+//
+// It is the difference between a source that failed and a source that was never
+// worth trying. A site rendered entirely by JavaScript answers the fetcher with
+// an empty shell — a handful of wrapper divs and a script tag — and the reducer
+// faithfully reduces it to nothing. Sent to a model, that costs the full
+// attempt budget at minutes each and produces three scripts that select nothing,
+// which is then recorded as a source that could not be compiled. The page is the
+// problem, and one look at the reduction says so.
+var ErrNotExtractable = errors.New("the page holds nothing to extract")
+
 // Attempt records one generation and how it went, so an operator can see why
 // a source could not be compiled rather than only that it could not.
 type Attempt struct {
@@ -122,6 +134,14 @@ type Report struct {
 	Reduction Reduction
 	// Attempts are the generations tried, in order.
 	Attempts []Attempt
+
+	// Reused names the source whose artifact was adopted instead of generating
+	// one, and Similarity is how alike the two pages were. A report carrying
+	// them has no attempts, because no model was asked. Tried is how many
+	// stored artifacts were run against the page before one passed.
+	Reused     string
+	Similarity float64
+	Tried      int
 }
 
 // Generate compiles an artifact for source from page.
@@ -163,13 +183,26 @@ func (g *Generator) generate(ctx context.Context, source Source, page *Page, pre
 	reduction := g.reducer().Reduce(page)
 	report := Report{Reduction: reduction}
 
+	// Asked before the model is. A page with nothing on it cannot be read by
+	// any script, and the cheapest way to establish that is to look at the
+	// reduction rather than to spend three generations finding out.
+	if why, empty := barren(reduction); empty {
+		return Artifact{}, report, fmt.Errorf("%w for %s: %s", ErrNotExtractable, source.Name, why)
+	}
+
 	attempts := g.Attempts
 	if attempts <= 0 {
 		attempts = DefaultAttempts
 	}
 
-	// feedback carries the previous attempt's failure into the next prompt.
-	var feedback string
+	// next carries the previous attempt's failure into the following prompt.
+	var next retry
+
+	// tried remembers the scripts already rejected. The model answers at
+	// temperature zero, so a prompt it has effectively seen before produces the
+	// answer it gave before — and paying minutes to be told the same thing a
+	// third time is the one retry that can be known in advance to be useless.
+	tried := make(map[string]bool)
 
 	for number := 1; number <= attempts; number++ {
 		if err := ctx.Err(); err != nil {
@@ -177,7 +210,9 @@ func (g *Generator) generate(ctx context.Context, source Source, page *Page, pre
 		}
 
 		attempt := Attempt{Number: number}
-		prompt := g.userPrompt(source, reduction, previous, reason, feedback)
+		prompt := next.prompt(func() string {
+			return g.userPrompt(source, reduction, previous, reason, next.feedback)
+		})
 
 		answer, err := g.Model.Complete(ctx, systemPrompt, prompt)
 		if err != nil {
@@ -193,11 +228,23 @@ func (g *Generator) generate(ctx context.Context, source Source, page *Page, pre
 		attempt.Script, attempt.Notes = script, notes
 		if err != nil {
 			attempt.Problem = err.Error()
-			feedback = fmt.Sprintf("Your previous answer was rejected: %v\n"+
-				"Answer with the JSON object described above and nothing else.", err)
+			// A malformed envelope or a syntax error is a fault in the answer,
+			// not a misreading of the page, and the answer is all the model
+			// needs to fix it. Re-sending twenty thousand tokens of reduced
+			// page to have a missing brace closed is the whole prompt paid
+			// twice for a correction that never looks at it.
+			next = repair(answer, err)
 			report.Attempts = append(report.Attempts, attempt)
 			continue
 		}
+
+		digest := Digest(script)
+		if tried[digest] {
+			attempt.Problem = "the model answered with a script it has already had rejected"
+			report.Attempts = append(report.Attempts, attempt)
+			break
+		}
+		tried[digest] = true
 
 		// The trial. An artifact that cannot extract the very page it was
 		// written against is never stored, whatever it claims to do.
@@ -210,10 +257,10 @@ func (g *Generator) generate(ctx context.Context, source Source, page *Page, pre
 		switch {
 		case err != nil:
 			attempt.Problem = err.Error()
-			feedback = trialFeedback(err.Error(), nil, output.Console)
+			next = retry{feedback: trialFeedback(err.Error(), nil, output.Console)}
 		case assessment.Verdict != Pass:
 			attempt.Problem = fmt.Sprintf("trial graded %s", assessment.Verdict)
-			feedback = trialFeedback("", assessment.Findings, output.Console)
+			next = retry{feedback: trialFeedback("", assessment.Findings, output.Console)}
 		default:
 			report.Attempts = append(report.Attempts, attempt)
 			return Artifact{
@@ -221,6 +268,7 @@ func (g *Generator) generate(ctx context.Context, source Source, page *Page, pre
 				Version:     1,
 				Script:      script,
 				Fingerprint: Fingerprint(page),
+				Shape:       ShapeOf(page),
 				Provenance: Provenance{
 					Model:       modelName(g.Model),
 					Prompt:      PromptVersion,
@@ -236,7 +284,99 @@ func (g *Generator) generate(ctx context.Context, source Source, page *Page, pre
 	}
 
 	return Artifact{}, report, fmt.Errorf("%w for %s after %d attempts",
-		ErrGeneration, source.Name, attempts)
+		ErrGeneration, source.Name, len(report.Attempts))
+}
+
+// retry is what the next attempt is told, and how much has to be said to tell
+// it.
+//
+// The distinction it carries is between a script that read the page wrongly and
+// an answer that was not a script at all. The first needs the page again; the
+// second needs only the answer that was rejected, which the model wrote and
+// which contains its own mistake.
+type retry struct {
+	// feedback is appended to a full prompt.
+	feedback string
+	// whole replaces the prompt outright, for a correction that does not need
+	// the page.
+	whole string
+}
+
+// prompt returns what to send: the cheap correction where one will do, and
+// otherwise the full prompt the caller builds.
+func (r retry) prompt(full func() string) string {
+	if r.whole != "" {
+		return r.whole
+	}
+	return full()
+}
+
+// maxRepairedAnswer bounds how much of a rejected answer is quoted back. A
+// model that answered with an essay does not need all of it returned to be told
+// it was the wrong shape.
+const maxRepairedAnswer = 8000
+
+// repair asks for the same answer in the right shape, without the page.
+//
+// It is only ever used for a fault in the envelope or a syntax error in the
+// script, both of which are visible in the answer alone. Anything about what the
+// script extracted goes back through the full prompt, because fixing that means
+// looking at the page again.
+func repair(answer string, why error) retry {
+	// Nothing to repair. The prompts are single-shot — the model is not holding
+	// a conversation and has no memory of the page — so an answer with no code
+	// in it leaves it nothing to correct, and the next attempt has to show the
+	// page again.
+	if !strings.Contains(answer, "function") {
+		return retry{feedback: fmt.Sprintf("Your previous answer was rejected: %v\n"+
+			"Answer with the JSON object described above and nothing else.", why)}
+	}
+
+	var b strings.Builder
+	b.WriteString("Your previous answer was rejected: ")
+	b.WriteString(why.Error())
+	b.WriteString("\n\nIt was:\n\n")
+	b.WriteString(truncateRunes(strings.TrimSpace(answer), maxRepairedAnswer))
+	b.WriteString("\n\nSend the same extractor again as a single JSON object " +
+		"{\"script\": \"…\", \"notes\": \"…\"} and nothing else, with the fault above " +
+		"corrected. The page has not changed; do not rewrite the approach.")
+
+	return retry{whole: b.String()}
+}
+
+// minPromisingLines is how much reduced page counts as a page at all.
+//
+// A reduction is one line per element kept, so a document that survives in
+// fewer lines than this is a shell: html, head, title, a couple of wrapper
+// divs and the script tag that would have filled it in a browser.
+const minPromisingLines = 20
+
+// barren reports that a reduction holds nothing a script could extract from,
+// and why.
+//
+// The three signals are the three ways a page can carry records at all: links
+// to the things it lists, structured data declaring them, or enough markup for
+// repeated rows to live in. A page with none of the three is not a hard page —
+// it is an empty one, and the commonest cause is a listing that exists only
+// after client-side rendering, which this fetcher cannot see and no generated
+// script could read.
+//
+// Deliberately conservative: it must never refuse a page a model could have
+// compiled, because the cost of that is a source silently going unread, against
+// a saving of a few minutes.
+func barren(reduction Reduction) (string, bool) {
+	text := reduction.Text
+	switch {
+	case strings.Contains(text, "href="):
+		return "", false
+	case strings.Contains(text, "ld+json"):
+		return "", false
+	case strings.Count(text, "\n")+1 >= minPromisingLines:
+		return "", false
+	}
+	return fmt.Sprintf("it reduced to %d bytes with no links and no structured data, "+
+		"which is what a page rendered entirely by JavaScript looks like to a fetcher",
+		reduction.ReducedBytes), true
 }
 
 // trial runs a candidate script against the page it was written from and

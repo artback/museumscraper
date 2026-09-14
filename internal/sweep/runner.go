@@ -43,6 +43,16 @@ type Target struct {
 	ETag         string
 	LastModified string
 
+	// ListingPages and PermanentPages are every page the last successful read
+	// took exhibitions from, so this one can go straight to them instead of
+	// finding them from the home page again.
+	ListingPages   []string
+	PermanentPages []string
+
+	// DiscoveredAt is when those pages were last found rather than replayed.
+	// See RediscoverAfter.
+	DiscoveredAt time.Time
+
 	// Fingerprint digests what the last successful read produced.
 	Fingerprint string
 
@@ -63,7 +73,28 @@ type Record struct {
 	ListingURL   string
 	ETag         string
 	LastModified string
+
+	ListingPages   []string
+	PermanentPages []string
+	// Discovered says the pages above were found rather than replayed, and is
+	// what moves the site's rediscovery clock on.
+	Discovered bool
 }
+
+// RediscoverAfter is how long a site's known pages are replayed before the home
+// page is read again.
+//
+// Replaying is what makes a steady site cost one request instead of two, and
+// the home page is the only thing that would ever say the site has added a page
+// — a permanent-displays page beside a listing page that still works, say.
+// Without a bound, a site discovered once would be read through that one
+// discovery for the rest of its life.
+//
+// A quarter is chosen against what the alternative costs: one extra request per
+// site per quarter, against one per site per sweep. A site that reorganises more
+// drastically than this is caught sooner and for nothing, because a listing page
+// that no longer lists anything current falls through to discovery on the spot.
+const RediscoverAfter = 90 * 24 * time.Hour
 
 // Store is what reading a site needs from the database.
 type Store interface {
@@ -107,10 +138,15 @@ func (r *Runner) Read(ctx context.Context, target Target) Report {
 	// retire listings found early in a slow read.
 	startedAt := time.Now()
 
-	result, err := r.scraper.ForSite(ctx, target.Museum, exhibitions.Known{
+	known := exhibitions.Known{
 		ListingURL: target.ListingURL,
 		Validators: exhibitions.Validators{ETag: target.ETag, LastModified: target.LastModified},
-	})
+	}
+	if startedAt.Sub(target.DiscoveredAt) < RediscoverAfter {
+		known.ListingPages, known.PermanentPages = target.ListingPages, target.PermanentPages
+	}
+
+	result, err := r.scraper.ForSite(ctx, target.Museum, known)
 
 	outcome := Changed
 	record := Record{Site: target.Site}
@@ -141,6 +177,7 @@ func (r *Runner) Read(ctx context.Context, target Target) Report {
 			log.Printf("sweep: %s: %v", target.Site, err)
 		}
 		record.ListingURL, record.ETag, record.LastModified = target.ListingURL, target.ETag, target.LastModified
+		record.ListingPages, record.PermanentPages = target.ListingPages, target.PermanentPages
 		record.Fingerprint = target.Fingerprint
 	default:
 		record.Fingerprint = Fingerprint(result.Exhibitions)
@@ -149,6 +186,8 @@ func (r *Runner) Read(ctx context.Context, target Target) Report {
 		}
 		record.ListingURL = result.ListingURL
 		record.ETag, record.LastModified = result.Validators.ETag, result.Validators.LastModified
+		record.ListingPages, record.PermanentPages = result.ListingPages, result.PermanentPages
+		record.Discovered = result.Discovered
 	}
 
 	report := Report{Site: target.Site, Outcome: outcome}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,22 @@ func (m *memory) CurrentArtifact(_ context.Context, source string) (extract.Arti
 		return extract.Artifact{}, fmt.Errorf("%w: %s", ErrNoArtifact, source)
 	}
 	return versions[len(versions)-1], nil
+}
+
+func (m *memory) CurrentArtifacts(context.Context) ([]extract.Artifact, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var current []extract.Artifact
+	for _, versions := range m.artifacts {
+		if len(versions) > 0 {
+			current = append(current, versions[len(versions)-1])
+		}
+	}
+	slices.SortFunc(current, func(a, b extract.Artifact) int {
+		return strings.Compare(a.Source, b.Source)
+	})
+	return current, nil
 }
 
 func (m *memory) SaveArtifact(_ context.Context, artifact extract.Artifact) error {

@@ -108,6 +108,11 @@ type ExhibitionFallback struct {
 	// minutes each, and a nightly batch would never finish. Compiling a few
 	// per run means the coverage grows over a fortnight instead, which is the
 	// right trade for a job that runs every night anyway.
+	//
+	// It counts generations, not sources. A site whose extractor was adopted
+	// from a structurally identical one, and a page the generator refused as
+	// having nothing on it, both give their claim back — neither spent a
+	// minute in the model, which is the thing being rationed.
 	MaxCompiles int
 
 	// Now supplies the current time. Nil means time.Now.
@@ -218,7 +223,7 @@ func (f *ExhibitionFallback) define(ctx context.Context, name, site string) (ext
 		return extract.Source{}, err
 	}
 
-	log.Printf("harvest: compiling a first extractor for %s (%s)", name, site)
+	log.Printf("harvest: %s (%s) has no extractor; looking for a stored one that fits before generating", name, site)
 	artifact, report, err := f.Harvester.Compile(ctx, source)
 
 	// Two museums on one domain can reach this together — uniqueBySite folds
@@ -231,6 +236,15 @@ func (f *ExhibitionFallback) define(ctx context.Context, name, site string) (ext
 		return source, nil
 	}
 	if err != nil {
+		// A page with nothing on it cost no model time, so it costs no budget
+		// either. The cap exists to bound how many minutes of generation one
+		// run spends; spending a slot on a site the generator refused without
+		// asking the model would let a handful of JavaScript-rendered sites
+		// starve every compilable site behind them.
+		if errors.Is(err, extract.ErrNotExtractable) {
+			f.releaseCompile()
+		}
+
 		// The source is left defined even though compiling failed, so that the
 		// operator can see it, inspect the attempts, and retry by hand rather
 		// than having to rediscover which sites were tried.
@@ -241,8 +255,18 @@ func (f *ExhibitionFallback) define(ctx context.Context, name, site string) (ext
 			name, len(report.Attempts), report.Reduction, err)
 	}
 
-	log.Printf("harvest: %s compiled to v%d after %d attempts",
-		name, artifact.Version, artifact.Provenance.Attempts)
+	if artifact.Provenance.ReusedFrom != "" {
+		// Like a refusal, an adoption cost no generation, so it costs no
+		// budget. The cap is there to stop one run spending an hour in the
+		// model; a run that meets eighty sites built from one template should
+		// come back with eighty extractors and one generation.
+		f.releaseCompile()
+		log.Printf("harvest: %s reused %s's extractor (%.2f alike), nothing generated",
+			name, artifact.Provenance.ReusedFrom, artifact.Provenance.Similarity)
+	} else {
+		log.Printf("harvest: %s compiled to v%d after %d attempts",
+			name, artifact.Version, artifact.Provenance.Attempts)
+	}
 	return source, nil
 }
 
@@ -262,6 +286,15 @@ func (f *ExhibitionFallback) claimCompile() bool {
 	}
 	f.compiled++
 	return true
+}
+
+// releaseCompile gives a claimed unit of the budget back.
+func (f *ExhibitionFallback) releaseCompile() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.compiled > 0 {
+		f.compiled--
+	}
 }
 
 func (f *ExhibitionFallback) budget() int {

@@ -35,6 +35,9 @@ type Archive interface {
 	Sources(ctx context.Context) ([]extract.Source, error)
 	LastRunAt(ctx context.Context, source string) (time.Time, bool, error)
 	CurrentArtifact(ctx context.Context, source string) (extract.Artifact, error)
+	// CurrentArtifacts is every source's newest artifact, for deciding whether
+	// one of them already reads a page this harness has never seen.
+	CurrentArtifacts(ctx context.Context) ([]extract.Artifact, error)
 	SaveArtifact(ctx context.Context, artifact extract.Artifact) error
 	AppendRun(ctx context.Context, run extract.Run) error
 	Runs(ctx context.Context, source string, limit int) ([]extract.Run, error)
@@ -72,6 +75,10 @@ type Harvester struct {
 
 	// Now supplies the current time. Nil means time.Now.
 	Now func() time.Time
+
+	// reuse holds the artifacts a compile looks through for one already
+	// written against this page's shape. See reuse.go.
+	reuse reuseCache
 }
 
 // Outcome is everything one run of one source did, in the detail an operator
@@ -128,26 +135,28 @@ func (h *Harvester) generator() *extract.Generator {
 	return &aligned
 }
 
-// Draft generates a source's first artifact without storing it.
+// Draft produces a source's first artifact without storing it.
 //
 // The artifact has already been run against the page that produced it and has
 // passed validation before this returns — that check is not what Draft
 // withholds. What it withholds is the write, so that an interactive caller can
-// show an operator what was generated and get an answer before anything is
+// show an operator what was produced and get an answer before anything is
 // committed.
+//
+// Like the unattended path it reuses before it generates, and the operator sees
+// which happened: an adopted artifact records the source it came from and how
+// alike the two pages are, on the screen where the script is approved.
 func (h *Harvester) Draft(ctx context.Context, source extract.Source) (extract.Artifact, extract.Report, error) {
-	if h.Generator == nil {
-		return extract.Artifact{}, extract.Report{}, ErrNoGenerator
-	}
-
 	page, err := h.fetch(ctx, source.URL)
 	if err != nil {
 		return extract.Artifact{}, extract.Report{}, err
 	}
-	return h.generator().Generate(ctx, source, page)
+	return h.compile(ctx, source, page)
 }
 
-// Compile generates a source's first artifact and stores it.
+// Compile gives a source its first artifact and stores it — by reusing one
+// written for a structurally identical site where there is one, and by
+// generating otherwise.
 //
 // This is the unattended path, used where there is no operator to ask — the
 // exhibitions fallback meeting a site it has never seen. Interactive callers
@@ -160,7 +169,28 @@ func (h *Harvester) Compile(ctx context.Context, source extract.Source) (extract
 	if err := h.Store.SaveArtifact(ctx, artifact); err != nil {
 		return extract.Artifact{}, report, err
 	}
+
+	// Stored, and therefore offerable: the generation this run just paid for is
+	// the next sibling's reuse. Remembered here rather than where it was
+	// produced, because an artifact a caller decided not to keep — Draft's whole
+	// purpose — must not be handed to another site as though it were in the
+	// store.
+	h.remember(artifact)
 	return artifact, report, nil
+}
+
+// compile is Compile without the write, so that the reuse attempt and the
+// generation are one decision with one report rather than two entry points that
+// could diverge.
+func (h *Harvester) compile(ctx context.Context, source extract.Source, page *extract.Page) (extract.Artifact, extract.Report, error) {
+	if artifact, report, ok := h.adopt(ctx, source, page); ok {
+		return artifact, report, nil
+	}
+	if h.Generator == nil {
+		return extract.Artifact{}, extract.Report{}, ErrNoGenerator
+	}
+
+	return h.generator().Generate(ctx, source, page)
 }
 
 // Regenerate produces a replacement artifact without storing it.
@@ -286,7 +316,7 @@ func (h *Harvester) heal(
 
 	log.Printf("harvest: healing %s from v%d — %s", source.Name, broken.Version, why)
 
-	healed, report, err := h.generator().Heal(ctx, source, page, broken, why)
+	healed, report, err := h.repair(ctx, source, page, broken, why)
 	outcome.Report = &report
 	if err != nil {
 		outcome = h.quarantine(ctx, source, outcome,
@@ -320,6 +350,10 @@ func (h *Harvester) heal(
 		return assessment, run, outcome
 	}
 
+	// The repaired script is what a sibling should be offered, not the one that
+	// stopped working.
+	h.remember(healed)
+
 	outcome.Healed = &healed
 	run.Healed, run.HealedTo, run.Version = true, healed.Version, healed.Version
 	run.Verdict = revalidated.Verdict
@@ -329,6 +363,28 @@ func (h *Harvester) heal(
 	log.Printf("harvest: %s healed to v%d, now extracting %d records",
 		source.Name, healed.Version, len(revalidated.Records))
 	return revalidated, run, outcome
+}
+
+// repair produces a replacement artifact: by adoption where some other site's
+// extractor already reads the page as it now is, and by regeneration otherwise.
+//
+// A redesign is the case reuse was built for and the one it is easiest to miss.
+// A CMS vendor rolls a new theme out to every site it hosts over a month, and
+// every one of those sites breaks in the same way and is healed separately — so
+// the fleet-wide event that costs the most model time is exactly the one where
+// all the pages are identical again afterwards. The first site healed pays for
+// the rest.
+func (h *Harvester) repair(ctx context.Context, source extract.Source, page *extract.Page, broken extract.Artifact, why string) (extract.Artifact, extract.Report, error) {
+	if adopted, report, ok := h.adopt(ctx, source, page); ok {
+		adopted.Version = broken.Version + 1
+		adopted.Parent = broken.Version
+		adopted.Reason = why
+		return adopted, report, nil
+	}
+	if h.Generator == nil {
+		return extract.Artifact{}, extract.Report{}, ErrNoGenerator
+	}
+	return h.generator().Heal(ctx, source, page, broken, why)
 }
 
 // quarantine pauses a source and records why, so it stops costing anything

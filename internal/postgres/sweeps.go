@@ -28,6 +28,7 @@ const targetColumns = `
        ST_Y(m.location::geometry), ST_X(m.location::geometry),
        coalesce(s.listing_url,''), coalesce(s.etag,''), coalesce(s.last_modified,''),
        coalesce(s.fingerprint,''),
+       coalesce(s.listing_pages,'{}'), coalesce(s.permanent_pages,'{}'), s.discovered_at,
        s.interval_hours, s.consecutive_failures,
        (s.last_success_at IS NULL) AS never_read,
        -- Whether this site has ever produced an exhibition. last_change_at is
@@ -167,6 +168,7 @@ func scanTargets(rows pgx.Rows) ([]sweep.Target, error) {
 		var (
 			site          sweep.Target
 			lat, lon      *float64
+			discoveredAt  *time.Time
 			intervalHours float64
 			failures      int
 			everListed    bool
@@ -175,9 +177,13 @@ func scanTargets(rows pgx.Rows) ([]sweep.Target, error) {
 			&site.Museum.Locality, &site.Museum.Website, &site.Museum.WikidataID,
 			&lat, &lon,
 			&site.ListingURL, &site.ETag, &site.LastModified, &site.Fingerprint,
+			&site.ListingPages, &site.PermanentPages, &discoveredAt,
 			&intervalHours, &failures, &site.NeverRead, &everListed,
 		); err != nil {
 			return nil, fmt.Errorf("scan site: %w", err)
+		}
+		if discoveredAt != nil {
+			site.DiscoveredAt = *discoveredAt
 		}
 		if lat != nil && lon != nil {
 			site.Museum.Latitude, site.Museum.Longitude = *lat, *lon
@@ -218,12 +224,15 @@ func (s *Store) RecordScrape(ctx context.Context, record sweep.Record, now time.
 INSERT INTO site_scrapes (site, last_attempt_at, last_success_at, last_change_at,
                           listing_url, etag, last_modified, fingerprint,
                           found_count, consecutive_failures,
-                          interval_hours, next_due_at, due_reason, parked_reason)
+                          interval_hours, next_due_at, due_reason, parked_reason,
+                          listing_pages, permanent_pages, discovered_at)
 VALUES ($1, $2::timestamptz,
         CASE WHEN $3::boolean THEN $2::timestamptz ELSE NULL END,
         CASE WHEN $4::boolean THEN $2::timestamptz ELSE NULL END,
         nullif($5,''), nullif($6,''), nullif($7,''), nullif($8,''),
-        $9, $10, $11, $12, $13, nullif($14,''))
+        $9, $10, $11, $12, $13, nullif($14,''),
+        nullif($15::text[],'{}'::text[]), nullif($16::text[],'{}'::text[]),
+        CASE WHEN $17::boolean THEN $2::timestamptz ELSE NULL END)
 ON CONFLICT (site) DO UPDATE SET
     last_attempt_at = EXCLUDED.last_attempt_at,
     last_success_at = coalesce(EXCLUDED.last_success_at, site_scrapes.last_success_at),
@@ -239,7 +248,16 @@ ON CONFLICT (site) DO UPDATE SET
     interval_hours = EXCLUDED.interval_hours,
     next_due_at    = EXCLUDED.next_due_at,
     due_reason     = EXCLUDED.due_reason,
-    parked_reason  = EXCLUDED.parked_reason`
+    parked_reason  = EXCLUDED.parked_reason,
+    -- Discovery is the authority on where a site's listings live, so a read
+    -- that ran it writes what it found even when that is nothing: a site whose
+    -- permanent page has gone must stop being asked for it. Every other read
+    -- either replayed those pages or never got to them, and keeps the answer.
+    listing_pages   = CASE WHEN $17::boolean THEN EXCLUDED.listing_pages
+                          ELSE coalesce(EXCLUDED.listing_pages, site_scrapes.listing_pages) END,
+    permanent_pages = CASE WHEN $17::boolean THEN EXCLUDED.permanent_pages
+                          ELSE coalesce(EXCLUDED.permanent_pages, site_scrapes.permanent_pages) END,
+    discovered_at   = coalesce(EXCLUDED.discovered_at, site_scrapes.discovered_at)`
 
 	// An excluded site was not read, so it has no success to record; naming the
 	// outcomes that count as one keeps a new outcome from silently joining
@@ -256,7 +274,8 @@ ON CONFLICT (site) DO UPDATE SET
 		record.Site, now, succeeded, changed,
 		record.ListingURL, record.ETag, record.LastModified, record.Fingerprint,
 		record.FoundCount, record.Plan.ConsecutiveFailures,
-		record.Plan.Interval.Hours(), record.Plan.DueAt, record.Plan.Reason, parked)
+		record.Plan.Interval.Hours(), record.Plan.DueAt, record.Plan.Reason, parked,
+		record.ListingPages, record.PermanentPages, record.Discovered)
 	if err != nil {
 		return fmt.Errorf("record scrape for %s: %w", record.Site, err)
 	}

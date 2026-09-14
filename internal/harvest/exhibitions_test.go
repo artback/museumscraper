@@ -173,6 +173,24 @@ func TestCompileBudget(t *testing.T) {
 	}
 }
 
+// TestCompileBudgetIsNotSpentOnAPageWithNothingOnIt: the cap bounds how many
+// minutes of generation one run spends, and a page the generator refuses
+// without asking the model spends none of them. Charging for it would let a
+// handful of JavaScript-rendered sites starve every compilable site behind
+// them, run after run, since they are exactly the sites that keep coming back.
+func TestCompileBudgetIsNotSpentOnAPageWithNothingOnIt(t *testing.T) {
+	fallback := &ExhibitionFallback{MaxCompiles: 1}
+
+	if !fallback.claimCompile() {
+		t.Fatal("claimCompile() refused the first compile")
+	}
+	fallback.releaseCompile()
+
+	if !fallback.claimCompile() {
+		t.Error("the budget was not given back for a compile that never reached the model")
+	}
+}
+
 func TestSourceDurationRoundTrips(t *testing.T) {
 	// A stored source is meant to be read by a person, so its cadence has to
 	// survive a round trip as "24h" rather than as a count of nanoseconds.

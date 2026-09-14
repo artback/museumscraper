@@ -126,8 +126,12 @@ func TestGenerateNeverStoresAnArtifactThatFailsItsOwnPage(t *testing.T) {
 	if !errors.Is(err, ErrGeneration) {
 		t.Fatalf("Generate(placeholder-only artifact) error = %v, want ErrGeneration", err)
 	}
-	if len(report.Attempts) != DefaultAttempts {
-		t.Errorf("Generate() made %d attempts, want %d", len(report.Attempts), DefaultAttempts)
+	// Two, not three. The model answers at temperature zero and answered the
+	// second prompt with the script the first one was rejected for, so the
+	// third generation is known in advance to produce it again. See
+	// TestGenerateStopsWhenTheModelRepeatsItself.
+	if len(report.Attempts) != 2 {
+		t.Errorf("Generate() made %d attempts, want 2", len(report.Attempts))
 	}
 
 	findings := strings.Join(report.Attempts[0].Findings, "; ")
@@ -158,6 +162,127 @@ func TestGenerateRetriesOnBadEnvelope(t *testing.T) {
 	}
 	if len(report.Attempts) != 2 || report.Attempts[0].Problem == "" {
 		t.Errorf("Report.Attempts = %+v, want the first attempt recorded as rejected", report.Attempts)
+	}
+}
+
+// TestRepairingAnEnvelopeDoesNotResendThePage is the token half of the retry.
+//
+// A malformed envelope or an unparseable script is a fault in the answer, and
+// the answer is where the fix is. Re-sending the reduced page — the largest
+// thing in the prompt by an order of magnitude — to have a missing brace closed
+// pays the whole prompt twice for a correction that never looks at it.
+func TestRepairingAnEnvelopeDoesNotResendThePage(t *testing.T) {
+	model := &scriptedModel{answers: []string{
+		"Sure! Here's a script that extracts the entries:\n\n```js\nfunction extract(d){}\n```",
+		envelope(t, listingScript),
+	}}
+
+	if _, _, err := testGenerator(model).Generate(
+		context.Background(), listingSource(), testPage(t, listingPage)); err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	if len(model.prompts) != 2 {
+		t.Fatalf("model was prompted %d times, want 2", len(model.prompts))
+	}
+	if strings.Contains(model.prompts[1], "li.listing") ||
+		strings.Contains(model.prompts[1], "structurally reduced") {
+		t.Error("the repair prompt carried the reduced page, which it does not need")
+	}
+	if !strings.Contains(model.prompts[1], "function extract(d){}") {
+		t.Error("the repair prompt did not quote back the answer it is asking to be corrected")
+	}
+	if len(model.prompts[1]) >= len(model.prompts[0]) {
+		t.Errorf("repair prompt is %d bytes against the first prompt's %d; it should be the cheaper one",
+			len(model.prompts[1]), len(model.prompts[0]))
+	}
+}
+
+// TestRepairFallsBackToTheFullPromptWithNothingToRepair covers the other half:
+// the prompts are single-shot, so a model that answered with no code at all has
+// nothing of its own to correct and must be shown the page again.
+func TestRepairFallsBackToTheFullPromptWithNothingToRepair(t *testing.T) {
+	model := &scriptedModel{answers: []string{
+		"I'm sorry, I can't help with that.",
+		envelope(t, listingScript),
+	}}
+
+	if _, _, err := testGenerator(model).Generate(
+		context.Background(), listingSource(), testPage(t, listingPage)); err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(model.prompts) != 2 || !strings.Contains(model.prompts[1], "structurally reduced") {
+		t.Error("the second prompt did not show the page to a model that had never been given it")
+	}
+}
+
+// TestGenerateStopsWhenTheModelRepeatsItself is the attempt half.
+//
+// Generation runs at temperature zero precisely so that an artifact is
+// reproducible, and the consequence is that a model given feedback it does not
+// act on answers identically. That third generation is minutes on a Pi and its
+// result is known before it starts.
+func TestGenerateStopsWhenTheModelRepeatsItself(t *testing.T) {
+	const wrong = `function extract(document) { return [{title: "Find out more", url: "/x"}]; }`
+
+	model := &scriptedModel{answers: []string{
+		envelope(t, wrong), envelope(t, wrong), envelope(t, wrong),
+	}}
+
+	_, report, err := testGenerator(model).Generate(
+		context.Background(), listingSource(), testPage(t, listingPage))
+	if !errors.Is(err, ErrGeneration) {
+		t.Fatalf("Generate() error = %v, want ErrGeneration", err)
+	}
+
+	if len(model.prompts) != 2 {
+		t.Errorf("model was prompted %d times, want 2 — the repeat should not have been asked for a third time",
+			len(model.prompts))
+	}
+	last := report.Attempts[len(report.Attempts)-1]
+	if !strings.Contains(last.Problem, "already had rejected") {
+		t.Errorf("last attempt problem = %q, want the repeat named", last.Problem)
+	}
+}
+
+// TestGenerateRefusesAPageWithNothingOnIt is the cheapest saving there is: not
+// asking. A site rendered entirely by JavaScript answers this fetcher with a
+// shell, and three generations against a shell produce three scripts that
+// select nothing, at minutes each.
+func TestGenerateRefusesAPageWithNothingOnIt(t *testing.T) {
+	const shell = `<!doctype html><html><head><title>Museum</title></head>
+<body><div id="root"></div><script src="/app.js"></script></body></html>`
+
+	model := &scriptedModel{answers: []string{envelope(t, listingScript)}}
+
+	_, report, err := testGenerator(model).Generate(
+		context.Background(), listingSource(), testPage(t, shell))
+
+	if !errors.Is(err, ErrNotExtractable) {
+		t.Fatalf("Generate(empty shell) error = %v, want ErrNotExtractable", err)
+	}
+	if len(model.prompts) != 0 {
+		t.Errorf("the model was asked %d times about a page with nothing on it, want 0", len(model.prompts))
+	}
+	if len(report.Attempts) != 0 {
+		t.Errorf("Report.Attempts = %+v, want none recorded", report.Attempts)
+	}
+	// The reduction is still reported: it is the evidence for the refusal.
+	if report.Reduction.OriginalBytes == 0 {
+		t.Error("Report.Reduction was not filled in, so the refusal cannot be reviewed")
+	}
+}
+
+// TestGenerateAcceptsASparsePageThatStillHasLinks guards the other direction.
+// The refusal above must never turn away a page a model could have compiled:
+// a small listing is a normal page, not an empty one.
+func TestGenerateAcceptsASparsePageThatStillHasLinks(t *testing.T) {
+	const sparse = `<!doctype html><html><head><title>Museum</title></head><body>
+<a href="/utstallning/ljus">Ljus</a><time datetime="2026-09-01">1 sep</time>
+</body></html>`
+
+	if _, empty := barren(NewReducer().Reduce(testPage(t, sparse))); empty {
+		t.Error("a page with a dated link was refused as having nothing on it")
 	}
 }
 

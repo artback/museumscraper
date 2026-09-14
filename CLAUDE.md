@@ -73,6 +73,14 @@ HARVEST_BUCKET_NAME=museum-harvest                 # defaults to $MUSEUM_BUCKET_
 Generation is slow — minutes for one page on the Pi — and it is meant to be.
 Nothing on the steady-state path touches the model.
 
+A site is not always compiled. Before generating, the harness looks for a stored
+extractor whose page is structurally the same (`extract.ReuseThreshold`), runs it
+against this page and validates the result; a corpus of museum websites is full
+of one CMS theme sold to eighty institutions. Two consequences worth knowing:
+two sources can hold identical scripts, and healing one does not touch the other
+— each is a separate artifact under its own name, and `harvest show` prints
+`reused_from` for the ones that arrived this way.
+
 Generated scripts get a standard library on the global `museum` (see
 `internal/harvest/library.go`). `museum.dates` is the same
 `exhibitions.ParseDateRange` the hand-written scraper uses, so **improving it
@@ -82,7 +90,7 @@ the library must stay a pure function: it is installed into the sandbox, and a
 helper that fetched or wrote anything would undo the isolation the whole design
 rests on.
 
-## Five things that will bite you
+## Six things that will bite you
 
 **The Pi is arm64.** Any image the job references must be too. `postgis/postgis`
 publishes amd64 only and simply will not run there; `imresamu/postgis` is the
@@ -110,6 +118,15 @@ the bucket carrying the notification would queue Nominatim calls for objects
 that are not museums at all — the same failure as seeding without
 `seed_mode`, arrived at from a different direction. `HARVEST_BUCKET_NAME`
 defaults to a separate bucket, and should stay one.
+
+**A change to listing discovery does not reach swept sites for a quarter.** A
+site whose listings were found once is re-read by replaying those pages, so the
+home page — and with it every discovery heuristic — is skipped until
+`sweep.RediscoverAfter` (90 days) has passed. Improving `candidateListingURLs`
+or the home-page link scoring therefore shows up on new sites immediately and on
+the existing catalogue slowly. To measure a change now, clear `discovered_at`:
+`UPDATE site_scrapes SET discovered_at = NULL` puts every site back through full
+discovery on its next read, at one extra request each.
 
 **Tasks in a Nomad group share a network namespace.** A task reaching a sibling
 through the host's published port hairpins back into its own namespace and never

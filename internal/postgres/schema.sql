@@ -357,8 +357,32 @@ CREATE TABLE IF NOT EXISTS site_scrapes (
 
     -- Set when a site has failed too often to keep paying for. Null while it
     -- is still in the rotation.
-    parked_reason text
+    parked_reason text,
+
+    -- Every page the last successful read took exhibitions from, so the next
+    -- read can go straight to them rather than finding them from the home page
+    -- again. Separated by how they have to be read: a page a home page labelled
+    -- "Fasta utställningar" lists entries that never repeat the claim, and read
+    -- as an ordinary listing every one of them is dropped for having no dates.
+    --
+    -- This is where most of a sweep's traffic went. Discovery costs a home page
+    -- and then the listing page, and it re-answered a question — which page
+    -- holds the programme — that a site changes far more rarely than it changes
+    -- the programme itself.
+    listing_pages   text[],
+    permanent_pages text[],
+
+    -- When those pages were last found rather than replayed, so replaying is
+    -- bounded. See sweep.RediscoverAfter.
+    discovered_at timestamptz
 );
+
+-- Columns added after the table was first deployed. The schema is applied on
+-- every start, so a fresh database gets them from the definition above and an
+-- existing one gets them here.
+ALTER TABLE site_scrapes ADD COLUMN IF NOT EXISTS listing_pages   text[];
+ALTER TABLE site_scrapes ADD COLUMN IF NOT EXISTS permanent_pages text[];
+ALTER TABLE site_scrapes ADD COLUMN IF NOT EXISTS discovered_at   timestamptz;
 
 -- The sweep's only selection query: what is due, soonest first.
 CREATE INDEX IF NOT EXISTS site_scrapes_due_idx
